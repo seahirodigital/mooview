@@ -186,6 +186,16 @@ export default function App() {
   const [networkLatency, setNetworkLatency] = useState(24);
   const [lastApiSyncTime, setLastApiSyncTime] = useState(new Date().toLocaleTimeString());
 
+  // --- MOOMOO API (FUTU OPEND) CONFIG AND STATE ---
+  const [moomooOpenDUrl, setMoomooOpenDUrl] = useState<string>(() => {
+    return localStorage.getItem('moomoo_opend_url') || 'ws://127.0.0.1:33333';
+  });
+  const [moomooStatus, setMoomooStatus] = useState<'disconnected' | 'connected' | 'connecting' | 'error'>('disconnected');
+  const [moomooError, setMoomooError] = useState<string | null>(null);
+  const [moomooRealTimeActive, setMoomooRealTimeActive] = useState<boolean>(() => {
+    return localStorage.getItem('moomoo_active') === 'true';
+  });
+
   // --- PERSISTENCE EFFECT WRITERS ---
   useEffect(() => {
     localStorage.setItem('tv_dashboard_tickers', JSON.stringify(tickers));
@@ -199,15 +209,118 @@ export default function App() {
     localStorage.setItem('tv_dashboard_indicators', JSON.stringify(indicatorDatabase));
   }, [indicatorDatabase]);
 
+  useEffect(() => {
+    localStorage.setItem('moomoo_opend_url', moomooOpenDUrl);
+  }, [moomooOpenDUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
+  }, [moomooRealTimeActive]);
+
+  // Handshake function to trigger connection testing to the user's running FutuOpenD
+  const checkMoomooStatus = async (targetUrl = moomooOpenDUrl) => {
+    if (!moomooRealTimeActive) {
+      setMoomooStatus('disconnected');
+      return;
+    }
+    setMoomooStatus('connecting');
+    try {
+      const res = await fetch('/api/moomoo/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ opend_url: targetUrl })
+      });
+      const data = await res.json();
+      if (data.connected) {
+        setMoomooStatus('connected');
+        setMoomooError(null);
+      } else {
+        setMoomooStatus('error');
+        setMoomooError(data.error || 'Connection failed.');
+      }
+    } catch (e) {
+      setMoomooStatus('error');
+      setMoomooError('Failed to communicate with Express proxy server.');
+    }
+  };
+
+  // --- REAL MOOMOO DATA FETCH MECHANISM ---
+  // When active, intercepts the candle caching process, requesting authentic candles from Node.js FutuOpenD proxy
+  useEffect(() => {
+    if (!moomooRealTimeActive) return;
+
+    const fetchMoomooCandles = async () => {
+      let anyErrorOccured = false;
+      const updatedCache = { ...candlesCache };
+
+      for (const p of panels) {
+        const key = `${p.symbol}-${p.timeframe}`;
+        try {
+          const res = await fetch('/api/moomoo/kline', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              symbol: p.symbol,
+              timeframe: p.timeframe,
+              opend_url: moomooOpenDUrl,
+              reqNum: 150
+            })
+          });
+          const data = await res.json();
+          if (data.success && data.candles && data.candles.length > 0) {
+            updatedCache[key] = data.candles;
+          } else {
+            console.warn(`Moomoo API K-Line failed for ${key}, falling back to generator`, data.error);
+          }
+
+          // Comparison overlays
+          if (p.comparisonSymbols) {
+            for (const compSym of p.comparisonSymbols) {
+              const compKey = `${compSym}-${p.timeframe}`;
+              const compRes = await fetch('/api/moomoo/kline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  symbol: compSym,
+                  timeframe: p.timeframe,
+                  opend_url: moomooOpenDUrl,
+                  reqNum: 150
+                })
+              });
+              const compData = await compRes.json();
+              if (compData.success && compData.candles && compData.candles.length > 0) {
+                updatedCache[compKey] = compData.candles;
+              }
+            }
+          }
+        } catch (e) {
+          anyErrorOccured = true;
+          console.error(`Moomoo API communication failed:`, e);
+        }
+      }
+
+      setCandlesCache(updatedCache);
+    };
+
+    fetchMoomooCandles();
+    checkMoomooStatus();
+
+  }, [panels, moomooRealTimeActive, tickTrigger, moomooOpenDUrl]);
+
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
-  // Periodically triggers slight ticks and appends volume data, creating a living moomoo quotations feed
+  // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
   useEffect(() => {
     const interval = setInterval(() => {
       setTickTrigger(prev => prev + 1);
-      setNetworkLatency(Math.floor(15 + Math.random() * 20));
+      setNetworkLatency(moomooRealTimeActive ? 12 : Math.floor(15 + Math.random() * 20));
       setLastApiSyncTime(new Date().toLocaleTimeString());
       
-      // Select a random panel to update live price slightly
+      if (moomooRealTimeActive) {
+        // If we connect to Moomoo, we already fetch real data in the fetcher effect.
+        return;
+      }
+
+      // Simulated ticks fallback when moomoo connection is disabled/offline
       if (panels.length === 0) return;
       const rIdx = Math.floor(Math.random() * panels.length);
       const targetPanel = panels[rIdx];
@@ -243,7 +356,7 @@ export default function App() {
     }, 3500);
 
     return () => clearInterval(interval);
-  }, [panels]);
+  }, [panels, moomooRealTimeActive]);
 
   // --- HISTORICAL CANDLE GENERATOR RESOLVER ---
   // Resolves and caches candles for any active combinations of symbol & timeframe (and comparison overlay symbols)
@@ -544,6 +657,20 @@ export default function App() {
         
         {/* Right header actions */}
         <div className="flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
+          <div className="flex items-center space-x-1.5 bg-[#141624] px-2.5 py-1 rounded border border-[#21263d] text-[10px]">
+            <span className={`inline-block w-2 h-2 rounded-full ${
+              moomooStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
+              moomooStatus === 'connecting' ? 'bg-yellow-400 animate-pulse' :
+              moomooStatus === 'error' ? 'bg-red-400' : 'bg-gray-500'
+            }`} />
+            <span className="text-[#a0a5b5] font-bold">
+              moomoo API: {
+                moomooStatus === 'connected' ? '接続中' :
+                moomooStatus === 'connecting' ? '接続中...' :
+                moomooStatus === 'error' ? '接続エラー' : 'デモモード'
+              }
+            </span>
+          </div>
           <div className="flex items-center space-x-1 font-mono">
             <span>最新同期: <b className="text-[#d1d4dc]">{lastApiSyncTime}</b></span>
           </div>
@@ -838,6 +965,79 @@ export default function App() {
         {/* Right-hand Sidebar - Collapsible & Default Closed */}
         <div className={`transition-all duration-300 ease-in-out shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] p-4 flex flex-col overflow-y-auto ${sidebarOpen ? 'w-full md:w-[350px]' : 'w-0 !p-0 !border-l-0 overflow-hidden'}`}>
           
+          {/* 0. MOOMOO OPENAPI (FUTU OPEND) SYNC CONFIG */}
+          <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d] flex flex-col space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-200 text-xs tracking-wider uppercase flex items-center space-x-1.5">
+                <Database className="w-4 h-4 text-orange-400" />
+                <span>moomoo API 接続設定</span>
+              </span>
+              <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wide ${
+                moomooStatus === 'connected' ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-900' :
+                moomooStatus === 'connecting' ? 'bg-amber-950/80 text-amber-300 border border-amber-900 animate-pulse' :
+                moomooStatus === 'error' ? 'bg-red-950/80 text-red-300 border border-red-900' :
+                'bg-gray-900 text-gray-400 border border-gray-800'
+              }`}>
+                {moomooStatus === 'connected' && '● 接続完了 (本番)'}
+                {moomooStatus === 'connecting' && '● 接続中...'}
+                {moomooStatus === 'error' && '● 接続エラー'}
+                {moomooStatus === 'disconnected' && '● 未接続 (デモ)'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between bg-[#0c0e1a] p-2 rounded border border-[#1e2235]">
+              <span className="text-[11px] text-gray-300 font-medium">moomoo APIを有効にする</span>
+              <button
+                onClick={() => {
+                  setMoomooRealTimeActive(!moomooRealTimeActive);
+                }}
+                className={`w-10 h-6 rounded-full p-0.5 transition-colors duration-200 cursor-pointer ${moomooRealTimeActive ? 'bg-emerald-500' : 'bg-gray-700'}`}
+              >
+                <div className={`bg-white w-5 h-5 rounded-full shadow-md transform duration-200 ease-in-out ${moomooRealTimeActive ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
+            {moomooRealTimeActive && (
+              <div className="flex flex-col space-y-2 text-xs">
+                <div>
+                  <label className="text-[10px] text-gray-400 block mb-1">FutuOpenD WebSocket アドレス</label>
+                  <div className="flex gap-1">
+                    <input
+                      type="text"
+                      value={moomooOpenDUrl}
+                      onChange={(e) => setMoomooOpenDUrl(e.target.value)}
+                      placeholder="ws://127.0.0.1:33333"
+                      className="bg-[#1c1f30] border border-[#2d3142] text-white rounded text-xs px-2.5 py-1.5 w-full outline-none focus:border-blue-500 font-mono"
+                    />
+                    <button
+                      onClick={() => checkMoomooStatus()}
+                      className="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1 font-bold text-xs transition shrink-0 cursor-pointer"
+                    >
+                      接続テスト
+                    </button>
+                  </div>
+                </div>
+
+                {moomooStatus === 'error' && moomooError && (
+                  <div className="bg-red-950/40 border border-red-900/60 p-2.5 rounded text-[10px] text-red-300 leading-normal font-mono">
+                    <strong>エラー詳細:</strong> {moomooError}
+                  </div>
+                )}
+
+                <div className="text-[10px] text-gray-400 bg-[#0c0e1a] p-2.5 rounded border border-[#1e2235]/60 leading-relaxed font-sans">
+                  💡 <strong>接続手順:</strong>
+                  <ul className="list-disc pl-3.5 mt-1 space-y-1 text-gray-400">
+                    <li>PCで<strong>FutuOpenD</strong>クライアントを起動させます。</li>
+                    <li>ポート「<strong>33333</strong>」でWebSocket API（JSON）を有効化します。</li>
+                    <li>
+                      本クラウドプレビューが安全に中継し、お使いのローカル/リモートOpenDから本物の市場株価チャートを同期します。
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
           <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d]">
             <div className="flex items-center space-x-1 mb-2 bg-[#0c0e1a] p-1 rounded-md border border-[#21263d]">

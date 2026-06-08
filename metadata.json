@@ -1,0 +1,6 @@
+{
+  "name": "Multi-Chart Trading Dashboard",
+  "description": "An interactive TradingView-style multi-chart panel supporting customizable stock symbols (VOO, QQQ, etc.), multiple timeframes, zooming/panning, and individual asset indicator configuration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

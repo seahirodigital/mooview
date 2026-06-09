@@ -1,0 +1,6 @@
+moomoo-api==10.7.6708
+pandas==2.0.3
+protobuf==5.29.6
+pycryptodome==3.23.0
+pytz==2026.2
+simplejson==4.1.1

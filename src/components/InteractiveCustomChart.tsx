@@ -22,6 +22,7 @@ interface InteractiveCustomChartProps {
   showMacd: boolean;
   comparisonSymbols?: string[];
   comparisonCandles?: Record<string, Candle[]>;
+  emptyMessage?: string;
 }
 
 export function InteractiveCustomChart({
@@ -37,6 +38,7 @@ export function InteractiveCustomChart({
   showMacd,
   comparisonSymbols = [],
   comparisonCandles = {},
+  emptyMessage = 'データを取得中...',
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 500, height: 350 });
@@ -165,21 +167,28 @@ export function InteractiveCustomChart({
     return visibleCandles[0].close;
   }, [visibleCandles]);
 
-  // Comparison starting prices at the target index
-  const compStartPrice = useMemo(() => {
-    const result: Record<string, number> = {};
-    comparisonSymbols.forEach(sym => {
-      const fullCandles = comparisonCandles[sym];
-      if (fullCandles && fullCandles[startIndex]) {
-        result[sym] = fullCandles[startIndex].close || 1;
-      } else if (fullCandles && fullCandles.length > 0) {
-        result[sym] = fullCandles[0].close || 1;
-      } else {
-        result[sym] = 1;
-      }
+  const comparisonCandleMaps = useMemo(() => {
+    const result: Record<string, Map<number, Candle>> = {};
+    comparisonSymbols.forEach((symbol) => {
+      result[symbol] = new Map(
+        (comparisonCandles[symbol] || []).map((candle) => [candle.time, candle])
+      );
     });
     return result;
-  }, [comparisonSymbols, comparisonCandles, startIndex]);
+  }, [comparisonSymbols, comparisonCandles]);
+
+  // 表示範囲の主銘柄と同じ時刻にある比較銘柄の最初の価格を基準にする
+  const compStartPrice = useMemo(() => {
+    const result: Record<string, number> = {};
+    comparisonSymbols.forEach((symbol) => {
+      const candleMap = comparisonCandleMaps[symbol];
+      const firstAlignedCandle = visibleCandles
+        .map((mainCandle) => candleMap?.get(mainCandle.time))
+        .find((candle): candle is Candle => Boolean(candle));
+      result[symbol] = firstAlignedCandle?.close || 1;
+    });
+    return result;
+  }, [comparisonSymbols, comparisonCandleMaps, visibleCandles]);
 
   // Calculate high and low price ranges for scale bounds of visible candles
   const priceMinMax = useMemo(() => {
@@ -216,21 +225,18 @@ export function InteractiveCustomChart({
     });
 
     // Include overlay comparison symbols in pricing range determination
-    comparisonSymbols.forEach(sym => {
-      const fullCandles = comparisonCandles[sym];
-      const startPrice = compStartPrice[sym] || 1;
-      if (fullCandles) {
-        visibleCandles.forEach((_, idx) => {
-          const realIdx = startIndex + idx;
-          const compCandle = fullCandles[realIdx];
-          if (compCandle) {
-            const ratio = compCandle.close / startPrice;
-            const scaledPrice = ratio * mainStartPrice;
-            highest = Math.max(highest, scaledPrice);
-            lowest = Math.min(lowest, scaledPrice);
-          }
-        });
-      }
+    comparisonSymbols.forEach((symbol) => {
+      const candleMap = comparisonCandleMaps[symbol];
+      const startPrice = compStartPrice[symbol] || 1;
+      visibleCandles.forEach((mainCandle) => {
+        const compCandle = candleMap?.get(mainCandle.time);
+        if (compCandle) {
+          const ratio = compCandle.close / startPrice;
+          const scaledPrice = ratio * mainStartPrice;
+          highest = Math.max(highest, scaledPrice);
+          lowest = Math.min(lowest, scaledPrice);
+        }
+      });
     });
 
     const delta = highest - lowest;
@@ -240,7 +246,7 @@ export function InteractiveCustomChart({
       min: Math.max(0.01, lowest - pad),
       max: highest + pad
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, boll, comparisonSymbols, comparisonCandles, compStartPrice, mainStartPrice]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, boll, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -340,13 +346,12 @@ export function InteractiveCustomChart({
   // Map comparison lines paths
   const getComparisonPolylinePoints = (sym: string) => {
     const pts: string[] = [];
-    const fullCandles = comparisonCandles ? comparisonCandles[sym] : undefined;
+    const candleMap = comparisonCandleMaps[sym];
     const startPrice = compStartPrice[sym] || 1;
-    if (!fullCandles) return '';
+    if (!candleMap) return '';
 
-    visibleCandles.forEach((_, i) => {
-      const globalIdx = startIndex + i;
-      const compCandle = fullCandles[globalIdx];
+    visibleCandles.forEach((mainCandle, i) => {
+      const compCandle = candleMap.get(mainCandle.time);
       if (compCandle) {
         const ratio = compCandle.close / startPrice;
         const scaledPrice = ratio * mainStartPrice;
@@ -377,9 +382,10 @@ export function InteractiveCustomChart({
           {comparisonSymbols.map((compSym, index) => {
             const lineColors = ['#f3a14b', '#a78bfa', '#22d3ee', '#f43f5e', '#eab308'];
             const color = lineColors[index % lineColors.length];
-            const fullCandles = comparisonCandles[compSym];
-            const activeIdx = hoverData ? hoverData.candleIdx : candles.length - 1;
-            const compCandle = fullCandles ? fullCandles[activeIdx] : null;
+            const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
+            const compCandle = activeCandle
+              ? comparisonCandleMaps[compSym]?.get(activeCandle.time)
+              : null;
             const startPrice = compStartPrice[compSym] || 1;
             if (!compCandle) return null;
             const changePct = ((compCandle.close - startPrice) / startPrice) * 100;
@@ -396,7 +402,7 @@ export function InteractiveCustomChart({
       <div className="flex-1 w-full h-full relative">
         {candles.length === 0 ? (
           <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500 animate-pulse">
-            ローソク足データを生成中...
+            {emptyMessage}
           </div>
         ) : (
           <svg 

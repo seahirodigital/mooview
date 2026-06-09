@@ -218,6 +218,16 @@ export default function App() {
     localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
   }, [moomooRealTimeActive]);
 
+  const handleMoomooModeToggle = () => {
+    if (!moomooRealTimeActive) {
+      setCandlesCache({});
+      setQuoteCache({});
+      setMoomooStatus('connecting');
+      setMoomooError(null);
+    }
+    setMoomooRealTimeActive((active) => !active);
+  };
+
   // OpenDへの接続状態はサーバー側ゲートウェイを通して確認する
   const checkMoomooStatus = async () => {
     if (!moomooRealTimeActive) {
@@ -249,6 +259,7 @@ export default function App() {
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    let cancelled = false;
 
     const fetchMoomooCandles = async () => {
       const requests = new Map<string, { symbol: string; timeframe: Timeframe }>();
@@ -289,6 +300,8 @@ export default function App() {
         }
       }));
 
+      if (cancelled) return;
+
       if (Object.keys(updatedCache).length > 0) {
         setCandlesCache((currentCache) => ({
           ...currentCache,
@@ -303,10 +316,14 @@ export default function App() {
     };
 
     fetchMoomooCandles();
+    return () => {
+      cancelled = true;
+    };
   }, [panels, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    let cancelled = false;
 
     const fetchMoomooQuotes = async () => {
       const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
@@ -330,6 +347,8 @@ export default function App() {
         }
       }));
 
+      if (cancelled) return;
+
       setQuoteCache((currentQuotes) => ({
         ...currentQuotes,
         ...updatedQuotes,
@@ -337,6 +356,9 @@ export default function App() {
     };
 
     fetchMoomooQuotes();
+    return () => {
+      cancelled = true;
+    };
   }, [tickers, moomooRealTimeActive, tickTrigger]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
@@ -391,8 +413,10 @@ export default function App() {
   }, [panels, moomooRealTimeActive]);
 
   // --- HISTORICAL CANDLE GENERATOR RESOLVER ---
-  // Resolves and caches candles for any active combinations of symbol & timeframe (and comparison overlay symbols)
+  // デモモードでのみ疑似ローソク足を生成する
   useEffect(() => {
+    if (moomooRealTimeActive) return;
+
     setCandlesCache(prev => {
       const updated = { ...prev };
       let changed = false;
@@ -419,7 +443,7 @@ export default function App() {
       
       return changed ? updated : prev;
     });
-  }, [panels]);
+  }, [panels, moomooRealTimeActive]);
 
   // --- HANDLERS ---
   // Grouping configuration for unified resizable grid layout calculation
@@ -781,15 +805,21 @@ export default function App() {
                                     .filter(t => t.symbol !== panel.symbol)
                                     .map(t => {
                                       const isAdded = (panel.comparisonSymbols || []).includes(t.symbol);
+                                      const canCompare = !moomooRealTimeActive || t.currentPrice !== null;
                                       return (
                                         <label
                                           key={t.symbol}
-                                          className="flex items-center justify-between p-1.5 px-2 rounded hover:bg-[#161a29]/80 cursor-pointer transition select-none"
+                                          className={`flex items-center justify-between p-1.5 px-2 rounded transition select-none ${
+                                            canCompare
+                                              ? 'hover:bg-[#161a29]/80 cursor-pointer'
+                                              : 'opacity-45 cursor-not-allowed'
+                                          }`}
                                         >
                                           <div className="flex items-center space-x-2">
                                             <input
                                               type="checkbox"
                                               checked={isAdded}
+                                              disabled={!canCompare}
                                               onChange={() => {
                                                 const prevList = panel.comparisonSymbols || [];
                                                 const updatedList = isAdded
@@ -803,7 +833,7 @@ export default function App() {
                                             <span className="text-[10px] text-gray-500 truncate max-w-[90px]">{t.name}</span>
                                           </div>
                                           <span className="text-[10px] text-gray-400 font-mono">
-                                            ${t.currentPrice.toFixed(2)}
+                                            {t.currentPrice !== null ? `$${t.currentPrice.toFixed(2)}` : '取得不可'}
                                           </span>
                                         </label>
                                       );
@@ -978,6 +1008,7 @@ export default function App() {
                                       return acc;
                                     }, {} as Record<string, Candle[]>)
                                   }
+                                  emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
                                 />
                               )}
                             </div>
@@ -1036,7 +1067,7 @@ export default function App() {
               <button
                 type="button"
                 aria-label="Moomoo実データの使用を切り替える"
-                onClick={() => setMoomooRealTimeActive((active) => !active)}
+                onClick={handleMoomooModeToggle}
                 className={`w-10 h-6 rounded-full p-0.5 transition-colors duration-200 cursor-pointer ${moomooRealTimeActive ? 'bg-emerald-500' : 'bg-gray-700'}`}
               >
                 <div className={`bg-white w-5 h-5 rounded-full shadow-md transform duration-200 ease-in-out ${moomooRealTimeActive ? 'translate-x-4' : 'translate-x-0'}`} />

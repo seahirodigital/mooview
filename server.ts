@@ -7,7 +7,7 @@ import os from 'os';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
-import { handleMoomooRequest } from './server/moomooHandler';
+import { handleMoomooRequest } from './server/moomooHandler.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);

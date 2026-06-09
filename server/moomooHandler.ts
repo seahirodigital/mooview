@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { callMoomooGateway, type MoomooAction } from './moomooClient';
+import { callMoomooGateway, type MoomooAction } from './moomooClient.js';
 
 export async function handleMoomooRequest(
   action: MoomooAction,

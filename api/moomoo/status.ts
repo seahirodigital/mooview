@@ -1,4 +1,4 @@
-import { handleMoomooRequest } from '../../server/moomooHandler';
+import { handleMoomooRequest } from '../../server/moomooHandler.js';
 
 export default async function handler(request: any, response: any) {
   return handleMoomooRequest('status', request, response);

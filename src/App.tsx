@@ -70,6 +70,12 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
   };
 }
 
+interface MoomooTickerQuote {
+  name: string;
+  price: number;
+  changePct: number;
+}
+
 export default function App() {
   // --- STATE ---
   // Tickers list management
@@ -164,6 +170,7 @@ export default function App() {
 
   // Tickers historical candles cache
   const [candlesCache, setCandlesCache] = useState<Record<string, Candle[]>>({});
+  const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
   const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>('grid');
@@ -297,6 +304,40 @@ export default function App() {
 
     fetchMoomooCandles();
   }, [panels, moomooRealTimeActive, tickTrigger]);
+
+  useEffect(() => {
+    if (!moomooRealTimeActive) return;
+
+    const fetchMoomooQuotes = async () => {
+      const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
+      await Promise.all(tickers.map(async (ticker) => {
+        try {
+          const response = await fetch('/api/moomoo/quote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol: ticker.symbol }),
+          });
+          const data = await response.json();
+          updatedQuotes[ticker.symbol] = data.success && Number(data.price) > 0
+            ? {
+                name: data.name || ticker.name,
+                price: Number(data.price),
+                changePct: Number(data.changePct || 0),
+              }
+            : null;
+        } catch {
+          updatedQuotes[ticker.symbol] = null;
+        }
+      }));
+
+      setQuoteCache((currentQuotes) => ({
+        ...currentQuotes,
+        ...updatedQuotes,
+      }));
+    };
+
+    fetchMoomooQuotes();
+  }, [tickers, moomooRealTimeActive, tickTrigger]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
   // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
@@ -598,6 +639,15 @@ export default function App() {
   // Evaluates live visual statistics of active cached charts
   const liveTickerStats = useMemo(() => {
     return tickers.map(t => {
+      if (moomooRealTimeActive) {
+        const quote = quoteCache[t.symbol];
+        return {
+          ...t,
+          currentPrice: quote?.price ?? null,
+          computedChange: quote?.changePct ?? null,
+        };
+      }
+
       const cached = candlesCache[`${t.symbol}-5m`];
       const curPrice = cached && cached.length > 0 ? cached[cached.length - 1].close : t.basePrice;
       const initialPrice = cached && cached.length > 0 ? cached[0].close : t.basePrice;
@@ -608,12 +658,12 @@ export default function App() {
         computedChange: changePct
       };
     });
-  }, [tickers, candlesCache]);
+  }, [tickers, candlesCache, quoteCache, moomooRealTimeActive]);
 
   return (
     <div className="min-h-screen bg-[#070913] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-blue-600/30">
       
-      {/* Dynamic Upper Banner with real-time simulated quote ticks */}
+      {/* Dynamic Upper Banner with real-time quote ticks */}
       <div className="bg-[#0c0e1a] border-b border-[#1e2235] py-2 px-4 shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none flex items-center justify-between text-xs">
         <div className="flex items-center space-x-6 min-w-0">
           <div className="flex items-center space-x-2 shrink-0">
@@ -623,7 +673,8 @@ export default function App() {
           <div className="h-4 w-px bg-[#2d3142]" />
           <div className="flex items-center space-x-5">
             {liveTickerStats.slice(0, 6).map((ticker) => {
-              const pos = ticker.computedChange >= 0;
+              const hasRealQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
+              const pos = hasRealQuote && ticker.computedChange >= 0;
               return (
                 <div 
                   key={ticker.symbol} 
@@ -633,12 +684,16 @@ export default function App() {
                 >
                   <div className="flex items-center space-x-1.5">
                     <span className="font-bold text-gray-200 text-xs">{ticker.symbol}</span>
-                    <span className={`text-[10px] font-mono font-bold ${pos ? 'text-[#26a69a]' : 'text-[#ef5350]'}`}>
-                      {pos ? '▲' : '▼'} {Math.abs(ticker.computedChange).toFixed(2)}%
+                    <span className={`text-[10px] font-mono font-bold ${
+                      !hasRealQuote ? 'text-gray-500' : pos ? 'text-[#26a69a]' : 'text-[#ef5350]'
+                    }`}>
+                      {hasRealQuote
+                        ? `${pos ? '▲' : '▼'} ${Math.abs(ticker.computedChange).toFixed(2)}%`
+                        : 'N/A'}
                     </span>
                   </div>
                   <span className="text-[10px] text-gray-400 font-mono mt-0.5">
-                    ${ticker.currentPrice.toFixed(2)}
+                    {hasRealQuote ? `$${ticker.currentPrice.toFixed(2)}` : 'N/A'}
                   </span>
                 </div>
               );

@@ -54,3 +54,23 @@ Vercelには次の環境変数を設定します。
 - `MOOMOO_GATEWAY_KEY`: 外部ゲートウェイと同じ長いランダム認証キー
 
 外部ゲートウェイを公開する場合は、TLS終端、ファイアウォール、IP制限を必ず設定してください。OpenDのポート `11111` はインターネットへ直接公開しません。
+
+## 本番実データトンネル
+
+Windowsへのログイン時に、認証付きMoomooゲートウェイとCloudflare Tunnelを自動起動できます。
+
+```powershell
+Set-Location -LiteralPath "C:\Users\mahha\OneDrive\開発\mooview"
+npm.cmd run tunnel:register
+```
+
+登録後は以下が自動実行されます。
+
+1. DPAPIで暗号化した認証キーを `C:\Users\mahha\AppData\Local\mooview\production-tunnel\gateway-key.dpapi` に保存
+2. `127.0.0.1:8787` で認証付きMoomooゲートウェイを起動
+3. Cloudflare Quick TunnelでHTTPS URLを発行
+4. Vercelの `MOOMOO_GATEWAY_URL` と `MOOMOO_GATEWAY_KEY` を更新
+5. Vercel本番を再配備
+6. `US.VOO` の実株価取得を自動確認
+
+OpenDとWindows PCが停止している間は、本番サイトから実データを取得できません。Cloudflare Quick TunnelのURLは再起動時に変わりますが、監督スクリプトがVercel設定と本番配備を自動更新します。

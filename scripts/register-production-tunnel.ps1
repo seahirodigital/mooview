@@ -37,6 +37,24 @@ Get-CimInstance Win32_Process |
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
 
+$gatewayListener = Get-NetTCPConnection `
+    -State Listen `
+    -LocalPort 8787 `
+    -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($gatewayListener) {
+    $gatewayProcess = Get-CimInstance Win32_Process `
+        -Filter "ProcessId = $($gatewayListener.OwningProcess)"
+    if ($gatewayProcess.CommandLine -match "moomoo_gateway\.py") {
+        Stop-Process `
+            -Id $gatewayListener.OwningProcess `
+            -Force `
+            -ErrorAction SilentlyContinue
+    } else {
+        throw "Port 8787 is already used by another program."
+    }
+}
+
 Start-Sleep -Seconds 1
 Start-Process `
     -FilePath $powershellPath `

@@ -2,7 +2,7 @@ export type Timeframe = '1m' | '3m' | '5m' | '10m' | '30m' | '1h' | '4h' | '1d' 
 
 export interface IndicatorConfig {
   id: string;
-  type: 'ma' | 'ema' | 'boll' | 'rsi' | 'macd';
+  type: 'ma' | 'ema' | 'boll' | 'rsi' | 'macd' | 'vrvp';
   params: {
     period?: number;
     periodSlow?: number;
@@ -21,9 +21,10 @@ export interface SymbolIndicatorSettings {
   indicators: {
     ma: { enabled: boolean; period1: number; color1: string; period2: number; color2: string; period3: number; color3: string };
     ema: { enabled: boolean; period1: number; color1: string; period2: number; color2: string };
-    boll: { enabled: boolean; period: number; stdDev: number; color: string; colorFill: string };
+    boll: { enabled: boolean; period: number; levels: number[]; color: string; colorFill: string };
     rsi: { enabled: boolean; period: number; color: string; overbought: number; oversold: number };
     macd: { enabled: boolean; fast: number; slow: number; signal: number; colorMacd: string; colorSignal: string; colorHistUp: string; colorHistDown: string };
+    vrvp: { enabled: boolean; rows: number; widthPct: number; colorUp: string; colorDown: string; colorPoc: string };
   };
 }
 

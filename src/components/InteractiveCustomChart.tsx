@@ -53,6 +53,7 @@ export function InteractiveCustomChart({
   setMacdHeightPct,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [dimensions, setDimensions] = useState({ width: 500, height: 350 });
   const [hoverData, setHoverData] = useState<{
     candleIdx: number;
@@ -120,7 +121,17 @@ export function InteractiveCustomChart({
   const ema1 = useMemo(() => calculateEMA(candles, indicators.ema.period1), [candles, indicators.ema.period1]);
   const ema2 = useMemo(() => calculateEMA(candles, indicators.ema.period2), [candles, indicators.ema.period2]);
 
-  const boll = useMemo(() => calculateBoll(candles, indicators.boll.period, indicators.boll.stdDev), [candles, indicators.boll.period, indicators.boll.stdDev]);
+  const bollLevels = useMemo(
+    () => Array.from(new Set(indicators.boll.levels)).sort((a, b) => a - b),
+    [indicators.boll.levels]
+  );
+  const bollResults = useMemo(
+    () => bollLevels.map((level) => ({
+      level,
+      result: calculateBoll(candles, indicators.boll.period, level),
+    })),
+    [bollLevels, candles, indicators.boll.period]
+  );
 
   const rsi = useMemo(() => calculateRSI(candles, indicators.rsi.period), [candles, indicators.rsi.period]);
   const macd = useMemo(() => calculateMACD(candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal), [candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal]);
@@ -232,8 +243,10 @@ export function InteractiveCustomChart({
       }
 
       if (indicators.boll.enabled) {
-        if (boll.upper[realIdx] !== null) highest = Math.max(highest, boll.upper[realIdx]!);
-        if (boll.lower[realIdx] !== null) lowest = Math.min(lowest, boll.lower[realIdx]!);
+        bollResults.forEach(({ result }) => {
+          if (result.upper[realIdx] !== null) highest = Math.max(highest, result.upper[realIdx]!);
+          if (result.lower[realIdx] !== null) lowest = Math.min(lowest, result.lower[realIdx]!);
+        });
       }
     });
 
@@ -263,7 +276,7 @@ export function InteractiveCustomChart({
       min: Math.max(0.01, center - halfRange),
       max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, boll, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -284,6 +297,49 @@ export function InteractiveCustomChart({
     if (visibleCandles.length === 0) return 1000;
     return Math.max(...visibleCandles.map(c => c.volume), 1000);
   }, [visibleCandles]);
+
+  const volumeProfile = useMemo(() => {
+    if (!indicators.vrvp.enabled || visibleCandles.length === 0) {
+      return null;
+    }
+
+    const rows = Math.max(8, Math.min(80, Math.round(indicators.vrvp.rows)));
+    const lowest = Math.min(...visibleCandles.map((candle) => candle.low));
+    const highest = Math.max(...visibleCandles.map((candle) => candle.high));
+    const step = (highest - lowest) / rows || 1;
+    const bins = Array.from({ length: rows }, (_, index) => ({
+      low: lowest + index * step,
+      high: lowest + (index + 1) * step,
+      up: 0,
+      down: 0,
+      total: 0,
+    }));
+
+    visibleCandles.forEach((candle) => {
+      const firstBin = Math.max(0, Math.min(rows - 1, Math.floor((candle.low - lowest) / step)));
+      const lastBin = Math.max(0, Math.min(rows - 1, Math.floor((candle.high - lowest) / step)));
+      const binCount = Math.max(1, lastBin - firstBin + 1);
+      const volumePerBin = candle.volume / binCount;
+      const isUp = candle.close >= candle.open;
+
+      for (let index = firstBin; index <= lastBin; index += 1) {
+        bins[index].total += volumePerBin;
+        if (isUp) {
+          bins[index].up += volumePerBin;
+        } else {
+          bins[index].down += volumePerBin;
+        }
+      }
+    });
+
+    const maxTotal = Math.max(...bins.map((bin) => bin.total), 1);
+    const pocIndex = bins.reduce(
+      (bestIndex, bin, index) => bin.total > bins[bestIndex].total ? index : bestIndex,
+      0
+    );
+
+    return { bins, maxTotal, pocIndex };
+  }, [indicators.vrvp.enabled, indicators.vrvp.rows, visibleCandles]);
 
   // Dynamic zoom actions
   const adjustZoom = (zoomIn: boolean) => {
@@ -372,16 +428,30 @@ export function InteractiveCustomChart({
     setHoverData(null);
   };
 
-  const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    if (mouseX >= plotWidth || priceAxisFocused) {
-      adjustPriceScale(e.deltaY < 0);
-      return;
-    }
-    adjustZoom(e.deltaY < 0);
-  };
+  useEffect(() => {
+    const chartElement = containerRef.current;
+    if (!chartElement) return;
+
+    const handleNativeWheel = (event: WheelEvent) => {
+      const svg = svgRef.current;
+      if (!svg || !(event.target instanceof Node) || !svg.contains(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = svg.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      if (mouseX >= plotWidth || priceAxisFocused) {
+        adjustPriceScale(event.deltaY < 0);
+      } else {
+        adjustZoom(event.deltaY < 0);
+      }
+    };
+
+    chartElement.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => chartElement.removeEventListener('wheel', handleNativeWheel);
+  }, [candles.length, plotWidth, priceAxisFocused, priceScale, zoomFactor]);
 
   const currentCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
 
@@ -461,13 +531,13 @@ export function InteractiveCustomChart({
           </div>
         ) : (
           <svg 
+            ref={svgRef}
             width={width}
             height={height}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUpOrLeave}
             onMouseLeave={handleMouseUpOrLeave}
-            onWheel={handleWheel}
             className={`w-full h-full bg-[#111320] ${
               isScalingPrice
                 ? 'cursor-ns-resize'
@@ -533,15 +603,16 @@ export function InteractiveCustomChart({
               })}
 
               {/* Bollinger Corridor */}
-              {indicators.boll.enabled && (
+              {indicators.boll.enabled && bollResults.length > 0 && (
                 <g>
                   {(() => {
+                    const outerResult = bollResults[bollResults.length - 1].result;
                     const up: string[] = [];
                     const low: string[] = [];
                     visibleCandles.forEach((_, i) => {
                       const idx = startIndex + i;
-                      const uVal = boll.upper[idx];
-                      const lVal = boll.lower[idx];
+                      const uVal = outerResult.upper[idx];
+                      const lVal = outerResult.lower[idx];
                       if (uVal !== null && lVal !== null) {
                         up.push(`${getX(i)},${getY(uVal)}`);
                         low.unshift(`${getX(i)},${getY(lVal)}`);
@@ -557,11 +628,68 @@ export function InteractiveCustomChart({
                     }
                     return null;
                   })()}
-                  
-                  {/* Outer boundaries */}
-                  <polyline points={getPolylinePoints(boll.upper)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray="2 2" opacity="0.8" />
-                  <polyline points={getPolylinePoints(boll.lower)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray="2 2" opacity="0.8" />
-                  <polyline points={getPolylinePoints(boll.middle)} fill="none" stroke={indicators.boll.color} strokeWidth="1" opacity="0.4" />
+
+                  {bollResults.map(({ level, result }, index) => {
+                    const lastIndex = startIndex + visibleCandles.length - 1;
+                    const upperValue = result.upper[lastIndex];
+                    const lowerValue = result.lower[lastIndex];
+                    const opacity = Math.max(0.45, 0.9 - index * 0.16);
+                    const dashArray = `${2 + index * 2} ${2 + index}`;
+                    return (
+                      <g key={level}>
+                        <polyline points={getPolylinePoints(result.upper)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray={dashArray} opacity={opacity} />
+                        <polyline points={getPolylinePoints(result.lower)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray={dashArray} opacity={opacity} />
+                        {upperValue !== null && (
+                          <text x={plotWidth - 4} y={getY(upperValue) - 2} textAnchor="end" fill={indicators.boll.color} fontSize="8" opacity={opacity}>
+                            +{level}σ
+                          </text>
+                        )}
+                        {lowerValue !== null && (
+                          <text x={plotWidth - 4} y={getY(lowerValue) + 9} textAnchor="end" fill={indicators.boll.color} fontSize="8" opacity={opacity}>
+                            -{level}σ
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+                  <polyline points={getPolylinePoints(bollResults[0].result.middle)} fill="none" stroke={indicators.boll.color} strokeWidth="1" opacity="0.4" />
+                </g>
+              )}
+
+              {volumeProfile && (
+                <g opacity="0.8">
+                  {volumeProfile.bins.map((bin, index) => {
+                    const maxWidth = plotWidth * (Math.max(8, Math.min(45, indicators.vrvp.widthPct)) / 100);
+                    const totalWidth = (bin.total / volumeProfile.maxTotal) * maxWidth;
+                    const downWidth = bin.total > 0 ? totalWidth * (bin.down / bin.total) : 0;
+                    const upWidth = totalWidth - downWidth;
+                    const yTop = getY(bin.high);
+                    const yBottom = getY(bin.low);
+                    const barHeight = Math.max(1, yBottom - yTop - 1);
+                    const x = plotWidth - totalWidth;
+                    const isPoc = index === volumeProfile.pocIndex;
+
+                    return (
+                      <g key={`${bin.low}-${bin.high}`}>
+                        <rect
+                          x={x}
+                          y={yTop}
+                          width={downWidth}
+                          height={barHeight}
+                          fill={isPoc ? indicators.vrvp.colorPoc : indicators.vrvp.colorDown}
+                          fillOpacity={isPoc ? 0.8 : 0.5}
+                        />
+                        <rect
+                          x={x + downWidth}
+                          y={yTop}
+                          width={upWidth}
+                          height={barHeight}
+                          fill={isPoc ? indicators.vrvp.colorPoc : indicators.vrvp.colorUp}
+                          fillOpacity={isPoc ? 0.8 : 0.5}
+                        />
+                      </g>
+                    );
+                  })}
                 </g>
               )}
 

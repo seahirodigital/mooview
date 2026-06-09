@@ -1,11 +1,14 @@
-import { SymbolIndicatorSettings } from '../types';
+import { useState, type ReactNode } from 'react';
 import { RotateCcw } from 'lucide-react';
+import { SymbolIndicatorSettings } from '../types';
 
 interface IndicatorSettingsPanelProps {
   settings: SymbolIndicatorSettings;
   onChange: (updated: SymbolIndicatorSettings) => void;
   onReset: () => void;
 }
+
+type IndicatorKey = keyof SymbolIndicatorSettings['indicators'];
 
 const COLOR_PALETTE = [
   '#e7c039',
@@ -22,358 +25,309 @@ const COLOR_PALETTE = [
   '#ffffff',
 ];
 
-interface ColorControlProps {
+interface ColorButtonProps {
+  id: string;
   label: string;
   color: string;
+  openPicker: string | null;
+  setOpenPicker: (id: string | null) => void;
   onChange: (color: string) => void;
 }
 
-function ColorControl({ label, color, onChange }: ColorControlProps) {
+function ColorButton({
+  id,
+  label,
+  color,
+  openPicker,
+  setOpenPicker,
+  onChange,
+}: ColorButtonProps) {
+  const isOpen = openPicker === id;
+  const openUpward = id.startsWith('macd') || id.startsWith('vrvp');
+
   return (
-    <div className="grid grid-cols-[92px_1fr] gap-2 items-start">
-      <span className="text-gray-400 pt-1">{label}</span>
-      <div className="flex flex-wrap gap-1 items-center">
-        {COLOR_PALETTE.map((paletteColor) => (
-          <button
-            type="button"
-            key={paletteColor}
-            onClick={() => onChange(paletteColor)}
-            className={`w-4 h-4 rounded-full border transition-transform hover:scale-125 ${
-              color.toLowerCase() === paletteColor.toLowerCase()
-                ? 'border-white ring-1 ring-blue-400'
-                : 'border-white/20'
-            }`}
-            style={{ backgroundColor: paletteColor }}
-            aria-label={`${label}を${paletteColor}に変更`}
-            title={paletteColor}
-          />
-        ))}
-        <label className="relative w-5 h-5 rounded overflow-hidden border border-white/30 cursor-pointer" title="任意の色を選択">
-          <input
-            type="color"
-            value={color}
-            onChange={(event) => onChange(event.target.value)}
-            className="absolute inset-[-4px] w-8 h-8 cursor-pointer"
-            aria-label={`${label}の任意色`}
-          />
-        </label>
-      </div>
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={() => setOpenPicker(isOpen ? null : id)}
+        className="w-4 h-4 rounded-sm border border-white/35 hover:border-white transition"
+        style={{ backgroundColor: color }}
+        aria-label={`${label}の色を選択`}
+        title={`${label}: ${color}`}
+      />
+      {isOpen && (
+        <span className={`absolute right-0 z-50 grid grid-cols-6 gap-1 bg-[#0b0d16] border border-[#34394c] p-2 shadow-2xl min-w-[142px] ${
+          openUpward ? 'bottom-6' : 'top-6'
+        }`}>
+          {COLOR_PALETTE.map((paletteColor) => (
+            <button
+              type="button"
+              key={paletteColor}
+              onClick={() => {
+                onChange(paletteColor);
+                setOpenPicker(null);
+              }}
+              className={`w-4 h-4 rounded-sm border ${
+                color.toLowerCase() === paletteColor.toLowerCase()
+                  ? 'border-white ring-1 ring-blue-400'
+                  : 'border-white/20'
+              }`}
+              style={{ backgroundColor: paletteColor }}
+              aria-label={`${label}を${paletteColor}に変更`}
+              title={paletteColor}
+            />
+          ))}
+          <label
+            className="relative col-span-6 h-5 border border-[#34394c] cursor-pointer overflow-hidden"
+            title="任意の色を選択"
+          >
+            <input
+              type="color"
+              value={color}
+              onChange={(event) => {
+                onChange(event.target.value);
+                setOpenPicker(null);
+              }}
+              className="absolute inset-[-6px] w-[calc(100%+12px)] h-8 cursor-pointer"
+              aria-label={`${label}の任意色`}
+            />
+          </label>
+        </span>
+      )}
+    </span>
+  );
+}
+
+interface NumberRowProps {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+}
+
+function NumberRow({ label, value, min, max, step = 1, onChange }: NumberRowProps) {
+  return (
+    <label className="grid grid-cols-[minmax(0,1fr)_72px] items-center gap-2 min-h-7 px-2 border-t border-[#222634]">
+      <span className="text-[10px] text-gray-400 truncate">{label}</span>
+      <input
+        type="number"
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(event) => {
+          const nextValue = Number(event.target.value);
+          if (Number.isFinite(nextValue)) {
+            onChange(Math.max(min, Math.min(max, nextValue)));
+          }
+        }}
+        className="h-5 bg-[#171a27] border border-[#303548] text-white text-right text-[10px] font-mono px-1 outline-none focus:border-blue-500"
+      />
+    </label>
+  );
+}
+
+interface IndicatorHeaderProps {
+  label: string;
+  enabled: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}
+
+function IndicatorHeader({ label, enabled, onToggle, children }: IndicatorHeaderProps) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center min-h-8 px-2 bg-[#11141f]">
+      <span className="text-[11px] font-bold text-gray-200 truncate">{label}</span>
+      <span className="flex items-center gap-1.5">
+        {children}
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={onToggle}
+          className="w-3.5 h-3.5 rounded border-[#394057] text-blue-600 focus:ring-0 cursor-pointer"
+          aria-label={`${label}を表示`}
+        />
+      </span>
     </div>
   );
 }
 
-export function IndicatorSettingsPanel({ settings, onChange, onReset }: IndicatorSettingsPanelProps) {
-  const handleToggle = (key: 'ma' | 'ema' | 'boll' | 'rsi' | 'macd') => {
-    const updated = {
+export function IndicatorSettingsPanel({
+  settings,
+  onChange,
+  onReset,
+}: IndicatorSettingsPanelProps) {
+  const [openPicker, setOpenPicker] = useState<string | null>(null);
+  const { ma, ema, boll, rsi, macd, vrvp } = settings.indicators;
+
+  const handleToggle = (key: IndicatorKey) => {
+    onChange({
       ...settings,
       indicators: {
         ...settings.indicators,
         [key]: {
           ...settings.indicators[key],
           enabled: !settings.indicators[key].enabled,
-        }
-      }
-    };
-    onChange(updated);
+        },
+      },
+    });
   };
 
-  const handleNestedChange = (
-    key: 'ma' | 'ema' | 'boll' | 'rsi' | 'macd',
-    field: string,
-    value: any
+  const handleNestedChange = <K extends IndicatorKey>(
+    key: K,
+    field: keyof SymbolIndicatorSettings['indicators'][K],
+    value: SymbolIndicatorSettings['indicators'][K][keyof SymbolIndicatorSettings['indicators'][K]],
   ) => {
-    const updated = {
+    onChange({
       ...settings,
       indicators: {
         ...settings.indicators,
         [key]: {
           ...settings.indicators[key],
           [field]: value,
-        }
-      }
-    };
-    onChange(updated);
+        },
+      },
+    });
   };
 
-  const { ma, ema, boll, rsi, macd } = settings.indicators;
+  const colorButton = (
+    id: string,
+    label: string,
+    color: string,
+    onColorChange: (color: string) => void,
+  ) => (
+    <ColorButton
+      id={id}
+      label={label}
+      color={color}
+      openPicker={openPicker}
+      setOpenPicker={setOpenPicker}
+      onChange={onColorChange}
+    />
+  );
 
   return (
-    <div className="space-y-4 text-xs">
-      
-      {/* SECTION HEADER */}
-      <div className="flex items-center justify-between pb-1 border-b border-[#21263d]">
-        <span className="font-bold text-gray-300">インジケーター設定 ({settings.symbol})</span>
-        <button 
+    <div className="text-xs border border-[#2a2e3d] bg-[#0e111b]">
+      <div className="flex items-center justify-between h-8 px-2 border-b border-[#2a2e3d]">
+        <span className="font-bold text-gray-200">{settings.symbol}</span>
+        <button
+          type="button"
           onClick={onReset}
-          className="text-[10px] text-gray-400 hover:text-red-400 flex items-center transition-colors font-semibold"
-          title="数値を標準価格に戻します"
+          className="text-[9px] text-gray-500 hover:text-red-300 flex items-center gap-1"
+          title="標準設定に戻す"
         >
-          <RotateCcw className="w-3 h-3 mr-1" />
-          標準設定に戻す
+          <RotateCcw className="w-3 h-3" />
+          リセット
         </button>
       </div>
 
-      {/* 1. SIMPLE MOVING AVERAGE (SMA) */}
-      <div className="bg-[#141624] p-3 rounded-lg border border-[#21263d] space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="font-bold text-gray-200 select-none cursor-pointer flex items-center space-x-2">
-            <span className="w-1.5 h-3 inline-block rounded-sm" style={{ backgroundColor: ma.color1 }}></span>
-            <span>単純移動平均線 (SMA)</span>
-          </label>
-          <input 
-            type="checkbox" 
-            checked={ma.enabled}
-            onChange={() => handleToggle('ma')}
-            className="rounded border-[#2d3552] text-blue-600 focus:ring-0 cursor-pointer w-3.5 h-3.5"
-          />
-        </div>
+      <section className="border-b border-[#2a2e3d]">
+        <IndicatorHeader label="SMA" enabled={ma.enabled} onToggle={() => handleToggle('ma')}>
+          {colorButton('ma-1', 'SMA短期線', ma.color1, (color) => handleNestedChange('ma', 'color1', color))}
+          {colorButton('ma-2', 'SMA中期線', ma.color2, (color) => handleNestedChange('ma', 'color2', color))}
+          {colorButton('ma-3', 'SMA長期線', ma.color3, (color) => handleNestedChange('ma', 'color3', color))}
+        </IndicatorHeader>
         {ma.enabled && (
-          <div className="grid grid-cols-1 gap-2 pt-1 border-t border-gray-800/50 mt-1">
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">短期期間 (Period 1):</span>
-              <input 
-                type="number" 
-                value={ma.period1}
-                min={2}
-                max={200}
-                onChange={(e) => handleNestedChange('ma', 'period1', Math.max(1, parseInt(e.target.value) || 5))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">中期期間 (Period 2):</span>
-              <input 
-                type="number" 
-                value={ma.period2}
-                min={2}
-                max={200}
-                onChange={(e) => handleNestedChange('ma', 'period2', Math.max(1, parseInt(e.target.value) || 25))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">長期期間 (Period 3):</span>
-              <input 
-                type="number" 
-                value={ma.period3}
-                min={2}
-                max={300}
-                onChange={(e) => handleNestedChange('ma', 'period3', Math.max(1, parseInt(e.target.value) || 50))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="space-y-2 pt-1">
-              <ColorControl label="短期線" color={ma.color1} onChange={(color) => handleNestedChange('ma', 'color1', color)} />
-              <ColorControl label="中期線" color={ma.color2} onChange={(color) => handleNestedChange('ma', 'color2', color)} />
-              <ColorControl label="長期線" color={ma.color3} onChange={(color) => handleNestedChange('ma', 'color3', color)} />
-            </div>
-          </div>
+          <>
+            <NumberRow label="短期" value={ma.period1} min={2} max={200} onChange={(value) => handleNestedChange('ma', 'period1', value)} />
+            <NumberRow label="中期" value={ma.period2} min={2} max={200} onChange={(value) => handleNestedChange('ma', 'period2', value)} />
+            <NumberRow label="長期" value={ma.period3} min={2} max={300} onChange={(value) => handleNestedChange('ma', 'period3', value)} />
+          </>
         )}
-      </div>
+      </section>
 
-      {/* 2. EXPONENTIAL MOVING AVERAGE (EMA) */}
-      <div className="bg-[#141624] p-3 rounded-lg border border-[#21263d] space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="font-bold text-gray-200 select-none cursor-pointer flex items-center space-x-2">
-            <span className="w-1.5 h-3 inline-block rounded-sm" style={{ backgroundColor: ema.color1 }}></span>
-            <span>指数平滑移動平均線 (EMA)</span>
-          </label>
-          <input 
-            type="checkbox" 
-            checked={ema.enabled}
-            onChange={() => handleToggle('ema')}
-            className="rounded border-[#2d3552] text-blue-600 focus:ring-0 cursor-pointer w-3.5 h-3.5"
-          />
-        </div>
+      <section className="border-b border-[#2a2e3d]">
+        <IndicatorHeader label="EMA" enabled={ema.enabled} onToggle={() => handleToggle('ema')}>
+          {colorButton('ema-1', 'EMA短期線', ema.color1, (color) => handleNestedChange('ema', 'color1', color))}
+          {colorButton('ema-2', 'EMA長期線', ema.color2, (color) => handleNestedChange('ema', 'color2', color))}
+        </IndicatorHeader>
         {ema.enabled && (
-          <div className="grid grid-cols-1 gap-2 pt-1 border-t border-gray-800/50 mt-1">
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">短期EMA (Period 1):</span>
-              <input 
-                type="number" 
-                value={ema.period1}
-                min={2}
-                max={200}
-                onChange={(e) => handleNestedChange('ema', 'period1', Math.max(1, parseInt(e.target.value) || 9))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">長期EMA (Period 2):</span>
-              <input 
-                type="number" 
-                value={ema.period2}
-                min={2}
-                max={200}
-                onChange={(e) => handleNestedChange('ema', 'period2', Math.max(1, parseInt(e.target.value) || 26))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="space-y-2 pt-1">
-              <ColorControl label="短期EMA" color={ema.color1} onChange={(color) => handleNestedChange('ema', 'color1', color)} />
-              <ColorControl label="長期EMA" color={ema.color2} onChange={(color) => handleNestedChange('ema', 'color2', color)} />
-            </div>
-          </div>
+          <>
+            <NumberRow label="短期" value={ema.period1} min={2} max={200} onChange={(value) => handleNestedChange('ema', 'period1', value)} />
+            <NumberRow label="長期" value={ema.period2} min={2} max={200} onChange={(value) => handleNestedChange('ema', 'period2', value)} />
+          </>
         )}
-      </div>
+      </section>
 
-      {/* 3. BOLLINGER BANDS (BOLL) */}
-      <div className="bg-[#141624] p-3 rounded-lg border border-[#21263d] space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="font-bold text-gray-200 select-none cursor-pointer flex items-center space-x-2">
-            <span className="w-1.5 h-3 inline-block rounded-sm" style={{ backgroundColor: boll.color }}></span>
-            <span>ボリンジャーバンド (BOLL)</span>
-          </label>
-          <input 
-            type="checkbox" 
-            checked={boll.enabled}
-            onChange={() => handleToggle('boll')}
-            className="rounded border-[#2d3552] text-blue-600 focus:ring-0 cursor-pointer w-3.5 h-3.5"
-          />
-        </div>
+      <section className="border-b border-[#2a2e3d]">
+        <IndicatorHeader label="ボリンジャーバンド" enabled={boll.enabled} onToggle={() => handleToggle('boll')}>
+          {colorButton('boll', 'バンド色', boll.color, (color) => handleNestedChange('boll', 'color', color))}
+        </IndicatorHeader>
         {boll.enabled && (
-          <div className="grid grid-cols-1 gap-2 pt-1 border-t border-gray-800/50 mt-1">
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">期間 (Period):</span>
-              <input 
-                type="number" 
-                value={boll.period}
-                min={2}
-                max={150}
-                onChange={(e) => handleNestedChange('boll', 'period', Math.max(1, parseInt(e.target.value) || 20))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
+          <>
+            <NumberRow label="期間" value={boll.period} min={2} max={150} onChange={(value) => handleNestedChange('boll', 'period', value)} />
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 min-h-8 px-2 border-t border-[#222634]">
+              <span className="text-[10px] text-gray-400">表示するσ</span>
+              <span className="flex items-center gap-2">
+                {[1, 2, 3].map((level) => (
+                  <label key={level} className="flex items-center gap-1 text-[10px] text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={boll.levels.includes(level)}
+                      onChange={() => {
+                        if (boll.levels.includes(level) && boll.levels.length === 1) {
+                          return;
+                        }
+                        const nextLevels = boll.levels.includes(level)
+                          ? boll.levels.filter((currentLevel) => currentLevel !== level)
+                          : [...boll.levels, level].sort((a, b) => a - b);
+                        handleNestedChange('boll', 'levels', nextLevels);
+                      }}
+                      className="w-3 h-3 rounded border-[#394057] text-blue-600 focus:ring-0"
+                    />
+                    {level}σ
+                  </label>
+                ))}
+              </span>
             </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">標準偏差 (StdDev / σ):</span>
-              <input 
-                type="number" 
-                value={boll.stdDev}
-                step="0.5"
-                min="0.5"
-                max="5"
-                onChange={(e) => handleNestedChange('boll', 'stdDev', Math.max(0.1, parseFloat(e.target.value) || 2))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <ColorControl label="バンド色" color={boll.color} onChange={(color) => handleNestedChange('boll', 'color', color)} />
-          </div>
+          </>
         )}
-      </div>
+      </section>
 
-      {/* 4. RELATIVE STRENGTH INDEX (RSI) */}
-      <div className="bg-[#141624] p-3 rounded-lg border border-[#21263d] space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="font-bold text-gray-200 select-none cursor-pointer flex items-center space-x-2">
-            <span className="w-1.5 h-3 inline-block rounded-sm" style={{ backgroundColor: rsi.color }}></span>
-            <span>RSIオシレーター</span>
-          </label>
-          <input 
-            type="checkbox" 
-            checked={rsi.enabled}
-            onChange={() => handleToggle('rsi')}
-            className="rounded border-[#2d3552] text-blue-600 focus:ring-0 cursor-pointer w-3.5 h-3.5"
-          />
-        </div>
+      <section className="border-b border-[#2a2e3d]">
+        <IndicatorHeader label="RSI" enabled={rsi.enabled} onToggle={() => handleToggle('rsi')}>
+          {colorButton('rsi', 'RSI線', rsi.color, (color) => handleNestedChange('rsi', 'color', color))}
+        </IndicatorHeader>
         {rsi.enabled && (
-          <div className="grid grid-cols-1 gap-2 pt-1 border-t border-gray-800/50 mt-1">
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">期間 (Period):</span>
-              <input 
-                type="number" 
-                value={rsi.period}
-                min={2}
-                max={100}
-                onChange={(e) => handleNestedChange('rsi', 'period', Math.max(1, parseInt(e.target.value) || 14))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">買われすぎ境界 (Ok):</span>
-              <input 
-                type="number" 
-                value={rsi.overbought}
-                min={51}
-                max={99}
-                onChange={(e) => handleNestedChange('rsi', 'overbought', Math.max(1, Math.min(100, parseInt(e.target.value) || 70)))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">売られすぎ境界 (Os):</span>
-              <input 
-                type="number" 
-                value={rsi.oversold}
-                min={1}
-                max={49}
-                onChange={(e) => handleNestedChange('rsi', 'oversold', Math.max(1, Math.min(100, parseInt(e.target.value) || 30)))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <ColorControl label="RSI線" color={rsi.color} onChange={(color) => handleNestedChange('rsi', 'color', color)} />
-          </div>
+          <>
+            <NumberRow label="期間" value={rsi.period} min={2} max={100} onChange={(value) => handleNestedChange('rsi', 'period', value)} />
+            <NumberRow label="買われすぎ" value={rsi.overbought} min={51} max={99} onChange={(value) => handleNestedChange('rsi', 'overbought', value)} />
+            <NumberRow label="売られすぎ" value={rsi.oversold} min={1} max={49} onChange={(value) => handleNestedChange('rsi', 'oversold', value)} />
+          </>
         )}
-      </div>
+      </section>
 
-      {/* 5. MACD (MOVING AVERAGE CONVERGENCE DIVERGENCE) */}
-      <div className="bg-[#141624] p-3 rounded-lg border border-[#21263d] space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="font-bold text-gray-200 select-none cursor-pointer flex items-center space-x-2">
-            <span className="w-1.5 h-3 inline-block rounded-sm" style={{ backgroundColor: macd.colorMacd }}></span>
-            <span>MACD</span>
-          </label>
-          <input 
-            type="checkbox" 
-            checked={macd.enabled}
-            onChange={() => handleToggle('macd')}
-            className="rounded border-[#2d3552] text-blue-600 focus:ring-0 cursor-pointer w-3.5 h-3.5"
-          />
-        </div>
+      <section className="border-b border-[#2a2e3d]">
+        <IndicatorHeader label="MACD" enabled={macd.enabled} onToggle={() => handleToggle('macd')}>
+          {colorButton('macd', 'MACD線', macd.colorMacd, (color) => handleNestedChange('macd', 'colorMacd', color))}
+          {colorButton('macd-signal', 'シグナル線', macd.colorSignal, (color) => handleNestedChange('macd', 'colorSignal', color))}
+          {colorButton('macd-up', '上昇バー', macd.colorHistUp, (color) => handleNestedChange('macd', 'colorHistUp', color))}
+          {colorButton('macd-down', '下降バー', macd.colorHistDown, (color) => handleNestedChange('macd', 'colorHistDown', color))}
+        </IndicatorHeader>
         {macd.enabled && (
-          <div className="grid grid-cols-1 gap-2 pt-1 border-t border-gray-800/50 mt-1">
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">短期高速EMA (Fast):</span>
-              <input 
-                type="number" 
-                value={macd.fast}
-                min={2}
-                max={100}
-                onChange={(e) => handleNestedChange('macd', 'fast', Math.max(1, parseInt(e.target.value) || 12))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">長期低速EMA (Slow):</span>
-              <input 
-                type="number" 
-                value={macd.slow}
-                min={2}
-                max={200}
-                onChange={(e) => handleNestedChange('macd', 'slow', Math.max(1, parseInt(e.target.value) || 26))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2 items-center">
-              <span className="text-gray-400">マイルシグナル (Signal):</span>
-              <input 
-                type="number" 
-                value={macd.signal}
-                min={2}
-                max={100}
-                onChange={(e) => handleNestedChange('macd', 'signal', Math.max(1, parseInt(e.target.value) || 9))}
-                className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
-              />
-            </div>
-            <div className="space-y-2 pt-1">
-              <ColorControl label="MACD線" color={macd.colorMacd} onChange={(color) => handleNestedChange('macd', 'colorMacd', color)} />
-              <ColorControl label="シグナル" color={macd.colorSignal} onChange={(color) => handleNestedChange('macd', 'colorSignal', color)} />
-              <ColorControl label="上昇バー" color={macd.colorHistUp} onChange={(color) => handleNestedChange('macd', 'colorHistUp', color)} />
-              <ColorControl label="下降バー" color={macd.colorHistDown} onChange={(color) => handleNestedChange('macd', 'colorHistDown', color)} />
-            </div>
-          </div>
+          <>
+            <NumberRow label="Fast" value={macd.fast} min={2} max={100} onChange={(value) => handleNestedChange('macd', 'fast', value)} />
+            <NumberRow label="Slow" value={macd.slow} min={2} max={200} onChange={(value) => handleNestedChange('macd', 'slow', value)} />
+            <NumberRow label="Signal" value={macd.signal} min={2} max={100} onChange={(value) => handleNestedChange('macd', 'signal', value)} />
+          </>
         )}
-      </div>
+      </section>
 
+      <section>
+        <IndicatorHeader label="VRVP" enabled={vrvp.enabled} onToggle={() => handleToggle('vrvp')}>
+          {colorButton('vrvp-up', 'VRVP上昇出来高', vrvp.colorUp, (color) => handleNestedChange('vrvp', 'colorUp', color))}
+          {colorButton('vrvp-down', 'VRVP下降出来高', vrvp.colorDown, (color) => handleNestedChange('vrvp', 'colorDown', color))}
+          {colorButton('vrvp-poc', 'VRVP POC', vrvp.colorPoc, (color) => handleNestedChange('vrvp', 'colorPoc', color))}
+        </IndicatorHeader>
+        {vrvp.enabled && (
+          <>
+            <NumberRow label="価格帯数" value={vrvp.rows} min={8} max={80} onChange={(value) => handleNestedChange('vrvp', 'rows', value)} />
+            <NumberRow label="表示幅 (%)" value={vrvp.widthPct} min={8} max={45} onChange={(value) => handleNestedChange('vrvp', 'widthPct', value)} />
+          </>
+        )}
+      </section>
     </div>
   );
 }

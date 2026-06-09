@@ -3,13 +3,15 @@ import {
   Plus, 
   Settings, 
   Trash2, 
-  Sliders, 
+  Sliders,
   Database,
   LayoutGrid,
   Columns2,
   Rows2,
   Search,
-  X
+  X,
+  List,
+  ChartNoAxesCombined
 } from 'lucide-react';
 
 import { Timeframe, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle } from './types';
@@ -60,6 +62,10 @@ function formatTickerPrice(symbol: string, price: number | null): string {
   })}`;
 }
 
+function formatWatchlistSymbol(symbol: string): string {
+  return symbol.startsWith('JP.') ? symbol.slice(3) : symbol;
+}
+
 // Local default indicator generator to keep things resilient
 function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings {
   const norm = symbol.toUpperCase();
@@ -80,7 +86,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
       boll: { 
         enabled: true, 
         period: 20, 
-        stdDev: 2, 
+        levels: [1, 2, 3],
         color: '#6c5dd3', 
         colorFill: 'rgba(108, 93, 211, 0.04)' 
       },
@@ -100,8 +106,48 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         colorSignal: '#ff9900', 
         colorHistUp: '#26a69a', 
         colorHistDown: '#ef5350' 
+      },
+      vrvp: {
+        enabled: false,
+        rows: 24,
+        widthPct: 22,
+        colorUp: '#26a69a',
+        colorDown: '#ef5350',
+        colorPoc: '#f3a14b',
       }
     }
+  };
+}
+
+function normalizeIndicatorSettings(
+  symbol: string,
+  raw?: Partial<SymbolIndicatorSettings>,
+): SymbolIndicatorSettings {
+  const defaults = createDefaultIndicatorSettings(symbol);
+  const stored = raw?.indicators as Partial<SymbolIndicatorSettings['indicators']> | undefined;
+  const storedBoll = stored?.boll as
+    | (Partial<SymbolIndicatorSettings['indicators']['boll']> & { stdDev?: number })
+    | undefined;
+  const levels = Array.isArray(storedBoll?.levels)
+    ? storedBoll.levels
+        .map(Number)
+        .filter((level) => Number.isFinite(level) && level > 0 && level <= 6)
+    : [1, 2, 3];
+
+  return {
+    symbol: symbol.toUpperCase(),
+    indicators: {
+      ma: { ...defaults.indicators.ma, ...stored?.ma },
+      ema: { ...defaults.indicators.ema, ...stored?.ema },
+      boll: {
+        ...defaults.indicators.boll,
+        ...storedBoll,
+        levels: levels.length > 0 ? Array.from(new Set(levels)).sort((a, b) => a - b) : [1, 2, 3],
+      },
+      rsi: { ...defaults.indicators.rsi, ...stored?.rsi },
+      macd: { ...defaults.indicators.macd, ...stored?.macd },
+      vrvp: { ...defaults.indicators.vrvp, ...stored?.vrvp },
+    },
   };
 }
 
@@ -178,7 +224,13 @@ export default function App() {
     const saved = localStorage.getItem('tv_dashboard_indicators');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved) as Record<string, Partial<SymbolIndicatorSettings>>;
+        return Object.fromEntries(
+          Object.entries(parsed).map(([symbol, settings]) => [
+            symbol.toUpperCase(),
+            normalizeIndicatorSettings(symbol, settings),
+          ])
+        );
       } catch (e) {
         console.error("Failed to parse indicator settings, resetting", e);
       }
@@ -217,6 +269,9 @@ export default function App() {
   // Sidebar visibility on the right - default closed
   const [sidebarOpen, setSidebarOpen] = useState(() =>
     readStoredValue('tv_dashboard_sidebar_open', false)
+  );
+  const [sidebarView, setSidebarView] = useState<'watchlist' | 'indicators' | 'settings'>(() =>
+    readStoredValue('tv_dashboard_sidebar_view', 'watchlist')
   );
 
   // Active panel ID currently displaying comparison symbol overlay selector
@@ -277,6 +332,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tv_dashboard_sidebar_open', JSON.stringify(sidebarOpen));
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_sidebar_view', JSON.stringify(sidebarView));
+  }, [sidebarView]);
 
   useEffect(() => {
     localStorage.setItem('tv_dashboard_column_widths', JSON.stringify(colWeights));
@@ -1189,53 +1248,53 @@ export default function App() {
         </div>
 
         {/* Right-hand Sidebar - Collapsible & Default Closed */}
-        <div className={`transition-all duration-300 ease-in-out shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] p-4 flex flex-col overflow-y-auto ${sidebarOpen ? 'w-full md:w-[420px]' : 'w-0 !p-0 !border-l-0 overflow-hidden'}`}>
+        <div className={`transition-all duration-300 ease-in-out shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] flex overflow-hidden ${sidebarOpen ? 'w-full md:w-[420px]' : 'w-0 !border-l-0'}`}>
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
-          <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d]">
-            <div className="flex items-center space-x-1 mb-2 bg-[#0c0e1a] p-1 rounded-md border border-[#21263d]">
+          <div className="shrink-0 p-2 border-b border-[#242938]">
+            <div className="grid grid-cols-4 gap-1 bg-[#0c0e1a] p-1 border border-[#21263d]">
               <button
                 onClick={() => setLayoutStyle('grid')}
-                className={`flex-1 flex items-center justify-center py-2.5 rounded transition-all cursor-pointer ${layoutStyle === 'grid' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'}`}
+                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'grid' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
                 title="グリッド"
               >
                 <LayoutGrid className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setLayoutStyle('columns')}
-                className={`flex-1 flex items-center justify-center py-2.5 rounded transition-all cursor-pointer ${layoutStyle === 'columns' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'}`}
+                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'columns' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
                 title="左右並列"
               >
                 <Columns2 className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setLayoutStyle('rows')}
-                className={`flex-1 flex items-center justify-center py-2.5 rounded transition-all cursor-pointer ${layoutStyle === 'rows' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'}`}
+                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'rows' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
                 title="上下分割"
               >
                 <Rows2 className="w-4 h-4" />
               </button>
+              <button
+                onClick={handleAddChartPanel}
+                disabled={panels.length >= 6}
+                id="btn-add-chart-panel"
+                className="h-9 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#171b28] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                title="チャートを追加"
+                aria-label="チャートを追加"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
             </div>
-            {/* Add panel button */}
-            <button
-              onClick={handleAddChartPanel}
-              disabled={panels.length >= 6}
-              id="btn-add-chart-panel"
-              className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs py-2 rounded flex items-center justify-center space-x-1 transition-colors cursor-pointer"
-              title="グリッドに表示チャートパネルを追加します"
-            >
-              <Plus className="w-4 h-4 stroke-[3]" />
-              <span>チャート追加</span>
-            </button>
           </div>
 
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
-          <div className="mb-4 bg-[#10131f] rounded-lg border border-[#21263d] overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2e3d]">
-              <div>
-                <div className="text-sm font-bold text-white">ウォッチリスト</div>
-                <div className="text-[9px] text-gray-500">行を選ぶと左側チャートを切り替えます</div>
-              </div>
+          {sidebarView === 'watchlist' && (
+          <div className="flex-1 min-h-0 bg-[#10131f] overflow-hidden flex flex-col">
+            <div className="grid grid-cols-[minmax(0,1fr)_92px_64px_24px] items-center h-8 px-2 border-b border-[#2a2e3d] text-[10px] text-gray-500">
+              <span>銘柄</span>
+              <span className="text-right">現在値</span>
+              <span className="text-right">変動率</span>
               <button
                 type="button"
                 onClick={() => {
@@ -1243,25 +1302,25 @@ export default function App() {
                   setTickerSearchError(null);
                   setTickerSearchCandidates([]);
                 }}
-                className="w-8 h-8 rounded hover:bg-[#242838] text-gray-300 hover:text-white flex items-center justify-center transition"
+                className="w-6 h-6 hover:bg-[#242838] text-gray-300 hover:text-white flex items-center justify-center transition"
                 aria-label="銘柄を追加"
                 title="銘柄を追加"
               >
-                {tickerSearchOpen ? <X className="w-4 h-4" /> : <Plus className="w-5 h-5" />}
+                {tickerSearchOpen ? <X className="w-3.5 h-3.5" /> : <Plus className="w-4 h-4" />}
               </button>
             </div>
 
             {tickerSearchOpen && (
-              <div className="p-3 border-b border-[#2a2e3d] bg-[#0c0e18]">
-                <form onSubmit={handleAddTicker} className="flex gap-2">
+              <div className="p-2 border-b border-[#2a2e3d] bg-[#0c0e18]">
+                <form onSubmit={handleAddTicker} className="flex gap-1.5">
                   <div className="relative flex-1">
-                    <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-500" />
+                    <Search className="absolute left-2 top-2 w-3 h-3 text-gray-500" />
                     <input
                       type="text"
                       placeholder="任天堂、Nintendo、7974、AAPL"
                       value={newSymbolInput}
                       onChange={(e) => setNewSymbolInput(e.target.value)}
-                      className="bg-[#171a27] border border-[#303548] text-white rounded text-xs pl-8 pr-2.5 py-2 w-full outline-none focus:border-blue-500 placeholder-gray-600"
+                      className="h-7 bg-[#171a27] border border-[#303548] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-blue-500 placeholder-gray-600"
                       autoFocus
                     />
                   </div>
@@ -1269,7 +1328,7 @@ export default function App() {
                     type="submit"
                     id="btn-add-ticker"
                     disabled={tickerSearchLoading || !newSymbolInput.trim()}
-                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs px-3 py-2 font-bold transition"
+                    className="h-7 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[10px] px-2 font-bold transition"
                   >
                     {tickerSearchLoading ? '検索中' : '検索'}
                   </button>
@@ -1282,7 +1341,7 @@ export default function App() {
                 )}
 
                 {tickerSearchCandidates.length > 0 && (
-                  <div className="mt-2 max-h-52 overflow-y-auto border border-[#292e40] rounded">
+                  <div className="mt-2 max-h-40 overflow-y-auto border border-[#292e40]">
                     {tickerSearchCandidates.map((candidate) => (
                       <button
                         type="button"
@@ -1302,14 +1361,7 @@ export default function App() {
               </div>
             )}
 
-            <div className="grid grid-cols-[minmax(0,1fr)_100px_72px_24px] px-3 py-2 border-b border-[#2a2e3d] text-[10px] text-gray-500 font-bold">
-              <span>銘柄</span>
-              <span className="text-right">現在値</span>
-              <span className="text-right">変動率</span>
-              <span />
-            </div>
-
-            <div className="max-h-80 overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto">
               {liveTickerStats.map((ticker) => {
                 const hasQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
                 const isPositive = hasQuote && ticker.computedChange >= 0;
@@ -1317,59 +1369,51 @@ export default function App() {
                 return (
                   <div
                     key={ticker.symbol}
-                    className={`grid grid-cols-[minmax(0,1fr)_100px_72px_24px] items-center px-3 border-b border-[#242836] last:border-b-0 transition ${
-                      isSelected ? 'bg-blue-950/35' : 'hover:bg-[#171b28]'
+                    className={`flex items-center h-7 px-2 border-b border-[#242836] last:border-b-0 transition ${
+                      isSelected ? 'bg-blue-950/35 ring-1 ring-inset ring-gray-500' : 'hover:bg-[#171b28]'
                     }`}
                   >
                     <button
                       type="button"
                       onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
-                      className="py-2.5 text-left min-w-0"
+                      className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_92px_64px] items-center h-full"
                       title={`${ticker.name}を左側チャートに表示`}
                     >
-                      <span className="block text-xs font-bold text-gray-100 truncate">{ticker.name}</span>
-                      <span className="block text-[9px] font-mono text-gray-500">{ticker.symbol}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
-                      className="py-2.5 text-right font-mono text-xs text-gray-200"
-                    >
-                      {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
-                      className={`py-2.5 text-right font-mono text-xs ${
-                        !hasQuote ? 'text-gray-600' : isPositive ? 'text-[#20c7b0]' : 'text-[#ff4961]'
-                      }`}
-                    >
-                      {hasQuote ? `${ticker.computedChange >= 0 ? '+' : ''}${ticker.computedChange.toFixed(2)}%` : 'N/A'}
+                      <span className="text-left text-[11px] font-bold font-mono text-gray-100 truncate">
+                        {formatWatchlistSymbol(ticker.symbol)}
+                      </span>
+                      <span className="text-right font-mono text-[10px] text-gray-200">
+                        {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
+                      </span>
+                      <span className={`text-right font-mono text-[10px] ${
+                          !hasQuote ? 'text-gray-600' : isPositive ? 'text-[#20c7b0]' : 'text-[#ff4961]'
+                        }`}
+                      >
+                        {hasQuote ? `${ticker.computedChange >= 0 ? '+' : ''}${ticker.computedChange.toFixed(2)}%` : 'N/A'}
+                      </span>
                     </button>
                     <button
                       type="button"
                       onClick={() => handleRemoveTicker(ticker.symbol)}
                       disabled={tickers.length <= 1}
-                      className="text-gray-600 hover:text-red-400 disabled:opacity-20 flex justify-end"
+                      className="w-6 h-6 text-gray-700 hover:text-red-400 disabled:opacity-20 flex items-center justify-end"
                       aria-label={`${ticker.name}を削除`}
                       title="ウォッチリストから削除"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                 );
               })}
             </div>
           </div>
+          )}
 
           {/* 3. INDICATOR PARAMETERS */}
-          <div className="flex-1 min-h-0">
+          {sidebarView === 'indicators' && (
+          <div className="flex-1 min-h-0 overflow-y-auto p-2">
             {focusedSymbolIndex && indicatorDatabase[focusedSymbolIndex] ? (
-              <div className="flex flex-col h-full">
-                <div className="mb-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider flex items-center space-x-1">
-                  <Sliders className="w-3.5 h-3.5 text-[#26a69a]" />
-                  <span>指標設定: <b className="text-white">{focusedSymbolIndex}</b></span>
-                </div>
+              <div className="flex flex-col min-h-full">
                 <IndicatorSettingsPanel
                   settings={indicatorDatabase[focusedSymbolIndex]}
                   onChange={handleUpdateIndicators}
@@ -1377,16 +1421,18 @@ export default function App() {
                 />
               </div>
             ) : (
-              <div className="text-center py-8 text-gray-500 bg-[#141624] rounded-lg border border-dashed border-gray-800">
+              <div className="text-center py-8 text-gray-500 border border-dashed border-gray-800">
                 <Settings className="w-8 h-8 mx-auto opacity-30 mb-2" />
-                <p>ウォッチリストから銘柄を選択して</p>
-                <p>インジケーターを設定します</p>
+                <p>銘柄を選択してください</p>
               </div>
             )}
           </div>
+          )}
 
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
-          <div className="mt-4 bg-[#141624] p-3 rounded-lg border border-[#21263d] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
+          {sidebarView === 'settings' && (
+          <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+          <div className="bg-[#141624] p-3 border border-[#21263d] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">接続ステータス</span>
               <span className="inline-flex w-2 h-2 rounded-full bg-[#26a69a] animate-pulse" />
@@ -1408,7 +1454,7 @@ export default function App() {
           </div>
 
           {/* 5. MOOMOO OPENAPI SETTINGS */}
-          <div className="mt-4 bg-[#141624] p-3 rounded-lg border border-[#21263d] flex flex-col space-y-3">
+          <div className="bg-[#141624] p-3 border border-[#21263d] flex flex-col space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-bold text-gray-200 text-xs tracking-wider uppercase flex items-center space-x-1.5">
                 <Database className="w-4 h-4 text-orange-400" />
@@ -1456,7 +1502,52 @@ export default function App() {
               </div>
             )}
           </div>
+          </div>
+          )}
 
+          </div>
+
+          <nav className="w-11 shrink-0 border-l border-[#242938] bg-[#090b12] flex flex-col items-center py-2 gap-1">
+            <button
+              type="button"
+              onClick={() => setSidebarView('watchlist')}
+              className={`w-9 h-10 flex items-center justify-center border transition ${
+                sidebarView === 'watchlist'
+                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+              }`}
+              title="ウォッチリスト"
+              aria-label="ウォッチリストを表示"
+            >
+              <List className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarView('indicators')}
+              className={`w-9 h-10 flex items-center justify-center border transition ${
+                sidebarView === 'indicators'
+                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+              }`}
+              title="インジケーター"
+              aria-label="インジケーター設定を表示"
+            >
+              <ChartNoAxesCombined className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarView('settings')}
+              className={`w-9 h-10 flex items-center justify-center border transition ${
+                sidebarView === 'settings'
+                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+              }`}
+              title="接続設定"
+              aria-label="接続設定を表示"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+          </nav>
         </div>
 
       </div>

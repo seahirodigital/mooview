@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { RotateCcw } from 'lucide-react';
-import { SymbolIndicatorSettings } from '../types';
+import { IndicatorLineStyle, SymbolIndicatorSettings } from '../types';
 
 interface IndicatorSettingsPanelProps {
   settings: SymbolIndicatorSettings;
@@ -23,6 +23,13 @@ const COLOR_PALETTE = [
   '#26a69a',
   '#ef5350',
   '#ffffff',
+];
+
+const LINE_STYLE_OPTIONS: { value: IndicatorLineStyle; label: string; dash: string }[] = [
+  { value: 'solid', label: '実線', dash: '' },
+  { value: 'dashed', label: '破線', dash: '6 4' },
+  { value: 'dotted', label: '点線', dash: '1 4' },
+  { value: 'dashdot', label: '一点鎖線', dash: '7 3 1 3' },
 ];
 
 interface ColorButtonProps {
@@ -98,6 +105,80 @@ function ColorButton({
   );
 }
 
+interface LineStyleButtonProps {
+  id: string;
+  label: string;
+  value: IndicatorLineStyle;
+  openPicker: string | null;
+  setOpenPicker: (id: string | null) => void;
+  onChange: (style: IndicatorLineStyle) => void;
+}
+
+function LineStyleButton({
+  id,
+  label,
+  value,
+  openPicker,
+  setOpenPicker,
+  onChange,
+}: LineStyleButtonProps) {
+  const isOpen = openPicker === id;
+  const openUpward = id.startsWith('macd') || id.startsWith('vrvp');
+  const current = LINE_STYLE_OPTIONS.find((option) => option.value === value) ?? LINE_STYLE_OPTIONS[0];
+
+  return (
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={() => setOpenPicker(isOpen ? null : id)}
+        className="w-6 h-4 border border-white/20 bg-[#171a27] hover:border-white/60 px-1 flex items-center transition"
+        aria-label={`${label}の線種を選択`}
+        title={`${label}: ${current.label}`}
+      >
+        <span
+          className="block w-full border-t border-gray-100"
+          style={{ borderTopStyle: current.value === 'dotted' ? 'dotted' : current.value === 'solid' ? 'solid' : 'dashed' }}
+        />
+      </button>
+      {isOpen && (
+        <span className={`absolute right-0 z-50 grid gap-1 bg-[#0b0d16] border border-[#34394c] p-2 shadow-2xl min-w-[116px] ${
+          openUpward ? 'bottom-6' : 'top-6'
+        }`}>
+          {LINE_STYLE_OPTIONS.map((option) => (
+            <button
+              type="button"
+              key={option.value}
+              onClick={() => {
+                onChange(option.value);
+                setOpenPicker(null);
+              }}
+              className={`grid grid-cols-[44px_minmax(0,1fr)] items-center gap-2 h-7 px-1.5 text-[10px] text-left transition ${
+                option.value === value
+                  ? 'bg-blue-600/25 text-white'
+                  : 'text-gray-300 hover:bg-[#171b28]'
+              }`}
+            >
+              <svg width="38" height="8" viewBox="0 0 38 8" aria-hidden="true">
+                <line
+                  x1="1"
+                  y1="4"
+                  x2="37"
+                  y2="4"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeDasharray={option.dash}
+                  strokeLinecap="round"
+                />
+              </svg>
+              <span>{option.label}</span>
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
 interface NumberRowProps {
   label: string;
   value: number;
@@ -108,19 +189,44 @@ interface NumberRowProps {
 }
 
 function NumberRow({ label, value, min, max, step = 1, onChange }: NumberRowProps) {
+  const [draft, setDraft] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(String(value));
+    }
+  }, [focused, value]);
+
+  const commitValue = () => {
+    const nextValue = Number(draft);
+    if (!Number.isFinite(nextValue)) {
+      setDraft(String(value));
+      return;
+    }
+    const clampedValue = Math.max(min, Math.min(max, nextValue));
+    onChange(clampedValue);
+    setDraft(String(clampedValue));
+  };
+
   return (
     <label className="grid grid-cols-[minmax(0,1fr)_72px] items-center gap-2 min-h-7 px-2 border-t border-[#222634]">
       <span className="text-[10px] text-gray-400 truncate">{label}</span>
       <input
         type="number"
-        value={value}
+        value={draft}
         min={min}
         max={max}
         step={step}
-        onChange={(event) => {
-          const nextValue = Number(event.target.value);
-          if (Number.isFinite(nextValue)) {
-            onChange(Math.max(min, Math.min(max, nextValue)));
+        onFocus={() => setFocused(true)}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          setFocused(false);
+          commitValue();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.currentTarget.blur();
           }
         }}
         className="h-5 bg-[#171a27] border border-[#303548] text-white text-right text-[10px] font-mono px-1 outline-none focus:border-blue-500"
@@ -160,6 +266,7 @@ export function IndicatorSettingsPanel({
   onReset,
 }: IndicatorSettingsPanelProps) {
   const [openPicker, setOpenPicker] = useState<string | null>(null);
+  const [openLinePicker, setOpenLinePicker] = useState<string | null>(null);
   const { ma, ema, boll, rsi, macd, vrvp } = settings.indicators;
 
   const handleToggle = (key: IndicatorKey) => {
@@ -208,6 +315,22 @@ export function IndicatorSettingsPanel({
     />
   );
 
+  const lineStyleButton = (
+    id: string,
+    label: string,
+    value: IndicatorLineStyle,
+    onLineStyleChange: (style: IndicatorLineStyle) => void,
+  ) => (
+    <LineStyleButton
+      id={id}
+      label={label}
+      value={value}
+      openPicker={openLinePicker}
+      setOpenPicker={setOpenLinePicker}
+      onChange={onLineStyleChange}
+    />
+  );
+
   return (
     <div className="text-xs border border-[#2a2e3d] bg-[#0e111b]">
       <div className="flex items-center justify-between h-8 px-2 border-b border-[#2a2e3d]">
@@ -226,8 +349,11 @@ export function IndicatorSettingsPanel({
       <section className="border-b border-[#2a2e3d]">
         <IndicatorHeader label="SMA" enabled={ma.enabled} onToggle={() => handleToggle('ma')}>
           {colorButton('ma-1', 'SMA短期線', ma.color1, (color) => handleNestedChange('ma', 'color1', color))}
+          {lineStyleButton('ma-1-line', 'SMA短期線', ma.style1, (style) => handleNestedChange('ma', 'style1', style))}
           {colorButton('ma-2', 'SMA中期線', ma.color2, (color) => handleNestedChange('ma', 'color2', color))}
+          {lineStyleButton('ma-2-line', 'SMA中期線', ma.style2, (style) => handleNestedChange('ma', 'style2', style))}
           {colorButton('ma-3', 'SMA長期線', ma.color3, (color) => handleNestedChange('ma', 'color3', color))}
+          {lineStyleButton('ma-3-line', 'SMA長期線', ma.style3, (style) => handleNestedChange('ma', 'style3', style))}
         </IndicatorHeader>
         {ma.enabled && (
           <>
@@ -241,7 +367,9 @@ export function IndicatorSettingsPanel({
       <section className="border-b border-[#2a2e3d]">
         <IndicatorHeader label="EMA" enabled={ema.enabled} onToggle={() => handleToggle('ema')}>
           {colorButton('ema-1', 'EMA短期線', ema.color1, (color) => handleNestedChange('ema', 'color1', color))}
+          {lineStyleButton('ema-1-line', 'EMA短期線', ema.style1, (style) => handleNestedChange('ema', 'style1', style))}
           {colorButton('ema-2', 'EMA長期線', ema.color2, (color) => handleNestedChange('ema', 'color2', color))}
+          {lineStyleButton('ema-2-line', 'EMA長期線', ema.style2, (style) => handleNestedChange('ema', 'style2', style))}
         </IndicatorHeader>
         {ema.enabled && (
           <>
@@ -254,6 +382,7 @@ export function IndicatorSettingsPanel({
       <section className="border-b border-[#2a2e3d]">
         <IndicatorHeader label="ボリンジャーバンド" enabled={boll.enabled} onToggle={() => handleToggle('boll')}>
           {colorButton('boll', 'バンド色', boll.color, (color) => handleNestedChange('boll', 'color', color))}
+          {lineStyleButton('boll-line', 'バンド線', boll.style, (style) => handleNestedChange('boll', 'style', style))}
         </IndicatorHeader>
         {boll.enabled && (
           <>
@@ -289,6 +418,7 @@ export function IndicatorSettingsPanel({
       <section className="border-b border-[#2a2e3d]">
         <IndicatorHeader label="RSI" enabled={rsi.enabled} onToggle={() => handleToggle('rsi')}>
           {colorButton('rsi', 'RSI線', rsi.color, (color) => handleNestedChange('rsi', 'color', color))}
+          {lineStyleButton('rsi-line', 'RSI線', rsi.style, (style) => handleNestedChange('rsi', 'style', style))}
         </IndicatorHeader>
         {rsi.enabled && (
           <>
@@ -302,7 +432,9 @@ export function IndicatorSettingsPanel({
       <section className="border-b border-[#2a2e3d]">
         <IndicatorHeader label="MACD" enabled={macd.enabled} onToggle={() => handleToggle('macd')}>
           {colorButton('macd', 'MACD線', macd.colorMacd, (color) => handleNestedChange('macd', 'colorMacd', color))}
+          {lineStyleButton('macd-line', 'MACD線', macd.styleMacd, (style) => handleNestedChange('macd', 'styleMacd', style))}
           {colorButton('macd-signal', 'シグナル線', macd.colorSignal, (color) => handleNestedChange('macd', 'colorSignal', color))}
+          {lineStyleButton('macd-signal-line', 'シグナル線', macd.styleSignal, (style) => handleNestedChange('macd', 'styleSignal', style))}
           {colorButton('macd-up', '上昇バー', macd.colorHistUp, (color) => handleNestedChange('macd', 'colorHistUp', color))}
           {colorButton('macd-down', '下降バー', macd.colorHistDown, (color) => handleNestedChange('macd', 'colorHistDown', color))}
         </IndicatorHeader>

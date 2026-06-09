@@ -1,4 +1,5 @@
 export type Timeframe = '1m' | '3m' | '5m' | '10m' | '30m' | '1h' | '4h' | '1d' | '1w' | '1mo';
+export type IndicatorLineStyle = 'solid' | 'dashed' | 'dotted' | 'dashdot';
 
 export interface IndicatorConfig {
   id: string;
@@ -19,11 +20,11 @@ export interface IndicatorConfig {
 export interface SymbolIndicatorSettings {
   symbol: string;
   indicators: {
-    ma: { enabled: boolean; period1: number; color1: string; period2: number; color2: string; period3: number; color3: string };
-    ema: { enabled: boolean; period1: number; color1: string; period2: number; color2: string };
-    boll: { enabled: boolean; period: number; levels: number[]; color: string; colorFill: string };
-    rsi: { enabled: boolean; period: number; color: string; overbought: number; oversold: number };
-    macd: { enabled: boolean; fast: number; slow: number; signal: number; colorMacd: string; colorSignal: string; colorHistUp: string; colorHistDown: string };
+    ma: { enabled: boolean; period1: number; color1: string; style1: IndicatorLineStyle; period2: number; color2: string; style2: IndicatorLineStyle; period3: number; color3: string; style3: IndicatorLineStyle };
+    ema: { enabled: boolean; period1: number; color1: string; style1: IndicatorLineStyle; period2: number; color2: string; style2: IndicatorLineStyle };
+    boll: { enabled: boolean; period: number; levels: number[]; color: string; colorFill: string; style: IndicatorLineStyle };
+    rsi: { enabled: boolean; period: number; color: string; style: IndicatorLineStyle; overbought: number; oversold: number };
+    macd: { enabled: boolean; fast: number; slow: number; signal: number; colorMacd: string; styleMacd: IndicatorLineStyle; colorSignal: string; styleSignal: IndicatorLineStyle; colorHistUp: string; colorHistDown: string };
     vrvp: { enabled: boolean; rows: number; widthPct: number; colorUp: string; colorDown: string; colorPoc: string };
   };
 }

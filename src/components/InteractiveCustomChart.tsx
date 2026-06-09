@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Candle, SymbolIndicatorSettings } from '../types';
+import { Candle, IndicatorLineStyle, SymbolIndicatorSettings, Timeframe } from '../types';
 import { 
   calculateMA, 
   calculateEMA, 
@@ -12,6 +12,7 @@ import { Plus, Minus, RotateCcw } from 'lucide-react';
 interface InteractiveCustomChartProps {
   symbol: string;
   candles: Candle[];
+  timeframe: Timeframe;
   indicatorSettings: SymbolIndicatorSettings;
   zoomFactor: number;
   setZoomFactor: (zf: number) => void;
@@ -29,11 +30,34 @@ interface InteractiveCustomChartProps {
   setRsiHeightPct: (pct: number) => void;
   macdHeightPct: number;
   setMacdHeightPct: (pct: number) => void;
+  onOpenIndicatorSettings?: () => void;
+}
+
+function getLineDasharray(style: IndicatorLineStyle): string | undefined {
+  switch (style) {
+    case 'dashed':
+      return '6 4';
+    case 'dotted':
+      return '1 4';
+    case 'dashdot':
+      return '7 3 1 3';
+    default:
+      return undefined;
+  }
+}
+
+function formatAxisDateLabel(candle: Candle, timeframe: Timeframe): string {
+  const date = new Date(candle.time * 1000);
+  if (timeframe === '1d' || timeframe === '1w' || timeframe === '1mo') {
+    return `${date.getMonth() + 1}/${date.getDate()}`;
+  }
+  return candle.timeStr.includes(' ') ? candle.timeStr.split(' ')[1] : candle.timeStr;
 }
 
 export function InteractiveCustomChart({
   symbol,
   candles,
+  timeframe,
   indicatorSettings,
   zoomFactor,
   setZoomFactor,
@@ -51,6 +75,7 @@ export function InteractiveCustomChart({
   setRsiHeightPct,
   macdHeightPct,
   setMacdHeightPct,
+  onOpenIndicatorSettings,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -538,6 +563,13 @@ export function InteractiveCustomChart({
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUpOrLeave}
             onMouseLeave={handleMouseUpOrLeave}
+            onDoubleClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const mouseX = event.clientX - rect.left;
+              if (mouseX < plotWidth) {
+                onOpenIndicatorSettings?.();
+              }
+            }}
             className={`w-full h-full bg-[#111320] ${
               isScalingPrice
                 ? 'cursor-ns-resize'
@@ -634,7 +666,7 @@ export function InteractiveCustomChart({
                     const upperValue = result.upper[lastIndex];
                     const lowerValue = result.lower[lastIndex];
                     const opacity = Math.max(0.45, 0.9 - index * 0.16);
-                    const dashArray = `${2 + index * 2} ${2 + index}`;
+                    const dashArray = getLineDasharray(indicators.boll.style);
                     return (
                       <g key={level}>
                         <polyline points={getPolylinePoints(result.upper)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray={dashArray} opacity={opacity} />
@@ -652,7 +684,7 @@ export function InteractiveCustomChart({
                       </g>
                     );
                   })}
-                  <polyline points={getPolylinePoints(bollResults[0].result.middle)} fill="none" stroke={indicators.boll.color} strokeWidth="1" opacity="0.4" />
+                  <polyline points={getPolylinePoints(bollResults[0].result.middle)} fill="none" stroke={indicators.boll.color} strokeWidth="1" strokeDasharray={getLineDasharray(indicators.boll.style)} opacity="0.4" />
                 </g>
               )}
 
@@ -666,7 +698,7 @@ export function InteractiveCustomChart({
                     const yTop = getY(bin.high);
                     const yBottom = getY(bin.low);
                     const barHeight = Math.max(1, yBottom - yTop - 1);
-                    const x = plotWidth - totalWidth;
+                    const x = 0;
                     const isPoc = index === volumeProfile.pocIndex;
 
                     return (
@@ -696,17 +728,17 @@ export function InteractiveCustomChart({
               {/* SMAs */}
               {indicators.ma.enabled && (
                 <g>
-                  <polyline points={getPolylinePoints(ma1)} fill="none" stroke={indicators.ma.color1} strokeWidth="1.2" />
-                  <polyline points={getPolylinePoints(ma2)} fill="none" stroke={indicators.ma.color2} strokeWidth="1.2" />
-                  <polyline points={getPolylinePoints(ma3)} fill="none" stroke={indicators.ma.color3} strokeWidth="1.2" />
+                  <polyline points={getPolylinePoints(ma1)} fill="none" stroke={indicators.ma.color1} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ma.style1)} />
+                  <polyline points={getPolylinePoints(ma2)} fill="none" stroke={indicators.ma.color2} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ma.style2)} />
+                  <polyline points={getPolylinePoints(ma3)} fill="none" stroke={indicators.ma.color3} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ma.style3)} />
                 </g>
               )}
 
               {/* EMAs */}
               {indicators.ema.enabled && (
                 <g>
-                  <polyline points={getPolylinePoints(ema1)} fill="none" stroke={indicators.ema.color1} strokeWidth="1.2" />
-                  <polyline points={getPolylinePoints(ema2)} fill="none" stroke={indicators.ema.color2} strokeWidth="1.2" />
+                  <polyline points={getPolylinePoints(ema1)} fill="none" stroke={indicators.ema.color1} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ema.style1)} />
+                  <polyline points={getPolylinePoints(ema2)} fill="none" stroke={indicators.ema.color2} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ema.style2)} />
                 </g>
               )}
 
@@ -786,7 +818,7 @@ export function InteractiveCustomChart({
                       fontFamily="monospace"
                       textAnchor="middle"
                     >
-                      {c.timeStr.includes(' ') ? c.timeStr.split(' ')[1] : c.timeStr}
+                      {formatAxisDateLabel(c, timeframe)}
                     </text>
                   </g>
                 );
@@ -867,6 +899,7 @@ export function InteractiveCustomChart({
                   fill="none"
                   stroke={indicators.rsi.color}
                   strokeWidth="1"
+                  strokeDasharray={getLineDasharray(indicators.rsi.style)}
                 />
               </g>
             )}
@@ -923,6 +956,7 @@ export function InteractiveCustomChart({
                   fill="none"
                   stroke={indicators.macd.colorMacd}
                   strokeWidth="1"
+                  strokeDasharray={getLineDasharray(indicators.macd.styleMacd)}
                 />
 
                 {/* Signal Line */}
@@ -939,6 +973,7 @@ export function InteractiveCustomChart({
                   fill="none"
                   stroke={indicators.macd.colorSignal}
                   strokeWidth="1"
+                  strokeDasharray={getLineDasharray(indicators.macd.styleSignal)}
                 />
               </g>
             )}

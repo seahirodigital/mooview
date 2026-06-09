@@ -1,22 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Plus, 
-  Minus, 
   Settings, 
-  Layers, 
-  Activity, 
   Trash2, 
-  RefreshCw, 
-  TrendingUp, 
-  Monitor, 
-  Check, 
-  Eye, 
-  EyeOff, 
   Sliders, 
   Database,
   LayoutGrid,
   Columns2,
-  Rows2
+  Rows2,
+  Search,
+  X
 } from 'lucide-react';
 
 import { Timeframe, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle } from './types';
@@ -24,6 +17,48 @@ import { DEFAULT_TICKERS, generateCandles, simulateTick } from './mockData';
 import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
+
+const DEFAULT_PANEL_HEIGHT = 840;
+
+interface SymbolSearchCandidate {
+  symbol: string;
+  code: string;
+  name: string;
+  nameEn: string;
+  market: string;
+  category: string;
+}
+
+function readStoredValue<T>(key: string, fallback: T): T {
+  const saved = localStorage.getItem(key);
+  if (!saved) return fallback;
+  try {
+    return JSON.parse(saved) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizePanel(panel: ChartPanel): ChartPanel {
+  return {
+    ...panel,
+    timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
+    priceScale: panel.priceScale ?? 1,
+    rsiHeightPct: panel.rsiHeightPct ?? 25,
+    macdHeightPct: panel.macdHeightPct ?? 25,
+  };
+}
+
+function formatTickerPrice(symbol: string, price: number | null): string {
+  if (price === null) return 'N/A';
+  if (symbol.startsWith('JP.')) {
+    return `¥${price.toLocaleString('ja-JP', { maximumFractionDigits: 2 })}`;
+  }
+  return `$${price.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
 
 // Local default indicator generator to keep things resilient
 function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings {
@@ -92,15 +127,17 @@ export default function App() {
   });
 
   const [newSymbolInput, setNewSymbolInput] = useState('');
-  const [newSymbolName, setNewSymbolName] = useState('');
-  const [newSymbolPrice, setNewSymbolPrice] = useState('100');
+  const [tickerSearchOpen, setTickerSearchOpen] = useState(false);
+  const [tickerSearchLoading, setTickerSearchLoading] = useState(false);
+  const [tickerSearchError, setTickerSearchError] = useState<string | null>(null);
+  const [tickerSearchCandidates, setTickerSearchCandidates] = useState<SymbolSearchCandidate[]>([]);
 
   // Chart Panels state
   const [panels, setPanels] = useState<ChartPanel[]>(() => {
     const saved = localStorage.getItem('tv_dashboard_panels');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        return (JSON.parse(saved) as ChartPanel[]).map(normalizePanel);
       } catch (e) {
         console.error("Failed to parse panels, resetting", e);
       }
@@ -115,30 +152,26 @@ export default function App() {
         scrollOffsetPct: 100,
         showRsi: true,
         showMacd: false,
-        showVolume: true
+        showVolume: true,
+        priceScale: 1,
+        rsiHeightPct: 25,
+        macdHeightPct: 25,
       },
       {
         id: 'panel-2',
         symbol: 'QQQ',
-        timeframe: '15m' as any, // 15m or 10m
+        timeframe: '10m',
         zoomFactor: 12,
         scrollOffsetPct: 100,
         showRsi: false,
         showMacd: true,
-        showVolume: true
+        showVolume: true,
+        priceScale: 1,
+        rsiHeightPct: 25,
+        macdHeightPct: 25,
       }
     ];
   });
-
-  // Ensure '10m' used instead of invalid 15m frame
-  useEffect(() => {
-    setPanels(prev => prev.map(p => {
-      if (p.timeframe as any === '15m') {
-        return { ...p, timeframe: '10m' };
-      }
-      return p;
-    }));
-  }, []);
 
   // Symbol specific indicator settings
   const [indicatorDatabase, setIndicatorDatabase] = useState<Record<string, SymbolIndicatorSettings>>(() => {
@@ -159,32 +192,43 @@ export default function App() {
   });
 
   // Active Symbol indicators currently editing (shows configuration controls)
-  const [focusedSymbolIndex, setFocusedSymbolIndex] = useState<string>('VOO');
+  const [focusedSymbolIndex, setFocusedSymbolIndex] = useState<string>(() =>
+    readStoredValue('tv_dashboard_focused_symbol', 'VOO')
+  );
 
   // Toggle for Official TradingView widget embed instead of local custom interactive canvas
   // Key represents panel ID, value represents isTradingViewWidgetActive
-  const [panelEngineToggle, setPanelEngineToggle] = useState<Record<string, boolean>>({
-    'panel-1': false,
-    'panel-2': false,
-  });
+  const [panelEngineToggle, setPanelEngineToggle] = useState<Record<string, boolean>>(() =>
+    readStoredValue('tv_dashboard_panel_engines', {
+      'panel-1': false,
+      'panel-2': false,
+    })
+  );
 
   // Tickers historical candles cache
   const [candlesCache, setCandlesCache] = useState<Record<string, Candle[]>>({});
   const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
-  const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>('grid');
+  const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>(() =>
+    readStoredValue('tv_dashboard_layout_style', 'grid')
+  );
 
   // Sidebar visibility on the right - default closed
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    readStoredValue('tv_dashboard_sidebar_open', false)
+  );
 
   // Active panel ID currently displaying comparison symbol overlay selector
   const [activeComparisonPopoverPanelId, setActiveComparisonPopoverPanelId] = useState<string | null>(null);
 
   // Resize weights for resizable bento grid layout
-  const [panelWeights, setPanelWeights] = useState<Record<string, number>>({});
-  const [colWeights, setColWeights] = useState<Record<string, number>>({});
-  const [panelHeights, setPanelHeights] = useState<Record<string, number>>({});
+  const [colWeights, setColWeights] = useState<Record<string, number>>(() =>
+    readStoredValue('tv_dashboard_column_widths', {})
+  );
+  const [panelHeights, setPanelHeights] = useState<Record<string, number>>(() =>
+    readStoredValue('tv_dashboard_panel_heights', {})
+  );
 
   // Real-time ticker price update counter/trigger
   const [tickTrigger, setTickTrigger] = useState(0);
@@ -217,6 +261,30 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
   }, [moomooRealTimeActive]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_focused_symbol', JSON.stringify(focusedSymbolIndex));
+  }, [focusedSymbolIndex]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_panel_engines', JSON.stringify(panelEngineToggle));
+  }, [panelEngineToggle]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_layout_style', JSON.stringify(layoutStyle));
+  }, [layoutStyle]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_sidebar_open', JSON.stringify(sidebarOpen));
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_column_widths', JSON.stringify(colWeights));
+  }, [colWeights]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_panel_heights', JSON.stringify(panelHeights));
+  }, [panelHeights]);
 
   const handleMoomooModeToggle = () => {
     if (!moomooRealTimeActive) {
@@ -519,7 +587,7 @@ export default function App() {
   ) => {
     e.preventDefault();
     const startY = e.clientY;
-    const initialHeight = panelHeights[panelId] ?? 420;
+    const initialHeight = panelHeights[panelId] ?? DEFAULT_PANEL_HEIGHT;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaY = moveEvent.clientY - startY;
@@ -538,41 +606,109 @@ export default function App() {
     document.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Add a brand new ticker symbol to the registry
-  const handleAddTicker = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSymbolInput.trim()) return;
-    const sym = newSymbolInput.trim().toUpperCase().replace(/\s+/g, '_');
-    
-    // Check if exists
-    if (tickers.some(t => t.symbol === sym)) {
-      alert("この銘柄は既に登録されています。");
+  const selectTickerForPrimaryChart = (symbol: string) => {
+    setFocusedSymbolIndex(symbol);
+    setPanels((currentPanels) =>
+      currentPanels.map((panel, index) =>
+        index === 0
+          ? {
+              ...panel,
+              symbol,
+              comparisonSymbols: (panel.comparisonSymbols || []).filter(
+                (comparisonSymbol) => comparisonSymbol !== symbol
+              ),
+            }
+          : panel
+      )
+    );
+  };
+
+  const registerTickerCandidate = async (candidate: SymbolSearchCandidate) => {
+    if (tickers.some((ticker) => ticker.symbol === candidate.symbol)) {
+      selectTickerForPrimaryChart(candidate.symbol);
+      setTickerSearchOpen(false);
       return;
     }
 
-    const priceNum = parseFloat(newSymbolPrice) || 120.00;
-    const nameStr = newSymbolName.trim() || `${sym} Asset`;
-    const newTicker: TickerInfo = {
-      symbol: sym,
-      name: nameStr,
-      basePrice: priceNum,
-      dailyChangePct: parseFloat(((Math.random() - 0.5) * 5).toFixed(2))
-    };
+    setTickerSearchLoading(true);
+    setTickerSearchError(null);
+    try {
+      const response = await fetch('/api/moomoo/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: candidate.symbol }),
+      });
+      const data = await response.json();
+      if (!data.success || !Number(data.price)) {
+        throw new Error(data.error || 'Moomooから銘柄情報を取得できません。');
+      }
 
-    setTickers(prev => [...prev, newTicker]);
-    
-    // Create indicator default profile
-    if (!indicatorDatabase[sym]) {
-      setIndicatorDatabase(prev => ({
-        ...prev,
-        [sym]: createDefaultIndicatorSettings(sym)
+      const newTicker: TickerInfo = {
+        symbol: candidate.symbol,
+        name: candidate.name || data.name || candidate.symbol,
+        basePrice: Number(data.price),
+        dailyChangePct: Number(data.changePct || 0),
+      };
+
+      setTickers((currentTickers) => [...currentTickers, newTicker]);
+      setQuoteCache((currentQuotes) => ({
+        ...currentQuotes,
+        [candidate.symbol]: {
+          name: newTicker.name,
+          price: newTicker.basePrice,
+          changePct: newTicker.dailyChangePct,
+        },
       }));
+      setIndicatorDatabase((currentDatabase) => ({
+        ...currentDatabase,
+        [candidate.symbol]: currentDatabase[candidate.symbol]
+          || createDefaultIndicatorSettings(candidate.symbol),
+      }));
+      selectTickerForPrimaryChart(candidate.symbol);
+      setNewSymbolInput('');
+      setTickerSearchCandidates([]);
+      setTickerSearchOpen(false);
+    } catch (error) {
+      setTickerSearchError(
+        error instanceof Error ? error.message : '銘柄を登録できませんでした。'
+      );
+    } finally {
+      setTickerSearchLoading(false);
     }
+  };
 
-    setFocusedSymbolIndex(sym);
-    setNewSymbolInput('');
-    setNewSymbolName('');
-    setNewSymbolPrice('100');
+  // 銘柄名・証券コード・ティッカーから候補を検索する
+  const handleAddTicker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSymbolInput.trim()) return;
+    setTickerSearchLoading(true);
+    setTickerSearchError(null);
+    setTickerSearchCandidates([]);
+    try {
+      const response = await fetch('/api/moomoo/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: newSymbolInput.trim(), limit: 10 }),
+      });
+      const data = await response.json();
+      const candidates = Array.isArray(data.candidates)
+        ? data.candidates as SymbolSearchCandidate[]
+        : [];
+      if (!data.success || candidates.length === 0) {
+        throw new Error(data.error || '該当する銘柄が見つかりません。');
+      }
+      if (candidates.length === 1) {
+        await registerTickerCandidate(candidates[0]);
+      } else {
+        setTickerSearchCandidates(candidates);
+      }
+    } catch (error) {
+      setTickerSearchError(
+        error instanceof Error ? error.message : '銘柄検索に失敗しました。'
+      );
+    } finally {
+      setTickerSearchLoading(false);
+    }
   };
 
   // Remove symbol from search registry
@@ -585,12 +721,16 @@ export default function App() {
     
     // If any panel is using this symbol, switch it to remaining symbol
     const remaining = tickers.find(t => t.symbol !== symToRemove)?.symbol || 'VOO';
-    setPanels(prev => prev.map(p => {
-      if (p.symbol === symToRemove) {
-        return { ...p, symbol: remaining };
-      }
-      return p;
-    }));
+    setPanels(prev => prev.map(p => ({
+      ...p,
+      symbol: p.symbol === symToRemove ? remaining : p.symbol,
+      comparisonSymbols: (p.comparisonSymbols || []).filter(
+        (symbol) => symbol !== symToRemove
+      ),
+    })));
+    if (focusedSymbolIndex === symToRemove) {
+      setFocusedSymbolIndex(remaining);
+    }
   };
 
   // Switch a panel engine style
@@ -621,7 +761,10 @@ export default function App() {
       scrollOffsetPct: 100,
       showRsi: true,
       showMacd: false,
-      showVolume: true
+      showVolume: true,
+      priceScale: 1,
+      rsiHeightPct: 25,
+      macdHeightPct: 25,
     };
 
     setPanels(prev => [...prev, newPanel]);
@@ -703,8 +846,8 @@ export default function App() {
                 <div 
                   key={ticker.symbol} 
                   className="inline-flex flex-col cursor-pointer hover:bg-[#1a1d2e] px-2 py-0.5 rounded transition-colors"
-                  onClick={() => setFocusedSymbolIndex(ticker.symbol)}
-                  title="クリックして指標設定の対象にする"
+                  onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                  title="左側のチャートに表示する"
                 >
                   <div className="flex items-center space-x-1.5">
                     <span className="font-bold text-gray-200 text-xs">{ticker.symbol}</span>
@@ -717,7 +860,7 @@ export default function App() {
                     </span>
                   </div>
                   <span className="text-[10px] text-gray-400 font-mono mt-0.5">
-                    {hasRealQuote ? `$${ticker.currentPrice.toFixed(2)}` : 'N/A'}
+                    {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
                   </span>
                 </div>
               );
@@ -783,7 +926,7 @@ export default function App() {
                         <div
                           id={`chart-panel-container-${panel.id}`}
                           style={{
-                            height: `${panelHeights[panel.id] ?? 420}px`,
+                            height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
                           className="w-full flex flex-col shrink-0"
                         >
@@ -984,7 +1127,7 @@ export default function App() {
                                   symbol={panel.symbol} 
                                   timeframe={panel.timeframe} 
                                   containerId={panel.id} 
-                                  height={panelHeights[panel.id] ?? 420}
+                                  height={panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}
                                 />
                               ) : (
                                 <InteractiveCustomChart 
@@ -1009,6 +1152,12 @@ export default function App() {
                                     }, {} as Record<string, Candle[]>)
                                   }
                                   emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
+                                  priceScale={panel.priceScale ?? 1}
+                                  setPriceScale={(scale) => handleUpdatePanel(panel.id, { priceScale: scale })}
+                                  rsiHeightPct={panel.rsiHeightPct ?? 25}
+                                  setRsiHeightPct={(pct) => handleUpdatePanel(panel.id, { rsiHeightPct: pct })}
+                                  macdHeightPct={panel.macdHeightPct ?? 25}
+                                  setMacdHeightPct={(pct) => handleUpdatePanel(panel.id, { macdHeightPct: pct })}
                                 />
                               )}
                             </div>
@@ -1040,67 +1189,7 @@ export default function App() {
         </div>
 
         {/* Right-hand Sidebar - Collapsible & Default Closed */}
-        <div className={`transition-all duration-300 ease-in-out shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] p-4 flex flex-col overflow-y-auto ${sidebarOpen ? 'w-full md:w-[350px]' : 'w-0 !p-0 !border-l-0 overflow-hidden'}`}>
-          
-          {/* 0. MOOMOO OPENAPI (OPEND) SYNC CONFIG */}
-          <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d] flex flex-col space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-gray-200 text-xs tracking-wider uppercase flex items-center space-x-1.5">
-                <Database className="w-4 h-4 text-orange-400" />
-                <span>moomoo API 接続設定</span>
-              </span>
-              <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wide ${
-                moomooStatus === 'connected' ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-900' :
-                moomooStatus === 'connecting' ? 'bg-amber-950/80 text-amber-300 border border-amber-900 animate-pulse' :
-                moomooStatus === 'error' ? 'bg-red-950/80 text-red-300 border border-red-900' :
-                'bg-gray-900 text-gray-400 border border-gray-800'
-              }`}>
-                {moomooStatus === 'connected' && '接続完了（実データ）'}
-                {moomooStatus === 'connecting' && '接続確認中'}
-                {moomooStatus === 'error' && '接続エラー'}
-                {moomooStatus === 'disconnected' && 'デモデータ'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between bg-[#0c0e1a] p-2 rounded border border-[#1e2235]">
-              <span className="text-[11px] text-gray-300 font-medium">Moomoo実データを使用</span>
-              <button
-                type="button"
-                aria-label="Moomoo実データの使用を切り替える"
-                onClick={handleMoomooModeToggle}
-                className={`w-10 h-6 rounded-full p-0.5 transition-colors duration-200 cursor-pointer ${moomooRealTimeActive ? 'bg-emerald-500' : 'bg-gray-700'}`}
-              >
-                <div className={`bg-white w-5 h-5 rounded-full shadow-md transform duration-200 ease-in-out ${moomooRealTimeActive ? 'translate-x-4' : 'translate-x-0'}`} />
-              </button>
-            </div>
-
-            {moomooRealTimeActive && (
-              <div className="flex flex-col space-y-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => checkMoomooStatus()}
-                  className="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1.5 font-bold text-xs transition cursor-pointer"
-                >
-                  OpenD接続を確認
-                </button>
-
-                {moomooStatus === 'error' && moomooError && (
-                  <div className="bg-red-950/40 border border-red-900/60 p-2.5 rounded text-[10px] text-red-300 leading-normal font-mono">
-                    <strong>エラー詳細:</strong> {moomooError}
-                  </div>
-                )}
-
-                <div className="text-[10px] text-gray-400 bg-[#0c0e1a] p-2.5 rounded border border-[#1e2235]/60 leading-relaxed font-sans">
-                  <strong>接続経路</strong>
-                  <ul className="list-disc pl-3.5 mt-1 space-y-1 text-gray-400">
-                    <li>ブラウザはMooViewサーバーにだけ接続します。</li>
-                    <li>MooViewサーバーが認証付きゲートウェイへ接続します。</li>
-                    <li>ゲートウェイがOpenDのポート11111から相場を取得します。</li>
-                  </ul>
-                </div>
-              </div>
-            )}
-          </div>
+        <div className={`transition-all duration-300 ease-in-out shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] p-4 flex flex-col overflow-y-auto ${sidebarOpen ? 'w-full md:w-[420px]' : 'w-0 !p-0 !border-l-0 overflow-hidden'}`}>
 
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
           <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d]">
@@ -1140,72 +1229,140 @@ export default function App() {
             </button>
           </div>
 
-          {/* 2. SYMBOL REGISTRATION WORKFLOW */}
-          <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d]">
-            <form onSubmit={handleAddTicker} className="flex flex-col gap-2">
-              <input
-                type="text"
-                placeholder="シンボル (例: TSLA)"
-                value={newSymbolInput}
-                onChange={(e) => setNewSymbolInput(e.target.value)}
-                className="bg-[#1c1f30] border border-[#2d3142] text-white rounded text-xs px-2.5 py-1.5 w-full outline-none focus:border-blue-500 placeholder-gray-500 font-bold uppercase"
-              />
-              <input
-                type="text"
-                placeholder="名称 (例: Tesla, Inc.)"
-                value={newSymbolName}
-                onChange={(e) => setNewSymbolName(e.target.value)}
-                className="bg-[#1c1f30] border border-[#2d3142] text-white rounded text-xs px-2.5 py-1.5 w-full outline-none focus:border-blue-500 placeholder-gray-500"
-              />
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  placeholder="基準価格 ($)"
-                  value={newSymbolPrice}
-                  onChange={(e) => setNewSymbolPrice(e.target.value)}
-                  className="bg-[#1c1f30] border border-[#2d3142] text-white rounded text-xs px-2 py-1.5 w-full outline-none focus:border-blue-500 text-right font-mono"
-                />
-                <button
-                  type="submit"
-                  id="btn-add-ticker"
-                  className="bg-blue-600 hover:bg-blue-500 hover:shadow-md text-white rounded text-xs px-3.5 py-1.5 font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer shrink-0"
-                >
-                  <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                  <span>追加</span>
-                </button>
+          {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
+          <div className="mb-4 bg-[#10131f] rounded-lg border border-[#21263d] overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2e3d]">
+              <div>
+                <div className="text-sm font-bold text-white">ウォッチリスト</div>
+                <div className="text-[9px] text-gray-500">行を選ぶと左側チャートを切り替えます</div>
               </div>
-            </form>
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setTickerSearchOpen((open) => !open);
+                  setTickerSearchError(null);
+                  setTickerSearchCandidates([]);
+                }}
+                className="w-8 h-8 rounded hover:bg-[#242838] text-gray-300 hover:text-white flex items-center justify-center transition"
+                aria-label="銘柄を追加"
+                title="銘柄を追加"
+              >
+                {tickerSearchOpen ? <X className="w-4 h-4" /> : <Plus className="w-5 h-5" />}
+              </button>
+            </div>
 
-          {/* 3. REGISTERED SYMBOLS LIST */}
-          <div className="mb-4 bg-[#141624] p-3 rounded-lg border border-[#21263d]">
-            <div className="flex flex-wrap gap-1.5 max-h-[140px] overflow-y-auto pr-1">
-              {tickers.map(t => (
-                <div 
-                  key={t.symbol}
-                  className="inline-flex items-center space-x-1.5 bg-[#1c1f30] border border-[#2d3142] pl-2 px-1 py-1 rounded text-xs font-mono"
-                >
-                  <span 
-                    className="font-bold text-white uppercase cursor-pointer hover:underline"
-                    onClick={() => setFocusedSymbolIndex(t.symbol)}
-                  >
-                    {t.symbol}
-                    {focusedSymbolIndex === t.symbol && <span className="text-blue-400 text-[10px] ml-1">●</span>}
-                  </span>
+            {tickerSearchOpen && (
+              <div className="p-3 border-b border-[#2a2e3d] bg-[#0c0e18]">
+                <form onSubmit={handleAddTicker} className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-500" />
+                    <input
+                      type="text"
+                      placeholder="任天堂、Nintendo、7974、AAPL"
+                      value={newSymbolInput}
+                      onChange={(e) => setNewSymbolInput(e.target.value)}
+                      className="bg-[#171a27] border border-[#303548] text-white rounded text-xs pl-8 pr-2.5 py-2 w-full outline-none focus:border-blue-500 placeholder-gray-600"
+                      autoFocus
+                    />
+                  </div>
                   <button
-                    type="button"
-                    onClick={() => handleRemoveTicker(t.symbol)}
-                    disabled={tickers.length <= 2}
-                    className="p-0.5 hover:bg-[#341b22] text-gray-500 hover:text-red-400 rounded transition-colors disabled:opacity-20 cursor-pointer"
+                    type="submit"
+                    id="btn-add-ticker"
+                    disabled={tickerSearchLoading || !newSymbolInput.trim()}
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded text-xs px-3 py-2 font-bold transition"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    {tickerSearchLoading ? '検索中' : '検索'}
                   </button>
-                </div>
-              ))}
+                </form>
+
+                {tickerSearchError && (
+                  <div className="mt-2 text-[10px] text-red-300 bg-red-950/30 border border-red-900/50 rounded p-2">
+                    {tickerSearchError}
+                  </div>
+                )}
+
+                {tickerSearchCandidates.length > 0 && (
+                  <div className="mt-2 max-h-52 overflow-y-auto border border-[#292e40] rounded">
+                    {tickerSearchCandidates.map((candidate) => (
+                      <button
+                        type="button"
+                        key={candidate.symbol}
+                        onClick={() => registerTickerCandidate(candidate)}
+                        className="w-full px-2.5 py-2 flex items-center justify-between text-left border-b last:border-b-0 border-[#242938] hover:bg-[#1b2030] transition"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-xs font-bold text-white truncate">{candidate.name}</span>
+                          <span className="block text-[9px] text-gray-500 truncate">{candidate.nameEn || candidate.category}</span>
+                        </span>
+                        <span className="font-mono text-[11px] text-blue-300 ml-3">{candidate.symbol}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-[minmax(0,1fr)_100px_72px_24px] px-3 py-2 border-b border-[#2a2e3d] text-[10px] text-gray-500 font-bold">
+              <span>銘柄</span>
+              <span className="text-right">現在値</span>
+              <span className="text-right">変動率</span>
+              <span />
+            </div>
+
+            <div className="max-h-80 overflow-y-auto">
+              {liveTickerStats.map((ticker) => {
+                const hasQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
+                const isPositive = hasQuote && ticker.computedChange >= 0;
+                const isSelected = panels[0]?.symbol === ticker.symbol;
+                return (
+                  <div
+                    key={ticker.symbol}
+                    className={`grid grid-cols-[minmax(0,1fr)_100px_72px_24px] items-center px-3 border-b border-[#242836] last:border-b-0 transition ${
+                      isSelected ? 'bg-blue-950/35' : 'hover:bg-[#171b28]'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                      className="py-2.5 text-left min-w-0"
+                      title={`${ticker.name}を左側チャートに表示`}
+                    >
+                      <span className="block text-xs font-bold text-gray-100 truncate">{ticker.name}</span>
+                      <span className="block text-[9px] font-mono text-gray-500">{ticker.symbol}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                      className="py-2.5 text-right font-mono text-xs text-gray-200"
+                    >
+                      {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                      className={`py-2.5 text-right font-mono text-xs ${
+                        !hasQuote ? 'text-gray-600' : isPositive ? 'text-[#20c7b0]' : 'text-[#ff4961]'
+                      }`}
+                    >
+                      {hasQuote ? `${ticker.computedChange >= 0 ? '+' : ''}${ticker.computedChange.toFixed(2)}%` : 'N/A'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTicker(ticker.symbol)}
+                      disabled={tickers.length <= 1}
+                      className="text-gray-600 hover:text-red-400 disabled:opacity-20 flex justify-end"
+                      aria-label={`${ticker.name}を削除`}
+                      title="ウォッチリストから削除"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
-          {/* 4. INDICATOR PARAMETERS */}
+          {/* 3. INDICATOR PARAMETERS */}
           <div className="flex-1 min-h-0">
             {focusedSymbolIndex && indicatorDatabase[focusedSymbolIndex] ? (
               <div className="flex flex-col h-full">
@@ -1213,7 +1370,7 @@ export default function App() {
                   <Sliders className="w-3.5 h-3.5 text-[#26a69a]" />
                   <span>指標設定: <b className="text-white">{focusedSymbolIndex}</b></span>
                 </div>
-                <IndicatorSettingsPanel 
+                <IndicatorSettingsPanel
                   settings={indicatorDatabase[focusedSymbolIndex]}
                   onChange={handleUpdateIndicators}
                   onReset={() => handleResetIndicators(focusedSymbolIndex)}
@@ -1222,8 +1379,8 @@ export default function App() {
             ) : (
               <div className="text-center py-8 text-gray-500 bg-[#141624] rounded-lg border border-dashed border-gray-800">
                 <Settings className="w-8 h-8 mx-auto opacity-30 mb-2" />
-                <p>上のリストから銘柄を選択して</p>
-                <p>個別のインジケーターをカスタマイズします</p>
+                <p>ウォッチリストから銘柄を選択して</p>
+                <p>インジケーターを設定します</p>
               </div>
             )}
           </div>
@@ -1240,12 +1397,64 @@ export default function App() {
                 <Database className="w-3.5 h-3.5 text-[#26a69a]" />
                 <span>Moomoo OpenAPI:</span>
               </span>
-              <span className="text-gray-200 font-bold">接続中</span>
+              <span className="text-gray-200 font-bold">
+                {moomooStatus === 'connected' ? '接続中' : moomooStatus === 'error' ? '接続エラー' : '確認中'}
+              </span>
             </div>
             <div className="flex items-center justify-between text-[11px] font-mono">
               <span className="text-gray-400">応答速度:</span>
               <span className="text-[#26a69a] font-bold">{networkLatency}ms</span>
             </div>
+          </div>
+
+          {/* 5. MOOMOO OPENAPI SETTINGS */}
+          <div className="mt-4 bg-[#141624] p-3 rounded-lg border border-[#21263d] flex flex-col space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-200 text-xs tracking-wider uppercase flex items-center space-x-1.5">
+                <Database className="w-4 h-4 text-orange-400" />
+                <span>moomoo API 接続設定</span>
+              </span>
+              <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wide ${
+                moomooStatus === 'connected' ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-900' :
+                moomooStatus === 'connecting' ? 'bg-amber-950/80 text-amber-300 border border-amber-900 animate-pulse' :
+                moomooStatus === 'error' ? 'bg-red-950/80 text-red-300 border border-red-900' :
+                'bg-gray-900 text-gray-400 border border-gray-800'
+              }`}>
+                {moomooStatus === 'connected' && '接続完了（実データ）'}
+                {moomooStatus === 'connecting' && '接続確認中'}
+                {moomooStatus === 'error' && '接続エラー'}
+                {moomooStatus === 'disconnected' && 'デモデータ'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between bg-[#0c0e1a] p-2 rounded border border-[#1e2235]">
+              <span className="text-[11px] text-gray-300 font-medium">Moomoo実データを使用</span>
+              <button
+                type="button"
+                aria-label="Moomoo実データの使用を切り替える"
+                onClick={handleMoomooModeToggle}
+                className={`w-10 h-6 rounded-full p-0.5 transition-colors duration-200 cursor-pointer ${moomooRealTimeActive ? 'bg-emerald-500' : 'bg-gray-700'}`}
+              >
+                <div className={`bg-white w-5 h-5 rounded-full shadow-md transform duration-200 ease-in-out ${moomooRealTimeActive ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
+            {moomooRealTimeActive && (
+              <div className="flex flex-col space-y-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => checkMoomooStatus()}
+                  className="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1.5 font-bold text-xs transition cursor-pointer"
+                >
+                  OpenD接続を確認
+                </button>
+                {moomooStatus === 'error' && moomooError && (
+                  <div className="bg-red-950/40 border border-red-900/60 p-2.5 rounded text-[10px] text-red-300 leading-normal font-mono">
+                    <strong>エラー詳細:</strong> {moomooError}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
         </div>

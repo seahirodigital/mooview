@@ -23,6 +23,12 @@ interface InteractiveCustomChartProps {
   comparisonSymbols?: string[];
   comparisonCandles?: Record<string, Candle[]>;
   emptyMessage?: string;
+  priceScale: number;
+  setPriceScale: (scale: number) => void;
+  rsiHeightPct: number;
+  setRsiHeightPct: (pct: number) => void;
+  macdHeightPct: number;
+  setMacdHeightPct: (pct: number) => void;
 }
 
 export function InteractiveCustomChart({
@@ -39,6 +45,12 @@ export function InteractiveCustomChart({
   comparisonSymbols = [],
   comparisonCandles = {},
   emptyMessage = 'データを取得中...',
+  priceScale,
+  setPriceScale,
+  rsiHeightPct,
+  setRsiHeightPct,
+  macdHeightPct,
+  setMacdHeightPct,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 500, height: 350 });
@@ -52,6 +64,10 @@ export function InteractiveCustomChart({
   const [isDragging, setIsDragging] = useState(false);
   const [dragStartX, setDragStartX] = useState(0);
   const [dragStartOffsetPct, setDragStartOffsetPct] = useState(0);
+  const [isScalingPrice, setIsScalingPrice] = useState(false);
+  const [priceScaleStartY, setPriceScaleStartY] = useState(0);
+  const [priceScaleStartValue, setPriceScaleStartValue] = useState(1);
+  const [priceAxisFocused, setPriceAxisFocused] = useState(false);
 
   // ResizeObserver to automatically map size transitions
   useEffect(() => {
@@ -110,26 +126,23 @@ export function InteractiveCustomChart({
   const macd = useMemo(() => calculateMACD(candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal), [candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal]);
 
   // Height of sections inside the canvas (percentages of total height)
-  const [rsiPct, setRsiPct] = useState(25);
-  const [macdPct, setMacdPct] = useState(25);
-
   const activeRsi = showRsi && indicators.rsi.enabled;
   const activeMacd = showMacd && indicators.macd.enabled;
 
-  const rsiHeight = activeRsi ? Math.max(30, (height * rsiPct) / 100) : 0;
-  const macdHeight = activeMacd ? Math.max(30, (height * macdPct) / 100) : 0;
+  const rsiHeight = activeRsi ? Math.max(30, (height * rsiHeightPct) / 100) : 0;
+  const macdHeight = activeMacd ? Math.max(30, (height * macdHeightPct) / 100) : 0;
   const mainHeight = Math.max(100, height - rsiHeight - macdHeight);
 
   // Mouse event handlers for indicators layout dragging inside the chart
   const handleRsiDividerMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
-    const initialRsiPct = rsiPct;
+    const initialRsiPct = rsiHeightPct;
     
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaY = moveEvent.clientY - startY;
       const deltaPct = (deltaY / height) * 100;
-      setRsiPct(Math.max(10, Math.min(45, initialRsiPct - deltaPct)));
+      setRsiHeightPct(Math.max(10, Math.min(45, initialRsiPct - deltaPct)));
     };
 
     const handleMouseUp = () => {
@@ -144,12 +157,12 @@ export function InteractiveCustomChart({
   const handleMacdDividerMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
-    const initialMacdPct = macdPct;
+    const initialMacdPct = macdHeightPct;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaY = moveEvent.clientY - startY;
       const deltaPct = (deltaY / height) * 100;
-      setMacdPct(Math.max(10, Math.min(45, initialMacdPct - deltaPct)));
+      setMacdHeightPct(Math.max(10, Math.min(45, initialMacdPct - deltaPct)));
     };
 
     const handleMouseUp = () => {
@@ -241,12 +254,16 @@ export function InteractiveCustomChart({
 
     const delta = highest - lowest;
     const pad = delta * 0.05 || 2.0;
+    const rawMin = Math.max(0.01, lowest - pad);
+    const rawMax = highest + pad;
+    const center = (rawMin + rawMax) / 2;
+    const halfRange = (rawMax - rawMin) / 2 / Math.max(0.25, priceScale);
 
     return {
-      min: Math.max(0.01, lowest - pad),
-      max: highest + pad
+      min: Math.max(0.01, center - halfRange),
+      max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, boll, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, boll, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -275,6 +292,12 @@ export function InteractiveCustomChart({
     setZoomFactor(parseFloat(nextZf.toFixed(2)));
   };
 
+  const adjustPriceScale = (zoomIn: boolean) => {
+    const multiplier = zoomIn ? 1.12 : 1 / 1.12;
+    const nextScale = Math.max(0.25, Math.min(8, priceScale * multiplier));
+    setPriceScale(parseFloat(nextScale.toFixed(3)));
+  };
+
   // Reset offset coordinates to latest index
   const snapToPresent = () => {
     setScrollOffsetPct(100); // 100% represents latest in this offset model
@@ -282,6 +305,17 @@ export function InteractiveCustomChart({
 
   // SVG Mouse Drag Panning handlers
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement, MouseEvent>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    if (mouseX >= plotWidth) {
+      setPriceAxisFocused(true);
+      setIsScalingPrice(true);
+      setPriceScaleStartY(e.clientY);
+      setPriceScaleStartValue(priceScale);
+      return;
+    }
+
+    setPriceAxisFocused(false);
     setIsDragging(true);
     setDragStartX(e.clientX);
     setDragStartOffsetPct(scrollOffsetPct);
@@ -291,6 +325,15 @@ export function InteractiveCustomChart({
     const rect = e.currentTarget.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+
+    if (isScalingPrice) {
+      const deltaY = e.clientY - priceScaleStartY;
+      const nextScale = priceScaleStartValue * Math.exp(-deltaY / 120);
+      setPriceScale(
+        parseFloat(Math.max(0.25, Math.min(8, nextScale)).toFixed(3))
+      );
+      return;
+    }
 
     // Track dragging for pan scroll
     if (isDragging) {
@@ -325,7 +368,19 @@ export function InteractiveCustomChart({
 
   const handleMouseUpOrLeave = () => {
     setIsDragging(false);
+    setIsScalingPrice(false);
     setHoverData(null);
+  };
+
+  const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    if (mouseX >= plotWidth || priceAxisFocused) {
+      adjustPriceScale(e.deltaY < 0);
+      return;
+    }
+    adjustZoom(e.deltaY < 0);
   };
 
   const currentCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
@@ -412,7 +467,14 @@ export function InteractiveCustomChart({
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUpOrLeave}
             onMouseLeave={handleMouseUpOrLeave}
-            className={`w-full h-full bg-[#111320] ${isDragging ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+            onWheel={handleWheel}
+            className={`w-full h-full bg-[#111320] ${
+              isScalingPrice
+                ? 'cursor-ns-resize'
+                : isDragging
+                  ? 'cursor-grabbing'
+                  : 'cursor-crosshair'
+            }`}
           >
             {/* DEF PLOT GRADIENTS */}
             <defs>
@@ -432,6 +494,14 @@ export function InteractiveCustomChart({
 
             {/* ================= A. MAIN PRICE GRID AREA ================= */}
             <g>
+              <rect
+                x={plotWidth}
+                y={0}
+                width={60}
+                height={mainHeight}
+                fill={priceAxisFocused ? 'rgba(59, 130, 246, 0.06)' : 'transparent'}
+                className="cursor-ns-resize"
+              />
               {/* Grid rules */}
               {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
                 const bottomLabelPadding = 25;

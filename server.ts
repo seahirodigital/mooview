@@ -24,6 +24,9 @@ app.post('/api/moomoo/quote', (request, response) =>
 app.post('/api/moomoo/kline', (request, response) =>
   handleMoomooRequest('kline', request, response),
 );
+app.post('/api/moomoo/search', (request, response) =>
+  handleMoomooRequest('search', request, response),
+);
 
 function getGatewayUrl(): URL {
   return new URL(process.env.MOOMOO_GATEWAY_URL || 'http://127.0.0.1:8787');

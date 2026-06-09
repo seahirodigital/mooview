@@ -2,13 +2,24 @@ import hmac
 import json
 import math
 import os
+import re
 import threading
+import unicodedata
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
-from moomoo import AuType, KLType, OpenQuoteContext, RET_OK, SubType
+from moomoo import (
+    AuType,
+    KLType,
+    Market,
+    OpenQuoteContext,
+    RET_OK,
+    SecurityType,
+    SubType,
+)
 
 
 OPEND_HOST = os.getenv("MOOMOO_OPEND_HOST", "127.0.0.1")
@@ -16,6 +27,7 @@ OPEND_PORT = int(os.getenv("MOOMOO_OPEND_PORT", "11111"))
 GATEWAY_HOST = os.getenv("MOOMOO_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("MOOMOO_GATEWAY_PORT", "8787"))
 GATEWAY_KEY = os.getenv("MOOMOO_GATEWAY_KEY", "")
+JP_SYMBOLS_PATH = Path(__file__).resolve().parent / "data" / "jp_symbols.json"
 
 KLINE_TYPES = {
     "1m": (SubType.K_1M, KLType.K_1M),
@@ -56,9 +68,16 @@ def normalize_symbol(raw_symbol: str) -> str:
         return f"JP.{symbol[:-2]}"
     if symbol.endswith(".JP"):
         return f"JP.{symbol[:-3]}"
+    if re.fullmatch(r"\d{3}[A-Z0-9]", symbol):
+        return f"JP.{symbol}"
     if symbol.isdigit() and len(symbol) == 5:
         return f"HK.{symbol}"
     return f"US.{symbol}"
+
+
+def normalize_search_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"[\s\u3000・･._\-（）()株式会社]+", "", normalized)
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -85,6 +104,8 @@ class MoomooQuoteService:
         self._context: Optional[OpenQuoteContext] = None
         self._subscriptions = set()
         self._lock = threading.RLock()
+        self._jp_symbols: Optional[List[Dict[str, str]]] = None
+        self._jp_english_names: Optional[Dict[str, str]] = None
 
     def _get_context(self) -> OpenQuoteContext:
         if self._context is None:
@@ -113,6 +134,114 @@ class MoomooQuoteService:
         if ret != RET_OK:
             raise RuntimeError(str(message))
         self._subscriptions.add(subscription)
+
+    def _load_jp_symbols(self) -> List[Dict[str, str]]:
+        if self._jp_symbols is None:
+            if not JP_SYMBOLS_PATH.exists():
+                raise RuntimeError(
+                    f"日本株検索データが見つかりません: {JP_SYMBOLS_PATH}"
+                )
+            with JP_SYMBOLS_PATH.open("r", encoding="utf-8") as file:
+                self._jp_symbols = json.load(file)
+        return self._jp_symbols
+
+    def _load_jp_english_names(self) -> Dict[str, str]:
+        if self._jp_english_names is None:
+            ret, data = self._get_context().get_stock_basicinfo(
+                Market.JP,
+                SecurityType.STOCK,
+            )
+            if ret != RET_OK:
+                raise RuntimeError(str(data))
+            self._jp_english_names = {
+                str(row.get("code", "")): str(row.get("name", ""))
+                for _, row in data.iterrows()
+            }
+        return self._jp_english_names
+
+    def search(self, raw_query: str, limit: int = 8) -> Dict[str, Any]:
+        query = raw_query.strip()
+        if not query:
+            raise ValueError("銘柄名または証券コードを入力してください。")
+
+        normalized_query = normalize_search_text(query)
+        result_limit = max(1, min(int(limit), 20))
+
+        with self._lock:
+            jp_symbols = self._load_jp_symbols()
+            english_names = self._load_jp_english_names()
+            candidates = []
+
+            for item in jp_symbols:
+                code = str(item["code"])
+                symbol = f"JP.{code}"
+                japanese_name = str(item["name"])
+                english_name = english_names.get(symbol, "")
+                searchable_values = [
+                    normalize_search_text(code),
+                    normalize_search_text(symbol),
+                    normalize_search_text(japanese_name),
+                    normalize_search_text(english_name),
+                ]
+
+                score = None
+                if normalized_query in searchable_values:
+                    score = 0
+                elif any(
+                    value.startswith(normalized_query)
+                    for value in searchable_values
+                ):
+                    score = 1
+                elif any(normalized_query in value for value in searchable_values):
+                    score = 2
+
+                if score is not None:
+                    candidates.append(
+                        {
+                            "score": score,
+                            "symbol": symbol,
+                            "code": code,
+                            "name": japanese_name,
+                            "nameEn": english_name,
+                            "market": "JP",
+                            "category": str(item.get("category", "")),
+                        }
+                    )
+
+            candidates.sort(
+                key=lambda item: (
+                    item["score"],
+                    len(item["name"]),
+                    item["code"],
+                )
+            )
+
+            if not candidates and re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9._-]*",
+                query,
+            ):
+                symbol = normalize_symbol(query)
+                candidates.append(
+                    {
+                        "score": 0,
+                        "symbol": symbol,
+                        "code": symbol.split(".", 1)[1],
+                        "name": query.upper(),
+                        "nameEn": query.upper(),
+                        "market": symbol.split(".", 1)[0],
+                        "category": "",
+                    }
+                )
+
+            trimmed = candidates[:result_limit]
+            for item in trimmed:
+                item.pop("score", None)
+
+            return {
+                "success": True,
+                "query": query,
+                "candidates": trimmed,
+            }
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -273,6 +402,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     str(payload.get("symbol", "")),
                     str(payload.get("timeframe", "5m")),
                     int(payload.get("reqNum", 200)),
+                )
+                self._send_json(200, result)
+                return
+            if self.path == "/v1/search":
+                result = SERVICE.search(
+                    str(payload.get("query", "")),
+                    int(payload.get("limit", 8)),
                 )
                 self._send_json(200, result)
                 return

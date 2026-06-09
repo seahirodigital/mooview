@@ -47,6 +47,9 @@ export interface ChartPanel {
   showMacd: boolean;
   showVolume: boolean;
   comparisonSymbols?: string[];
+  priceScale?: number;
+  rsiHeightPct?: number;
+  macdHeightPct?: number;
 }
 
 export interface TickerInfo {

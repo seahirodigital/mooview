@@ -1,10 +1,65 @@
 import { SymbolIndicatorSettings } from '../types';
-import { SlidersHorizontal, Sliders, CheckCircle, RotateCcw } from 'lucide-react';
+import { RotateCcw } from 'lucide-react';
 
 interface IndicatorSettingsPanelProps {
   settings: SymbolIndicatorSettings;
   onChange: (updated: SymbolIndicatorSettings) => void;
   onReset: () => void;
+}
+
+const COLOR_PALETTE = [
+  '#e7c039',
+  '#20aced',
+  '#e152f2',
+  '#f85f73',
+  '#00e575',
+  '#6c5dd3',
+  '#f3a14b',
+  '#2d8cf0',
+  '#ff9900',
+  '#26a69a',
+  '#ef5350',
+  '#ffffff',
+];
+
+interface ColorControlProps {
+  label: string;
+  color: string;
+  onChange: (color: string) => void;
+}
+
+function ColorControl({ label, color, onChange }: ColorControlProps) {
+  return (
+    <div className="grid grid-cols-[92px_1fr] gap-2 items-start">
+      <span className="text-gray-400 pt-1">{label}</span>
+      <div className="flex flex-wrap gap-1 items-center">
+        {COLOR_PALETTE.map((paletteColor) => (
+          <button
+            type="button"
+            key={paletteColor}
+            onClick={() => onChange(paletteColor)}
+            className={`w-4 h-4 rounded-full border transition-transform hover:scale-125 ${
+              color.toLowerCase() === paletteColor.toLowerCase()
+                ? 'border-white ring-1 ring-blue-400'
+                : 'border-white/20'
+            }`}
+            style={{ backgroundColor: paletteColor }}
+            aria-label={`${label}を${paletteColor}に変更`}
+            title={paletteColor}
+          />
+        ))}
+        <label className="relative w-5 h-5 rounded overflow-hidden border border-white/30 cursor-pointer" title="任意の色を選択">
+          <input
+            type="color"
+            value={color}
+            onChange={(event) => onChange(event.target.value)}
+            className="absolute inset-[-4px] w-8 h-8 cursor-pointer"
+            aria-label={`${label}の任意色`}
+          />
+        </label>
+      </div>
+    </div>
+  );
 }
 
 export function IndicatorSettingsPanel({ settings, onChange, onReset }: IndicatorSettingsPanelProps) {
@@ -107,6 +162,11 @@ export function IndicatorSettingsPanel({ settings, onChange, onReset }: Indicato
                 className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
               />
             </div>
+            <div className="space-y-2 pt-1">
+              <ColorControl label="短期線" color={ma.color1} onChange={(color) => handleNestedChange('ma', 'color1', color)} />
+              <ColorControl label="中期線" color={ma.color2} onChange={(color) => handleNestedChange('ma', 'color2', color)} />
+              <ColorControl label="長期線" color={ma.color3} onChange={(color) => handleNestedChange('ma', 'color3', color)} />
+            </div>
           </div>
         )}
       </div>
@@ -148,6 +208,10 @@ export function IndicatorSettingsPanel({ settings, onChange, onReset }: Indicato
                 onChange={(e) => handleNestedChange('ema', 'period2', Math.max(1, parseInt(e.target.value) || 26))}
                 className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
               />
+            </div>
+            <div className="space-y-2 pt-1">
+              <ColorControl label="短期EMA" color={ema.color1} onChange={(color) => handleNestedChange('ema', 'color1', color)} />
+              <ColorControl label="長期EMA" color={ema.color2} onChange={(color) => handleNestedChange('ema', 'color2', color)} />
             </div>
           </div>
         )}
@@ -192,6 +256,7 @@ export function IndicatorSettingsPanel({ settings, onChange, onReset }: Indicato
                 className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
               />
             </div>
+            <ColorControl label="バンド色" color={boll.color} onChange={(color) => handleNestedChange('boll', 'color', color)} />
           </div>
         )}
       </div>
@@ -245,6 +310,7 @@ export function IndicatorSettingsPanel({ settings, onChange, onReset }: Indicato
                 className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
               />
             </div>
+            <ColorControl label="RSI線" color={rsi.color} onChange={(color) => handleNestedChange('rsi', 'color', color)} />
           </div>
         )}
       </div>
@@ -297,6 +363,12 @@ export function IndicatorSettingsPanel({ settings, onChange, onReset }: Indicato
                 onChange={(e) => handleNestedChange('macd', 'signal', Math.max(1, parseInt(e.target.value) || 9))}
                 className="bg-[#1c1f35] border border-[#2c3552] rounded text-white px-1.5 py-0.5 text-right w-full font-mono"
               />
+            </div>
+            <div className="space-y-2 pt-1">
+              <ColorControl label="MACD線" color={macd.colorMacd} onChange={(color) => handleNestedChange('macd', 'colorMacd', color)} />
+              <ColorControl label="シグナル" color={macd.colorSignal} onChange={(color) => handleNestedChange('macd', 'colorSignal', color)} />
+              <ColorControl label="上昇バー" color={macd.colorHistUp} onChange={(color) => handleNestedChange('macd', 'colorHistUp', color)} />
+              <ColorControl label="下降バー" color={macd.colorHistDown} onChange={(color) => handleNestedChange('macd', 'colorHistDown', color)} />
             </div>
           </div>
         )}

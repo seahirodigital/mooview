@@ -1,4 +1,4 @@
-export type MoomooAction = 'status' | 'quote' | 'kline';
+export type MoomooAction = 'status' | 'quote' | 'kline' | 'search';
 
 export interface MoomooGatewayResult {
   success?: boolean;

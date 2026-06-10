@@ -53,6 +53,19 @@ interface WatchlistColumnWidths {
   change: number;
 }
 
+const WATCHLIST_COLUMN_MIN_WIDTHS: WatchlistColumnWidths = {
+  symbol: 72,
+  price: 74,
+  change: 66,
+};
+const WATCHLIST_COLUMN_MAX_WIDTHS: WatchlistColumnWidths = {
+  symbol: 420,
+  price: 220,
+  change: 180,
+};
+const WATCHLIST_ACTION_COLUMN_WIDTH = 24;
+const WATCHLIST_GRID_HORIZONTAL_PADDING = 16;
+
 interface WatchlistSortState {
   column: WatchlistColumnKey | null;
   direction: SortDirection | null;
@@ -122,10 +135,59 @@ function clampStoredNumber(value: unknown, fallback: number, min: number, max: n
 function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
   const source = raw && typeof raw === 'object' ? raw as Partial<WatchlistColumnWidths> : {};
   return {
-    symbol: clampStoredNumber(source.symbol, 180, 96, 420),
-    price: clampStoredNumber(source.price, 92, 64, 220),
-    change: clampStoredNumber(source.change, 70, 56, 180),
+    symbol: clampStoredNumber(source.symbol, 180, WATCHLIST_COLUMN_MIN_WIDTHS.symbol, WATCHLIST_COLUMN_MAX_WIDTHS.symbol),
+    price: clampStoredNumber(source.price, 92, WATCHLIST_COLUMN_MIN_WIDTHS.price, WATCHLIST_COLUMN_MAX_WIDTHS.price),
+    change: clampStoredNumber(source.change, 70, WATCHLIST_COLUMN_MIN_WIDTHS.change, WATCHLIST_COLUMN_MAX_WIDTHS.change),
   };
+}
+
+function calculateWatchlistLayoutColumnWidths(
+  preferredWidths: WatchlistColumnWidths,
+  availableWidth: number,
+): WatchlistColumnWidths {
+  const minimumTotal =
+    WATCHLIST_COLUMN_MIN_WIDTHS.symbol +
+    WATCHLIST_COLUMN_MIN_WIDTHS.price +
+    WATCHLIST_COLUMN_MIN_WIDTHS.change;
+  const availableForColumns = Math.max(
+    minimumTotal,
+    Math.floor(availableWidth - WATCHLIST_ACTION_COLUMN_WIDTH),
+  );
+  const next: WatchlistColumnWidths = {
+    symbol: clampStoredNumber(
+      preferredWidths.symbol,
+      180,
+      WATCHLIST_COLUMN_MIN_WIDTHS.symbol,
+      WATCHLIST_COLUMN_MAX_WIDTHS.symbol,
+    ),
+    price: clampStoredNumber(
+      preferredWidths.price,
+      92,
+      WATCHLIST_COLUMN_MIN_WIDTHS.price,
+      WATCHLIST_COLUMN_MAX_WIDTHS.price,
+    ),
+    change: clampStoredNumber(
+      preferredWidths.change,
+      70,
+      WATCHLIST_COLUMN_MIN_WIDTHS.change,
+      WATCHLIST_COLUMN_MAX_WIDTHS.change,
+    ),
+  };
+  let overflow = next.symbol + next.price + next.change - availableForColumns;
+  if (overflow <= 0) {
+    return next;
+  }
+
+  const shrinkOrder: WatchlistColumnKey[] = ['symbol', 'price', 'change'];
+  shrinkOrder.forEach((key) => {
+    if (overflow <= 0) return;
+    const shrinkable = next[key] - WATCHLIST_COLUMN_MIN_WIDTHS[key];
+    const reduction = Math.min(shrinkable, overflow);
+    next[key] -= reduction;
+    overflow -= reduction;
+  });
+
+  return next;
 }
 
 function normalizeWatchlistSort(raw: unknown): WatchlistSortState {
@@ -943,15 +1005,22 @@ export default function App() {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const initialLeft = watchlistColumnWidths[leftKey];
-    const initialRight = watchlistColumnWidths[rightKey];
+    const initialLeft = watchlistLayoutColumnWidths[leftKey];
+    const initialRight = watchlistLayoutColumnWidths[rightKey];
+    const leftMin = WATCHLIST_COLUMN_MIN_WIDTHS[leftKey];
+    const rightMin = WATCHLIST_COLUMN_MIN_WIDTHS[rightKey];
+    const pairTotal = initialLeft + initialRight;
+    const leftMax = pairTotal - rightMin;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = moveEvent.clientX - startX;
-      const nextLeft = Math.max(leftKey === 'symbol' ? 96 : 64, initialLeft + delta);
-      const nextRight = Math.max(rightKey === 'change' ? 56 : 64, initialRight - delta);
+      const nextLeft = Math.max(leftMin, Math.min(leftMax, initialLeft + delta));
+      const nextRight = pairTotal - nextLeft;
       setWatchlistColumnWidths((prev) => ({
         ...prev,
+        symbol: watchlistLayoutColumnWidths.symbol,
+        price: watchlistLayoutColumnWidths.price,
+        change: watchlistLayoutColumnWidths.change,
         [leftKey]: nextLeft,
         [rightKey]: nextRight,
       }));
@@ -1369,7 +1438,15 @@ export default function App() {
     return watchlistTabs.find((tab) => tab.id === activeWatchlistTabId) ?? watchlistTabs[0];
   }, [activeWatchlistTabId, watchlistTabs]);
 
-  const watchlistGridTemplate = `${watchlistColumnWidths.symbol}px ${watchlistColumnWidths.price}px ${watchlistColumnWidths.change}px 24px`;
+  const watchlistLayoutColumnWidths = useMemo(
+    () => calculateWatchlistLayoutColumnWidths(
+      watchlistColumnWidths,
+      Math.max(0, sidebarWidth - WATCHLIST_GRID_HORIZONTAL_PADDING),
+    ),
+    [sidebarWidth, watchlistColumnWidths],
+  );
+
+  const watchlistGridTemplate = `${watchlistLayoutColumnWidths.symbol}px ${watchlistLayoutColumnWidths.price}px ${watchlistLayoutColumnWidths.change}px ${WATCHLIST_ACTION_COLUMN_WIDTH}px`;
 
   const visibleWatchlistSections = useMemo(() => {
     const compareRows = (
@@ -1881,9 +1958,9 @@ export default function App() {
               </button>
             </div>
 
-            <div className="min-w-max">
+            <div className="w-full min-w-0">
               <div
-                className="grid items-center h-8 px-2 border-b border-[#2a2e3d] text-[10px] text-gray-500"
+                className="grid w-full items-center h-8 px-2 border-b border-[#2a2e3d] text-[10px] text-gray-500"
                 style={{ gridTemplateColumns: watchlistGridTemplate }}
               >
                 <span className="relative h-full flex items-center">
@@ -1986,8 +2063,8 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex-1 min-h-0 overflow-auto">
-              <div className="min-w-max">
+            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+              <div className="w-full min-w-0">
                 {visibleWatchlistSections.map((section) => (
                   <div
                     key={section.id}
@@ -2071,7 +2148,7 @@ export default function App() {
                             event.stopPropagation();
                             handleDropTicker(section.id, ticker.symbol);
                           }}
-                          className={`grid items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition ${
+                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition ${
                             isSelected ? 'bg-blue-950/35 ring-1 ring-inset ring-gray-500' : 'hover:bg-[#171b28]'
                           } ${draggedTicker?.symbol === ticker.symbol ? 'opacity-45' : ''}`}
                           style={{ gridTemplateColumns: watchlistGridTemplate }}

@@ -14,8 +14,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsLeft,
-  ChevronsRight,
-  Pencil
+  ChevronsRight
 } from 'lucide-react';
 
 import { Timeframe, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle } from './types';
@@ -445,6 +444,11 @@ export default function App() {
     x: number;
     y: number;
   } | null>(null);
+  const [watchlistTabMenu, setWatchlistTabMenu] = useState<{
+    tabId: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Watchlist multiple selection and right-click delete state
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
@@ -675,6 +679,13 @@ export default function App() {
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, [sectionMenu]);
+
+  useEffect(() => {
+    if (!watchlistTabMenu) return;
+    const closeMenu = () => setWatchlistTabMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [watchlistTabMenu]);
 
   useEffect(() => {
     if (!watchlistContextMenu) return;
@@ -1146,6 +1157,17 @@ export default function App() {
     setActiveWatchlistTabId(tabId);
   };
 
+  const handleWatchlistTabContextMenu = (event: React.MouseEvent, tabId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setTabsDropdownOpen(false);
+    setWatchlistTabMenu({
+      tabId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
   const handleJumpToFirstWatchlistTab = () => {
     const firstTab = watchlistTabs[0];
     if (!firstTab) return;
@@ -1615,16 +1637,16 @@ export default function App() {
   }, [activeWatchlistTab, tickerStatsBySymbol, watchlistSort]);
 
   return (
-    <div className="min-h-screen bg-[#070913] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-blue-600/30">
+    <div className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25">
       
       {/* Dynamic Upper Banner with real-time quote ticks */}
-      <div className="bg-[#0c0e1a] border-b border-[#1e2235] py-2 px-4 shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none flex items-center justify-between text-xs">
+      <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none flex items-center justify-between text-xs">
         <div className="flex items-center space-x-6 min-w-0">
           <div className="flex items-center space-x-2 shrink-0">
-            <span className="inline-flex w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
+            <span className="inline-flex w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <span className="font-bold tracking-tight text-white uppercase text-xs">MooView</span>
           </div>
-          <div className="h-4 w-px bg-[#2d3142]" />
+          <div className="h-4 w-px bg-[#2a2a2a]" />
           <div className="flex items-center space-x-5">
             {liveTickerStats.slice(0, 6).map((ticker) => {
               const hasRealQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
@@ -1632,7 +1654,7 @@ export default function App() {
               return (
                 <div 
                   key={ticker.symbol} 
-                  className="inline-flex flex-col cursor-pointer hover:bg-[#1a1d2e] px-2 py-0.5 rounded transition-colors"
+                  className="inline-flex flex-col cursor-pointer hover:bg-[#181818] px-2 py-0.5 rounded transition-colors"
                   onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
                   title="左側のチャートに表示する"
                 >
@@ -1657,20 +1679,6 @@ export default function App() {
         
         {/* Right header actions */}
         <div className="flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
-          <div className="flex items-center space-x-1.5 bg-[#141624] px-2.5 py-1 rounded border border-[#21263d] text-[10px]">
-            <span className={`inline-block w-2 h-2 rounded-full ${
-              moomooStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
-              moomooStatus === 'connecting' ? 'bg-yellow-400 animate-pulse' :
-              moomooStatus === 'error' ? 'bg-red-400' : 'bg-gray-500'
-            }`} />
-            <span className="text-[#a0a5b5] font-bold">
-              moomoo API: {
-                moomooStatus === 'connected' ? '接続中' :
-                moomooStatus === 'connecting' ? '接続中...' :
-                moomooStatus === 'error' ? '接続エラー' : 'デモモード'
-              }
-            </span>
-          </div>
           <div className="flex items-center space-x-1 font-mono">
             <span>最新同期: <b className="text-[#d1d4dc]">{lastApiSyncTime}</b></span>
           </div>
@@ -1681,7 +1689,7 @@ export default function App() {
       <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
         
         {/* Workspace Panels container */}
-        <div className="flex-1 flex flex-col min-h-0 p-3 bg-[#070913] overflow-y-auto">
+        <div className="flex-1 flex flex-col min-h-0 p-3 bg-[#050505] overflow-y-auto">
           
           <div className="flex-1 min-h-0 w-full flex flex-row select-none">
             {colGroups.map((col, colIdx) => (
@@ -1710,11 +1718,11 @@ export default function App() {
                           }}
                           className="w-full flex flex-col shrink-0"
                         >
-                          <div className="flex-1 flex flex-col min-h-0 bg-[#121624] border border-[#21263d] rounded-lg overflow-hidden relative focus-within:border-blue-500 transition-colors shadow-lg">
+                          <div className="flex-1 flex flex-col min-h-0 bg-[#0d0d0d] border border-[#242424] rounded-lg overflow-hidden relative focus-within:border-emerald-500 transition-colors shadow-lg">
                             {/* Active Comparison (Add Overlaid Symbol) Custom Popover */}
                             {activeComparisonPopoverPanelId === panel.id && (
-                              <div className="absolute top-10 right-3 z-30 bg-[#0d101a] border border-[#21263d] p-3 rounded-lg shadow-xl w-60 text-xs flex flex-col space-y-2">
-                                <div className="flex items-center justify-between border-b border-[#21263d]/60 pb-2">
+                              <div className="absolute top-10 right-3 z-30 bg-[#0b0b0b] border border-[#242424] p-3 rounded-lg shadow-xl w-60 text-xs flex flex-col space-y-2">
+                                <div className="flex items-center justify-between border-b border-[#242424]/60 pb-2">
                                   <span className="font-bold text-gray-200">株価を重ねて比較追加</span>
                                   <button
                                     onClick={() => setActiveComparisonPopoverPanelId(null)}
@@ -1734,7 +1742,7 @@ export default function App() {
                                           key={t.symbol}
                                           className={`flex items-center justify-between p-1.5 px-2 rounded transition select-none ${
                                             canCompare
-                                              ? 'hover:bg-[#161a29]/80 cursor-pointer'
+                                              ? 'hover:bg-[#111111]/80 cursor-pointer'
                                               : 'opacity-45 cursor-not-allowed'
                                           }`}
                                         >
@@ -1750,7 +1758,7 @@ export default function App() {
                                                   : [...prevList, t.symbol];
                                                 handleUpdatePanel(panel.id, { comparisonSymbols: updatedList });
                                               }}
-                                              className="rounded border-[#2d3552] bg-[#20263c] text-blue-600 focus:ring-blue-500/20 w-3.5 h-3.5 cursor-pointer"
+                                              className="rounded border-[#2a2a2a] bg-[#171717] text-emerald-500 focus:ring-emerald-500/20 w-3.5 h-3.5 cursor-pointer"
                                             />
                                             <span className="font-bold font-mono text-xs">{t.symbol}</span>
                                             <span className="text-[10px] text-gray-500 truncate max-w-[90px]">{t.name}</span>
@@ -1762,14 +1770,14 @@ export default function App() {
                                       );
                                     })}
                                 </div>
-                                <div className="text-[9px] text-gray-500 text-center border-t border-[#1e2235]/60 pt-1.5 leading-tight">
+                                <div className="text-[9px] text-gray-500 text-center border-t border-[#202020]/60 pt-1.5 leading-tight">
                                   始点からの変動比率(％)を算出し、チャート上にラインを重ねてリアルタイム描画します。
                                 </div>
                               </div>
                             )}
 
                             {/* Panel Toolbar Header */}
-                            <div className="h-10 border-b border-[#21263d] bg-[#161a29] px-3 flex items-center justify-between shrink-0 select-none">
+                            <div className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none">
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
                                 {/* SYMBOL SELECT DROPDOWN */}
@@ -1777,7 +1785,7 @@ export default function App() {
                                   id={`select-symbol-${panel.id}`}
                                   value={panel.symbol}
                                   onChange={(e) => handleUpdatePanel(panel.id, { symbol: e.target.value })}
-                                  className="bg-[#20263c] border border-[#2d3552] text-white rounded text-xs px-2 py-0.5 font-bold uppercase outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                                  className="bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 py-0.5 font-bold uppercase outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
                                 >
                                   {tickers.map(t => (
                                     <option key={t.symbol} value={t.symbol}>{t.symbol}</option>
@@ -1786,14 +1794,14 @@ export default function App() {
 
                                 {/* ACTIVE OVERLAYS BADGES */}
                                 {panel.comparisonSymbols && panel.comparisonSymbols.length > 0 && (
-                                  <div className="flex items-center space-x-1 pl-1.5 border-l border-[#21263d] shrink-0">
+                                  <div className="flex items-center space-x-1 pl-1.5 border-l border-[#242424] shrink-0">
                                     {panel.comparisonSymbols.map((compSym, idx) => {
                                       const lineColors = ['#f3a14b', '#a78bfa', '#22d3ee', '#f43f5e', '#eab308'];
                                       const color = lineColors[idx % lineColors.length];
                                       return (
                                         <span 
                                           key={compSym}
-                                          className="inline-flex items-center bg-[#20263c]/70 border text-[9px] px-1.5 py-0.5 rounded font-bold font-mono space-x-1 transition shrink-0"
+                                          className="inline-flex items-center bg-[#171717]/70 border text-[9px] px-1.5 py-0.5 rounded font-bold font-mono space-x-1 transition shrink-0"
                                           style={{ color, borderColor: `${color}33` }}
                                         >
                                           <span>{compSym}</span>
@@ -1814,15 +1822,15 @@ export default function App() {
                                 )}
  
                                 {/* TIMEFRAME INTERVAL PICKER */}
-                                <div className="flex items-center bg-[#20263c] border border-[#2d3552] rounded p-0.5 space-x-0.5">
+                                <div className="flex items-center bg-[#171717] border border-[#2a2a2a] rounded p-0.5 space-x-0.5">
                                   {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
                                     <button
                                       key={tf}
                                       onClick={() => handleUpdatePanel(panel.id, { timeframe: tf })}
                                       className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors ${
                                         panel.timeframe === tf 
-                                          ? 'bg-blue-600 text-white' 
-                                          : 'text-gray-400 hover:text-white hover:bg-[#20263c]'
+                                          ? 'bg-emerald-600 text-white'
+                                          : 'text-gray-400 hover:text-white hover:bg-[#202020]'
                                       }`}
                                     >
                                       {tf === '1mo' ? '1月' : tf === '1d' ? '日' : tf === '1w' ? '週' : tf}
@@ -1836,7 +1844,7 @@ export default function App() {
                                   className={`text-[9px] px-2 py-0.5 rounded font-bold uppercase transition-colors ${
                                     isTvEmbed 
                                       ? 'bg-purple-950/80 text-purple-300 border border-purple-800' 
-                                      : 'bg-blue-950/80 text-blue-300 border border-blue-900'
+                                      : 'bg-emerald-950/80 text-emerald-300 border border-emerald-900'
                                   }`}
                                   title="TradingView公式ライブウィジェットとカスタムチャートを切り替えます"
                                 >
@@ -1850,7 +1858,7 @@ export default function App() {
                                 
                                 {/* Quick setting indicators toggles */}
                                 {!isTvEmbed && (
-                                  <div className="hidden sm:flex items-center space-x-1.5 bg-[#20263c]/50 px-2 py-0.5 rounded text-[10px]">
+                                  <div className="hidden sm:flex items-center space-x-1.5 bg-[#171717]/70 px-2 py-0.5 rounded text-[10px]">
                                     <button
                                       onClick={() => handleUpdatePanel(panel.id, { showVolume: !panel.showVolume })}
                                       className={`px-1 rounded ${panel.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500'}`}
@@ -1867,7 +1875,7 @@ export default function App() {
                                     </button>
                                     <button
                                       onClick={() => handleUpdatePanel(panel.id, { showMacd: !panel.showMacd })}
-                                      className={`px-1 rounded ${panel.showMacd ? 'text-blue-400 font-bold bg-[#14233c]' : 'text-gray-500'}`}
+                                      className={`px-1 rounded ${panel.showMacd ? 'text-emerald-400 font-bold bg-[#0f2a22]' : 'text-gray-500'}`}
                                       title="MACDサブ画面を表示"
                                     >
                                       MACD
@@ -1879,7 +1887,7 @@ export default function App() {
                                 {!isTvEmbed && (
                                   <button
                                     onClick={() => setActiveComparisonPopoverPanelId(activeComparisonPopoverPanelId === panel.id ? null : panel.id)}
-                                    className={`p-1.5 hover:bg-[#20263c] rounded text-gray-400 hover:text-white transition cursor-pointer flex items-center justify-center ${activeComparisonPopoverPanelId === panel.id ? 'text-blue-400 bg-[#20263c] border border-blue-500/30' : ''}`}
+                                    className={`p-1.5 hover:bg-[#202020] rounded text-gray-400 hover:text-white transition cursor-pointer flex items-center justify-center ${activeComparisonPopoverPanelId === panel.id ? 'text-emerald-400 bg-[#171717] border border-emerald-500/30' : ''}`}
                                     title="このチャート内に他銘柄を比較追加する (+)"
                                   >
                                     <Plus className="w-3.5 h-3.5 stroke-[2.8]" />
@@ -1901,7 +1909,7 @@ export default function App() {
                             </div>
 
                             {/* Rendering workspace */}
-                            <div className="flex-1 flex flex-col min-h-0 bg-[#131722]">
+                            <div className="flex-1 flex flex-col min-h-0 bg-[#090909]">
                               {isTvEmbed ? (
                                 <TradingViewWidget 
                                   symbol={panel.symbol} 
@@ -1948,7 +1956,7 @@ export default function App() {
 
                         {/* Drag splitter to change absolute height for every panel */}
                         <div
-                          className="h-1.5 bg-[#1b1d30]/80 hover:bg-blue-500 active:bg-blue-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded"
+                          className="h-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded"
                           onMouseDown={(e) => handlePanelHeightResizeMouseDown(e, panel.id)}
                           title="上下にドラッグして高さを変更"
                         />
@@ -1960,7 +1968,7 @@ export default function App() {
                 {/* Drag splitter between adjacent column groups */}
                 {colIdx < colGroups.length - 1 && (
                   <div
-                    className="w-1.5 bg-[#1b1d30]/80 hover:bg-blue-500 active:bg-blue-600 cursor-col-resize transition-colors shrink-0 self-stretch mx-1 rounded"
+                    className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch mx-1 rounded"
                     onMouseDown={(e) => handleColResizeMouseDown(e, colIdx, colIdx + 1)}
                     title="左右にドラッグしてサイズ変更"
                   />
@@ -1972,7 +1980,7 @@ export default function App() {
 
         {sidebarOpen && (
           <div
-            className="w-1.5 bg-[#1b1d30]/80 hover:bg-blue-500 active:bg-blue-600 cursor-col-resize transition-colors shrink-0 self-stretch"
+            className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch"
             onMouseDown={handleSidebarResizeMouseDown}
             title="左右にドラッグしてサイドパネル幅を変更"
           />
@@ -1980,7 +1988,7 @@ export default function App() {
 
         {/* Right-hand Sidebar - 常設アイコンと開閉式パネル */}
         <div
-          className="shrink-0 border-l border-[#1e2235] bg-[#0c0e1a] flex overflow-hidden transition-[width] duration-150 ease-out"
+          className="shrink-0 border-l border-[#202020] bg-[#080808] flex overflow-hidden transition-[width] duration-150 ease-out"
           style={{ width: sidebarOpen ? `${sidebarWidth + SIDEBAR_NAV_WIDTH}px` : `${SIDEBAR_NAV_WIDTH}px` }}
         >
           <div
@@ -1989,13 +1997,13 @@ export default function App() {
           >
 
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
-          <div className="shrink-0 p-2 border-b border-[#242938] relative">
-            <div className="grid grid-cols-4 gap-1 bg-[#0c0e1a] p-1 border border-[#21263d]">
+          <div className="shrink-0 p-2 border-b border-[#242424] relative">
+            <div className="grid grid-cols-4 gap-1 bg-[#080808] p-1 border border-[#242424]">
               <div className="relative">
                 <button
                   onClick={(e) => { e.stopPropagation(); setGridPickerOpen((v) => !v); }}
                   className={`w-full h-9 flex items-center justify-center transition-all cursor-pointer ${
-                    layoutStyle === 'grid' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'
+                    layoutStyle === 'grid' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171717]'
                   }`}
                   title={`グリッド選択 (${gridRows}×${gridCols})`}
                 >
@@ -2003,15 +2011,15 @@ export default function App() {
                 </button>
                 {gridPickerOpen && (
                   <div
-                    className="absolute left-0 top-10 z-50 bg-[#0d101a] border border-[#34394c] p-3 rounded-lg shadow-2xl w-56"
+                    className="absolute left-0 top-10 z-50 bg-[#0b0b0b] border border-[#343434] p-3 rounded-lg shadow-2xl w-56"
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="text-[10px] text-gray-400 font-bold mb-2 flex justify-between items-center">
                       <span>グリッドレイアウト選択</span>
-                      <span className="text-blue-400 font-mono text-xs">{gridRows} × {gridCols}</span>
+                      <span className="text-emerald-400 font-mono text-xs">{gridRows} × {gridCols}</span>
                     </div>
                     {/* Interactive 9x9 grid selector */}
-                    <div className="grid grid-cols-9 gap-0.5 bg-[#070913] p-1.5 border border-[#21263d] rounded">
+                    <div className="grid grid-cols-9 gap-0.5 bg-[#050505] p-1.5 border border-[#242424] rounded">
                       {Array.from({ length: 9 }).map((_, rIdx) => {
                         const r = rIdx + 1;
                         return Array.from({ length: 9 }).map((__, cIdx) => {
@@ -2027,8 +2035,8 @@ export default function App() {
                               onClick={(e) => { e.stopPropagation(); handleSelectCustomGrid(r, c); }}
                               className={`w-5 h-5 aspect-square border transition-all cursor-pointer rounded-sm ${
                                 isHighlighted
-                                  ? 'bg-blue-600 border-blue-400'
-                                  : 'bg-[#151829] border-[#2d3552] hover:bg-gray-700'
+                                  ? 'bg-emerald-600 border-emerald-400'
+                                  : 'bg-[#151515] border-[#2a2a2a] hover:bg-gray-700'
                               }`}
                               title={`${r}行 × ${c}列`}
                             />
@@ -2044,14 +2052,14 @@ export default function App() {
               </div>
               <button
                 onClick={() => setLayoutStyle('columns')}
-                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'columns' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
+                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'columns' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171717]'}`}
                 title="左右並列"
               >
                 <Columns2 className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setLayoutStyle('rows')}
-                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'rows' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
+                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'rows' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171717]'}`}
                 title="上下分割"
               >
                 <Rows2 className="w-4 h-4" />
@@ -2060,7 +2068,7 @@ export default function App() {
                 onClick={handleAddChartPanel}
                 disabled={panels.length >= gridRows * gridCols}
                 id="btn-add-chart-panel"
-                className="h-9 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#171b28] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                className="h-9 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#171717] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 title="チャートを追加"
                 aria-label="チャートを追加"
               >
@@ -2071,15 +2079,15 @@ export default function App() {
 
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
           {sidebarView === 'watchlist' && (
-          <div className="flex-1 min-h-0 bg-[#10131f] overflow-hidden flex flex-col relative">
-            <div className="h-8 shrink-0 border-b border-[#2a2e3d] bg-[#0c0e18] flex items-center gap-1 px-1 overflow-visible relative">
+          <div className="flex-1 min-h-0 bg-[#0b0b0b] overflow-hidden flex flex-col relative">
+            <div className="h-8 shrink-0 border-b border-[#242424] bg-[#080808] flex items-center gap-1 px-1 overflow-visible relative">
               <button
                 type="button"
                 onClick={handleJumpToFirstWatchlistTab}
                 disabled={!canJumpToFirstWatchlistTab}
-                className={`w-6 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center transition-colors ${
+                className={`w-6 h-7 border border-b-0 border-[#202020] flex items-center justify-center transition-colors ${
                   canJumpToFirstWatchlistTab
-                    ? 'text-gray-400 hover:text-white hover:bg-[#171b28] cursor-pointer'
+                    ? 'text-gray-400 hover:text-white hover:bg-[#171717] cursor-pointer'
                     : 'text-gray-700 opacity-50 cursor-not-allowed'
                 }`}
                 aria-label="最初のウォッチリストタブへ移動"
@@ -2102,13 +2110,14 @@ export default function App() {
                       ref={(element) => {
                         watchlistTabRefs.current[tab.id] = element;
                       }}
-                      className={`h-7 shrink-0 px-2 border border-b-0 flex items-center gap-1.5 transition-all ${
+                      className={`h-7 shrink-0 min-w-[44px] max-w-28 px-2 border border-b-0 flex items-center transition-all ${
                         active
-                          ? 'bg-[#10131f] border-[#34394c] text-white font-bold'
-                          : 'bg-[#0a0c14] border-[#1e2232] text-gray-500 hover:text-gray-200'
+                          ? 'bg-[#0b0b0b] border-[#343434] text-white font-bold'
+                          : 'bg-[#070707] border-[#202020] text-gray-500 hover:text-gray-200'
                       }`}
-                      style={{ width: 'auto', minWidth: 'fit-content' }}
+                      style={{ width: 'auto' }}
                       onDoubleClick={() => setEditingTabId(tab.id)}
+                      onContextMenu={(event) => handleWatchlistTabContextMenu(event, tab.id)}
                     >
                       {editingTabId === tab.id ? (
                         <input
@@ -2118,38 +2127,19 @@ export default function App() {
                           onKeyDown={(event) => {
                             if (event.key === 'Enter') event.currentTarget.blur();
                           }}
-                          className="w-16 bg-[#171a27] border border-blue-500 text-[10px] px-1 outline-none text-white"
+                          className="w-16 bg-[#121212] border border-emerald-500 text-[10px] px-1 outline-none text-white"
                           autoFocus
                         />
                       ) : (
                         <button
                           type="button"
                           onClick={() => selectWatchlistTab(tab.id)}
-                          className="text-[10px] text-left truncate cursor-pointer"
+                          className="w-full min-w-0 text-[10px] text-left truncate cursor-pointer"
                           title={tab.name}
                         >
                           {tab.name}
                         </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => setEditingTabId(tab.id)}
-                        className="w-3.5 h-3.5 flex items-center justify-center text-gray-500 hover:text-gray-200 cursor-pointer"
-                        aria-label={`${tab.name}の名称を変更`}
-                        title="名称変更"
-                      >
-                        <Pencil className="w-2.5 h-2.5" style={{ width: '10px', height: '10px' }} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteWatchlistTab(tab.id)}
-                        disabled={watchlistTabs.length <= 1}
-                        className="w-3.5 h-3.5 flex items-center justify-center text-gray-600 hover:text-red-300 disabled:opacity-20 cursor-pointer"
-                        aria-label={`${tab.name}を削除`}
-                        title="タブ削除"
-                      >
-                        <X className="w-2.5 h-2.5" style={{ width: '10px', height: '10px' }} />
-                      </button>
                     </div>
                   );
                 })}
@@ -2162,7 +2152,7 @@ export default function App() {
                 disabled={!canJumpToLastWatchlistTab}
                 className={`w-6 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center transition-colors ${
                   canJumpToLastWatchlistTab
-                    ? 'text-gray-400 hover:text-white hover:bg-[#171b28] cursor-pointer'
+                    ? 'text-gray-400 hover:text-white hover:bg-[#171717] cursor-pointer'
                     : 'text-gray-700 opacity-50 cursor-not-allowed'
                 }`}
                 aria-label="最後のウォッチリストタブへ移動"
@@ -2179,7 +2169,7 @@ export default function App() {
                       type="button"
                       onClick={(e) => { e.stopPropagation(); setTabsDropdownOpen((v) => !v); }}
                       className={`w-7 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center cursor-pointer transition-colors ${
-                        tabsDropdownOpen ? 'text-white bg-[#171b28]' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'
+                        tabsDropdownOpen ? 'text-white bg-[#171717]' : 'text-gray-400 hover:text-white hover:bg-[#171717]'
                       }`}
                       title="ウォッチリスト一覧"
                     >
@@ -2187,7 +2177,7 @@ export default function App() {
                     </button>
                     {tabsDropdownOpen && (
                       <div
-                        className="absolute right-0 top-full w-40 bg-[#0b0d16] border border-[#34394c] py-1 shadow-2xl z-50"
+                        className="absolute right-0 top-full w-40 bg-[#080808] border border-[#343434] py-1 shadow-2xl z-50"
                         onClick={(e) => e.stopPropagation()}
                       >
                         {watchlistTabs.map((t) => (
@@ -2195,8 +2185,8 @@ export default function App() {
                             key={t.id}
                             type="button"
                             onClick={() => { selectWatchlistTab(t.id); setTabsDropdownOpen(false); }}
-                            className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171b28] truncate cursor-pointer block ${
-                              t.id === activeWatchlistTabId ? 'text-blue-400 font-bold bg-[#1a1f32]' : 'text-gray-300'
+                            className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171717] truncate cursor-pointer block ${
+                              t.id === activeWatchlistTabId ? 'text-emerald-400 font-bold bg-[#10251f]' : 'text-gray-300'
                             }`}
                           >
                             {t.name}
@@ -2210,7 +2200,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleAddWatchlistTab}
-                  className="w-7 h-7 border border-b-0 border-[#1e2232] text-gray-400 hover:text-white hover:bg-[#171b28] flex items-center justify-center cursor-pointer"
+                  className="w-7 h-7 border border-b-0 border-[#202020] text-gray-400 hover:text-white hover:bg-[#171717] flex items-center justify-center cursor-pointer"
                   aria-label="ウォッチリストタブを追加"
                   title="タブを追加"
                 >
@@ -2219,9 +2209,40 @@ export default function App() {
               </div>
             </div>
 
+            {watchlistTabMenu && (
+              <div
+                className="fixed z-50 w-36 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                style={{ left: watchlistTabMenu.x, top: watchlistTabMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    selectWatchlistTab(watchlistTabMenu.tabId);
+                    setEditingTabId(watchlistTabMenu.tabId);
+                    setWatchlistTabMenu(null);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717]"
+                >
+                  名称変更
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleDeleteWatchlistTab(watchlistTabMenu.tabId);
+                    setWatchlistTabMenu(null);
+                  }}
+                  disabled={watchlistTabs.length <= 1}
+                  className="w-full px-2.5 py-1.5 text-left text-red-300 hover:bg-red-950/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  タブ削除
+                </button>
+              </div>
+            )}
+
             <div className="w-full min-w-0">
               <div
-                className="grid w-full items-center h-8 px-2 border-b border-[#2a2e3d] text-[10px] text-gray-500"
+                className="grid w-full items-center h-8 px-2 border-b border-[#242424] text-[10px] text-gray-500"
                 style={{ gridTemplateColumns: watchlistGridTemplate }}
               >
                 <span className="relative h-full flex items-center">
@@ -2230,10 +2251,10 @@ export default function App() {
                     onClick={() => cycleWatchlistSort('symbol')}
                     className="w-full text-left hover:text-gray-200"
                   >
-                    銘柄 <span className="text-[8px] text-blue-300">{getSortIndicator('symbol')}</span>
+                    銘柄 <span className="text-[8px] text-emerald-300">{getSortIndicator('symbol')}</span>
                   </button>
                   <span
-                    className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-blue-500/50"
+                    className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
                     onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'symbol', 'price')}
                   />
                 </span>
@@ -2243,10 +2264,10 @@ export default function App() {
                     onClick={() => cycleWatchlistSort('price')}
                     className="w-full text-right hover:text-gray-200"
                   >
-                    現在値 <span className="text-[8px] text-blue-300">{getSortIndicator('price')}</span>
+                    現在値 <span className="text-[8px] text-emerald-300">{getSortIndicator('price')}</span>
                   </button>
                   <span
-                    className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-blue-500/50"
+                    className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
                     onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'price', 'change')}
                   />
                 </span>
@@ -2255,7 +2276,7 @@ export default function App() {
                   onClick={() => cycleWatchlistSort('change')}
                   className="h-full text-right hover:text-gray-200"
                 >
-                  変動率 <span className="text-[8px] text-blue-300">{getSortIndicator('change')}</span>
+                  変動率 <span className="text-[8px] text-emerald-300">{getSortIndicator('change')}</span>
                 </button>
                 <button
                   type="button"
@@ -2274,7 +2295,7 @@ export default function App() {
             </div>
 
             {tickerSearchOpen && (
-              <div className="p-2 border-b border-[#2a2e3d] bg-[#0c0e18]">
+              <div className="p-2 border-b border-[#242424] bg-[#080808]">
                 <form onSubmit={handleAddTicker} className="flex gap-1.5">
                   <div className="relative flex-1">
                     <Search className="absolute left-2 top-2 w-3 h-3 text-gray-500" />
@@ -2283,7 +2304,7 @@ export default function App() {
                       placeholder="任天堂、Nintendo、7974、AAPL"
                       value={newSymbolInput}
                       onChange={(e) => setNewSymbolInput(e.target.value)}
-                      className="h-7 bg-[#171a27] border border-[#303548] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-blue-500 placeholder-gray-600"
+                      className="h-7 bg-[#121212] border border-[#303030] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-emerald-500 placeholder-gray-600"
                       autoFocus
                     />
                   </div>
@@ -2291,7 +2312,7 @@ export default function App() {
                     type="submit"
                     id="btn-add-ticker"
                     disabled={tickerSearchLoading || !newSymbolInput.trim()}
-                    className="h-7 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[10px] px-2 font-bold transition"
+                    className="h-7 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[10px] px-2 font-bold transition"
                   >
                     {tickerSearchLoading ? '検索中' : '検索'}
                   </button>
@@ -2304,19 +2325,19 @@ export default function App() {
                 )}
 
                 {tickerSearchCandidates.length > 0 && (
-                  <div className="mt-2 max-h-40 overflow-y-auto border border-[#292e40]">
+                  <div className="mt-2 max-h-40 overflow-y-auto border border-[#2b2b2b]">
                     {tickerSearchCandidates.map((candidate) => (
                       <button
                         type="button"
                         key={candidate.symbol}
                         onClick={() => registerTickerCandidate(candidate)}
-                        className="w-full px-2.5 py-2 flex items-center justify-between text-left border-b last:border-b-0 border-[#242938] hover:bg-[#1b2030] transition"
+                        className="w-full px-2.5 py-2 flex items-center justify-between text-left border-b last:border-b-0 border-[#242424] hover:bg-[#171717] transition"
                       >
                         <span className="min-w-0">
                           <span className="block text-xs font-bold text-white truncate">{candidate.name}</span>
                           <span className="block text-[9px] text-gray-500 truncate">{candidate.nameEn || candidate.category}</span>
                         </span>
-                        <span className="font-mono text-[11px] text-blue-300 ml-3">{candidate.symbol}</span>
+                        <span className="font-mono text-[11px] text-emerald-300 ml-3">{candidate.symbol}</span>
                       </button>
                     ))}
                   </div>
@@ -2333,7 +2354,7 @@ export default function App() {
                     onDrop={() => handleDropTicker(section.id)}
                   >
                     <div
-                      className="h-6 px-2 border-b border-[#242836] bg-[#0d1018] flex items-center justify-between text-[10px] text-gray-400 select-none"
+                      className="h-6 px-2 border-b border-[#242424] bg-[#0d0d0d] flex items-center text-[10px] text-gray-400 select-none"
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setSectionMenu({ sectionId: section.id, x: event.clientX, y: event.clientY });
@@ -2342,7 +2363,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => handleToggleWatchlistSection(section.id)}
-                        className="min-w-0 flex items-center gap-1.5 hover:text-white"
+                        className="min-w-0 flex-1 flex items-center gap-1.5 hover:text-white"
                       >
                         {section.collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                         {editingSectionId === section.id ? (
@@ -2353,42 +2374,13 @@ export default function App() {
                             onKeyDown={(event) => {
                               if (event.key === 'Enter') event.currentTarget.blur();
                             }}
-                            className="w-28 bg-[#171a27] border border-blue-500 text-[10px] text-gray-100 px-1 outline-none"
+                            className="w-28 bg-[#121212] border border-emerald-500 text-[10px] text-gray-100 px-1 outline-none"
                             autoFocus
                           />
                         ) : (
                           <span className="truncate">{section.name}</span>
                         )}
                       </button>
-                      <span className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setEditingSectionId(section.id)}
-                          className="w-5 h-5 flex items-center justify-center text-gray-600 hover:text-gray-200"
-                          aria-label={`${section.name}の名称を変更`}
-                          title="名称変更"
-                        >
-                          <Pencil className="w-2.5 h-2.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleAddWatchlistSection(section.id)}
-                          className="w-5 h-5 flex items-center justify-center text-gray-600 hover:text-gray-200"
-                          aria-label={`${section.name}の下にセクションを追加`}
-                          title="セクション追加"
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteWatchlistSection(section.id)}
-                          className="w-5 h-5 flex items-center justify-center text-gray-700 hover:text-red-300"
-                          aria-label={`${section.name}を削除`}
-                          title="セクション削除"
-                        >
-                          <Trash2 className="w-2.5 h-2.5" />
-                        </button>
-                      </span>
                     </div>
 
                     {!section.collapsed && section.rows.map((ticker) => {
@@ -2463,12 +2455,12 @@ export default function App() {
                           }}
                           onClick={handleTickerClick}
                           onContextMenu={handleTickerContextMenu}
-                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition select-none cursor-grab active:cursor-grabbing ${
+                          className={`grid w-full items-center h-5 px-2 border-b border-[#242424] last:border-b-0 transition select-none cursor-grab active:cursor-grabbing ${
                             isMultiSelected
-                              ? 'bg-blue-900/40 ring-1 ring-inset ring-blue-500'
+                              ? 'bg-emerald-900/35 ring-1 ring-inset ring-emerald-500'
                               : isSelectedPrimary
-                              ? 'bg-blue-950/20 ring-1 ring-inset ring-gray-700'
-                              : 'hover:bg-[#171b28]'
+                              ? 'bg-emerald-950/20 ring-1 ring-inset ring-gray-700'
+                              : 'hover:bg-[#171717]'
                           } ${draggedTicker?.symbol === ticker.symbol ? 'opacity-45' : ''}`}
                           style={{ gridTemplateColumns: watchlistGridTemplate }}
                         >
@@ -2511,7 +2503,7 @@ export default function App() {
 
             {watchlistContextMenu && (
               <div
-                className="fixed z-50 w-44 bg-[#0b0d16] border border-[#34394c] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: watchlistContextMenu.x, top: watchlistContextMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -2533,7 +2525,7 @@ export default function App() {
 
             {sectionMenu && (
               <div
-                className="fixed z-50 w-36 bg-[#0b0d16] border border-[#34394c] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-36 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: sectionMenu.x, top: sectionMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -2543,14 +2535,14 @@ export default function App() {
                     setEditingSectionId(sectionMenu.sectionId);
                     setSectionMenu(null);
                   }}
-                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171b28]"
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717]"
                 >
                   名称変更
                 </button>
                 <button
                   type="button"
                   onClick={() => handleAddWatchlistSection(sectionMenu.sectionId)}
-                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171b28]"
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717]"
                 >
                   セクション追加
                 </button>
@@ -2564,17 +2556,6 @@ export default function App() {
               </div>
             )}
 
-            <div className="h-7 shrink-0 border-t border-[#2a2e3d] bg-[#0c0e18] flex items-center justify-end px-2">
-              <button
-                type="button"
-                onClick={() => handleAddWatchlistSection()}
-                className="h-5 px-1.5 flex items-center gap-1 text-[9px] text-gray-400 hover:text-white hover:bg-[#171b28] border border-[#242938]"
-                title="セクション追加"
-              >
-                <Plus className="w-2.5 h-2.5" />
-                セクション
-              </button>
-            </div>
           </div>
           )}
 
@@ -2601,7 +2582,7 @@ export default function App() {
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
           {sidebarView === 'settings' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
-          <div className="bg-[#141624] p-3 border border-[#21263d] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
+          <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">接続ステータス</span>
               <span className="inline-flex w-2 h-2 rounded-full bg-[#26a69a] animate-pulse" />
@@ -2623,7 +2604,7 @@ export default function App() {
           </div>
 
           {/* 5. MOOMOO OPENAPI SETTINGS */}
-          <div className="bg-[#141624] p-3 border border-[#21263d] flex flex-col space-y-3">
+          <div className="bg-[#101010] p-3 border border-[#242424] flex flex-col space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-bold text-gray-200 text-xs tracking-wider uppercase flex items-center space-x-1.5">
                 <Database className="w-4 h-4 text-orange-400" />
@@ -2642,7 +2623,7 @@ export default function App() {
               </span>
             </div>
 
-            <div className="flex items-center justify-between bg-[#0c0e1a] p-2 rounded border border-[#1e2235]">
+            <div className="flex items-center justify-between bg-[#080808] p-2 rounded border border-[#202020]">
               <span className="text-[11px] text-gray-300 font-medium">Moomoo実データを使用</span>
               <button
                 type="button"
@@ -2659,7 +2640,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => checkMoomooStatus()}
-                  className="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1.5 font-bold text-xs transition cursor-pointer"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded px-3 py-1.5 font-bold text-xs transition cursor-pointer"
                 >
                   OpenD接続を確認
                 </button>
@@ -2676,14 +2657,14 @@ export default function App() {
 
           </div>
 
-          <nav className="w-11 shrink-0 border-l border-[#242938] bg-[#090b12] flex flex-col items-center py-2 gap-1">
+          <nav className="w-11 shrink-0 border-l border-[#242424] bg-[#070707] flex flex-col items-center py-2 gap-1">
             <button
               type="button"
               onClick={() => handleSidebarNavClick('watchlist')}
               className={`w-9 h-10 flex items-center justify-center border transition ${
                 sidebarOpen && sidebarView === 'watchlist'
-                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
-                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+                  ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
               }`}
               title="ウォッチリスト"
               aria-label="ウォッチリストを表示"
@@ -2695,8 +2676,8 @@ export default function App() {
               onClick={() => handleSidebarNavClick('indicators')}
               className={`w-9 h-10 flex items-center justify-center border transition ${
                 sidebarOpen && sidebarView === 'indicators'
-                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
-                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+                  ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
               }`}
               title="インジケーター"
               aria-label="インジケーター設定を表示"
@@ -2708,8 +2689,8 @@ export default function App() {
               onClick={() => handleSidebarNavClick('settings')}
               className={`w-9 h-10 flex items-center justify-center border transition ${
                 sidebarOpen && sidebarView === 'settings'
-                  ? 'bg-[#2a2d34] border-[#4a4f5a] text-white'
-                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#171a22]'
+                  ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
               }`}
               title="接続設定"
               aria-label="接続設定を表示"
@@ -2722,7 +2703,7 @@ export default function App() {
       </div>
 
       {/* Footer information panel */}
-      <footer className="h-8 border-t border-[#1e2235] bg-[#0c0e1a] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">
+      <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">
         <div className="flex items-center space-x-3">
           <span className="flex items-center space-x-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-[#26a69a]"></span>
@@ -2732,7 +2713,7 @@ export default function App() {
           <span>データソース: moomoo OpenAPI quotes gateway stream</span>
         </div>
         <div className="flex items-center space-x-4">
-          <span className="uppercase text-gray-400 font-bold bg-[#1d2138] px-2 py-0.5 rounded">AUTO-SAVE: ENABLED</span>
+          <span className="uppercase text-gray-400 font-bold bg-[#1a1a1a] px-2 py-0.5 rounded">AUTO-SAVE: ENABLED</span>
           <span>© {new Date().getFullYear()} trading multi dashboard workspace</span>
         </div>
       </footer>

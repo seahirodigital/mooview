@@ -12,6 +12,8 @@ $encryptedKeyPath = Join-Path $runtimeRoot "gateway-key.dpapi"
 $statePath = Join-Path $runtimeRoot "current-tunnel-url.txt"
 $supervisorLog = Join-Path $logRoot "supervisor.log"
 $gatewayPort = 8787
+$productionAlias = "moomooview.vercel.app"
+$legacyAlias = "mooview-pink.vercel.app"
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
@@ -189,7 +191,8 @@ function Set-VercelEnvironment {
     function Invoke-VercelCommand {
         param(
             [string]$Arguments,
-            [string]$InputValue = ""
+            [string]$InputValue = "",
+            [switch]$AllowFailure
         )
 
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -206,7 +209,7 @@ function Set-VercelEnvironment {
         $process.StartInfo = $startInfo
         $null = $process.Start()
         if ($InputValue) {
-            $process.StandardInput.WriteLine($InputValue)
+            $process.StandardInput.Write($InputValue)
         }
         $process.StandardInput.Close()
         $stdout = $process.StandardOutput.ReadToEnd()
@@ -219,9 +222,10 @@ function Set-VercelEnvironment {
         if ($stderr) {
             Add-Content -LiteralPath $vercelLog -Value $stderr -Encoding UTF8
         }
-        if ($process.ExitCode -ne 0) {
+        if ($process.ExitCode -ne 0 -and -not $AllowFailure) {
             throw "Vercel CLI failed with exit code $($process.ExitCode)."
         }
+        return "$stdout`n$stderr"
     }
 
     Push-Location $repoRoot
@@ -232,23 +236,38 @@ function Set-VercelEnvironment {
         Invoke-VercelCommand `
             -Arguments "env add MOOMOO_GATEWAY_KEY production --force --yes --sensitive" `
             -InputValue $GatewayKey
-        Invoke-VercelCommand -Arguments "deploy --prod --yes"
+        $deployOutput = Invoke-VercelCommand -Arguments "deploy --prod --yes"
+        $deploymentMatches = [regex]::Matches($deployOutput, "https://mooview-[a-z0-9-]+-seahirodigitals-projects\.vercel\.app")
+        if ($deploymentMatches.Count -gt 0) {
+            $deploymentUrl = $deploymentMatches[$deploymentMatches.Count - 1].Value
+            Invoke-VercelCommand -Arguments "alias set $deploymentUrl $productionAlias"
+            Write-SupervisorLog "Aliased production deployment to https://$productionAlias."
+        } else {
+            Write-SupervisorLog "Could not parse deployment URL from Vercel output."
+        }
+        Invoke-VercelCommand -Arguments "alias rm $legacyAlias --yes" -AllowFailure
     } finally {
         Pop-Location
     }
 }
 
-function Test-ProductionQuote {
+function Test-TunnelQuote {
+    param(
+        [string]$GatewayUrl,
+        [string]$GatewayKey
+    )
+
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         try {
             $response = Invoke-RestMethod `
-                -Uri "https://mooview-pink.vercel.app/api/moomoo/quote" `
+                -Uri "$GatewayUrl/v1/quote" `
                 -Method Post `
                 -ContentType "application/json" `
+                -Headers @{ Authorization = "Bearer $GatewayKey" } `
                 -Body '{"symbol":"VOO"}' `
                 -TimeoutSec 20
             if ($response.success -and $response.symbol -eq "US.VOO" -and $response.price -gt 0) {
-                Write-SupervisorLog "Verified live US.VOO data on Vercel production."
+                Write-SupervisorLog "Verified live US.VOO data through Cloudflare Tunnel."
                 return
             }
         } catch {
@@ -257,7 +276,7 @@ function Test-ProductionQuote {
         }
         Start-Sleep -Seconds 3
     }
-    throw "Failed to verify live data on Vercel production."
+    throw "Failed to verify live data through Cloudflare Tunnel."
 }
 
 $gatewayKey = Get-OrCreateGatewayKey
@@ -271,9 +290,9 @@ while ($true) {
         $tunnelUrl = [string]$tunnel.Url
         Write-SupervisorLog "Cloudflare Tunnel HTTPS URL acquired."
 
-        Set-VercelEnvironment -GatewayUrl $tunnelUrl -GatewayKey $gatewayKey
         Set-Content -LiteralPath $statePath -Value $tunnelUrl -Encoding ASCII
-        Test-ProductionQuote
+        Test-TunnelQuote -GatewayUrl $tunnelUrl -GatewayKey $gatewayKey
+        Set-VercelEnvironment -GatewayUrl $tunnelUrl -GatewayKey $gatewayKey
 
         while (-not $tunnel.Process.HasExited) {
             if (-not (Test-TcpPort -Port $gatewayPort)) {

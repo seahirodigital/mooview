@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Plus, 
   Settings, 
@@ -13,7 +13,8 @@ import {
   ChartNoAxesCombined,
   ChevronDown,
   ChevronRight,
-  GripVertical,
+  ChevronsLeft,
+  ChevronsRight,
   Pencil
 } from 'lucide-react';
 
@@ -461,6 +462,8 @@ export default function App() {
   const [gridPickerOpen, setGridPickerOpen] = useState<boolean>(false);
   // Watchlist tabs overflow dropdown open state
   const [tabsDropdownOpen, setTabsDropdownOpen] = useState<boolean>(false);
+  const watchlistTabsViewportRef = useRef<HTMLDivElement | null>(null);
+  const watchlistTabRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // Chart Panels state
   const [panels, setPanels] = useState<ChartPanel[]>(() => {
@@ -689,6 +692,18 @@ export default function App() {
     window.addEventListener('click', handleOutsideClick);
     return () => window.removeEventListener('click', handleOutsideClick);
   }, [gridPickerOpen, tabsDropdownOpen]);
+
+  useEffect(() => {
+    const tabsViewport = watchlistTabsViewportRef.current;
+    const activeTabElement = watchlistTabRefs.current[activeWatchlistTabId];
+    if (!tabsViewport || !activeTabElement) return;
+
+    const targetLeft = activeTabElement.offsetLeft - (tabsViewport.clientWidth - activeTabElement.offsetWidth) / 2;
+    tabsViewport.scrollTo({
+      left: Math.max(0, targetLeft),
+      behavior: 'smooth',
+    });
+  }, [activeWatchlistTabId, sidebarWidth, watchlistTabs]);
 
   const handleMoomooModeToggle = () => {
     if (!moomooRealTimeActive) {
@@ -1127,6 +1142,22 @@ export default function App() {
     }
   };
 
+  const selectWatchlistTab = (tabId: string) => {
+    setActiveWatchlistTabId(tabId);
+  };
+
+  const handleJumpToFirstWatchlistTab = () => {
+    const firstTab = watchlistTabs[0];
+    if (!firstTab) return;
+    selectWatchlistTab(firstTab.id);
+  };
+
+  const handleJumpToLastWatchlistTab = () => {
+    const lastTab = watchlistTabs[watchlistTabs.length - 1];
+    if (!lastTab) return;
+    selectWatchlistTab(lastTab.id);
+  };
+
   const handleAddWatchlistSection = (afterSectionId?: string) => {
     const newSectionId = createId('section');
     const newSection: WatchlistSection = {
@@ -1537,6 +1568,12 @@ export default function App() {
   const activeWatchlistTab = useMemo(() => {
     return watchlistTabs.find((tab) => tab.id === activeWatchlistTabId) ?? watchlistTabs[0];
   }, [activeWatchlistTabId, watchlistTabs]);
+  const activeWatchlistTabIndex = watchlistTabs.findIndex((tab) => tab.id === activeWatchlistTabId);
+  const canJumpToFirstWatchlistTab = watchlistTabs.length > 1 && activeWatchlistTabIndex > 0;
+  const canJumpToLastWatchlistTab =
+    watchlistTabs.length > 1 &&
+    activeWatchlistTabIndex >= 0 &&
+    activeWatchlistTabIndex < watchlistTabs.length - 1;
 
   const watchlistLayoutColumnWidths = useMemo(
     () => calculateWatchlistLayoutColumnWidths(
@@ -2035,14 +2072,36 @@ export default function App() {
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
           {sidebarView === 'watchlist' && (
           <div className="flex-1 min-h-0 bg-[#10131f] overflow-hidden flex flex-col relative">
-            <div className="h-8 shrink-0 border-b border-[#2a2e3d] bg-[#0c0e18] flex items-center justify-between px-1 overflow-visible relative">
-              {/* Tab container utilizing flex-wrap or drop-down if too many */}
-              <div className="flex items-end gap-0.5 overflow-hidden flex-1 h-full pr-1.5">
+            <div className="h-8 shrink-0 border-b border-[#2a2e3d] bg-[#0c0e18] flex items-center gap-1 px-1 overflow-visible relative">
+              <button
+                type="button"
+                onClick={handleJumpToFirstWatchlistTab}
+                disabled={!canJumpToFirstWatchlistTab}
+                className={`w-6 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center transition-colors ${
+                  canJumpToFirstWatchlistTab
+                    ? 'text-gray-400 hover:text-white hover:bg-[#171b28] cursor-pointer'
+                    : 'text-gray-700 opacity-50 cursor-not-allowed'
+                }`}
+                aria-label="最初のウォッチリストタブへ移動"
+                title="最初のタブへ"
+              >
+                <ChevronsLeft className="w-3.5 h-3.5" />
+              </button>
+
+              <div
+                ref={watchlistTabsViewportRef}
+                className="flex-1 min-w-0 h-full overflow-x-auto overflow-y-hidden scroll-smooth scrollbar-none"
+                style={{ scrollbarWidth: 'none' }}
+              >
+              <div className="flex items-end gap-0.5 h-full min-w-max pr-1.5">
                 {watchlistTabs.map((tab) => {
                   const active = tab.id === activeWatchlistTabId;
                   return (
                     <div
                       key={tab.id}
+                      ref={(element) => {
+                        watchlistTabRefs.current[tab.id] = element;
+                      }}
                       className={`h-7 shrink-0 px-2 border border-b-0 flex items-center gap-1.5 transition-all ${
                         active
                           ? 'bg-[#10131f] border-[#34394c] text-white font-bold'
@@ -2065,7 +2124,7 @@ export default function App() {
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setActiveWatchlistTabId(tab.id)}
+                          onClick={() => selectWatchlistTab(tab.id)}
                           className="text-[10px] text-left truncate cursor-pointer"
                           title={tab.name}
                         >
@@ -2095,6 +2154,22 @@ export default function App() {
                   );
                 })}
               </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleJumpToLastWatchlistTab}
+                disabled={!canJumpToLastWatchlistTab}
+                className={`w-6 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center transition-colors ${
+                  canJumpToLastWatchlistTab
+                    ? 'text-gray-400 hover:text-white hover:bg-[#171b28] cursor-pointer'
+                    : 'text-gray-700 opacity-50 cursor-not-allowed'
+                }`}
+                aria-label="最後のウォッチリストタブへ移動"
+                title="最後のタブへ"
+              >
+                <ChevronsRight className="w-3.5 h-3.5" />
+              </button>
 
               <div className="flex items-center gap-1 z-20 shrink-0">
                 {/* Watchlist Tabs Dropdown Trigger - stateトグル式 */}
@@ -2119,7 +2194,7 @@ export default function App() {
                           <button
                             key={t.id}
                             type="button"
-                            onClick={() => { setActiveWatchlistTabId(t.id); setTabsDropdownOpen(false); }}
+                            onClick={() => { selectWatchlistTab(t.id); setTabsDropdownOpen(false); }}
                             className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171b28] truncate cursor-pointer block ${
                               t.id === activeWatchlistTabId ? 'text-blue-400 font-bold bg-[#1a1f32]' : 'text-gray-300'
                             }`}
@@ -2388,7 +2463,7 @@ export default function App() {
                           }}
                           onClick={handleTickerClick}
                           onContextMenu={handleTickerContextMenu}
-                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition select-none cursor-pointer ${
+                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition select-none cursor-grab active:cursor-grabbing ${
                             isMultiSelected
                               ? 'bg-blue-900/40 ring-1 ring-inset ring-blue-500'
                               : isSelectedPrimary
@@ -2398,10 +2473,9 @@ export default function App() {
                           style={{ gridTemplateColumns: watchlistGridTemplate }}
                         >
                           <div
-                            className="min-w-0 flex items-center gap-1 text-left h-full"
+                            className="min-w-0 flex items-center text-left h-full"
                             title={`${ticker.name}を左側チャートに表示 (Shift+クリックで複数選択, 右クリックで削除)`}
                           >
-                            <GripVertical className="w-2.5 h-2.5 text-gray-700 shrink-0" />
                             <span className="text-[10px] font-bold font-mono text-gray-100 truncate">
                               {formatWatchlistSymbol(ticker.symbol)}
                             </span>
@@ -2421,7 +2495,7 @@ export default function App() {
                               event.stopPropagation();
                               handleRemoveTickerFromSection(section.id, ticker.symbol);
                             }}
-                            className="w-5 h-5 text-gray-700 hover:text-red-400 flex items-center justify-end"
+                            className="w-5 h-5 text-gray-700 opacity-0 hover:opacity-100 focus-visible:opacity-100 hover:text-red-400 flex items-center justify-end transition-opacity"
                             aria-label={`${ticker.name}をウォッチリストから削除`}
                             title="ウォッチリストから削除"
                           >

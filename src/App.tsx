@@ -459,6 +459,8 @@ export default function App() {
   const [gridRows, setGridRows] = useState<number>(() => readStoredValue('tv_dashboard_grid_rows', 2));
   const [gridCols, setGridCols] = useState<number>(() => readStoredValue('tv_dashboard_grid_cols', 2));
   const [gridPickerOpen, setGridPickerOpen] = useState<boolean>(false);
+  // Watchlist tabs overflow dropdown open state
+  const [tabsDropdownOpen, setTabsDropdownOpen] = useState<boolean>(false);
 
   // Chart Panels state
   const [panels, setPanels] = useState<ChartPanel[]>(() => {
@@ -677,6 +679,16 @@ export default function App() {
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, [watchlistContextMenu]);
+
+  useEffect(() => {
+    if (!gridPickerOpen && !tabsDropdownOpen) return;
+    const handleOutsideClick = () => {
+      setGridPickerOpen(false);
+      setTabsDropdownOpen(false);
+    };
+    window.addEventListener('click', handleOutsideClick);
+    return () => window.removeEventListener('click', handleOutsideClick);
+  }, [gridPickerOpen, tabsDropdownOpen]);
 
   const handleMoomooModeToggle = () => {
     if (!moomooRealTimeActive) {
@@ -1422,6 +1434,16 @@ export default function App() {
     }));
   };
 
+  // グリッドレイアウトを選択し、パネル数を調整する
+  const handleSelectCustomGrid = (rows: number, cols: number) => {
+    const maxPanels = rows * cols;
+    setGridRows(rows);
+    setGridCols(cols);
+    setLayoutStyle('grid');
+    setPanels((prev) => prev.slice(0, maxPanels));
+    setGridPickerOpen(false);
+  };
+
   // Create a new chart segment panel (plus indicator button)
   const handleAddChartPanel = () => {
     if (panels.length >= 6) {
@@ -1934,22 +1956,25 @@ export default function App() {
             <div className="grid grid-cols-4 gap-1 bg-[#0c0e1a] p-1 border border-[#21263d]">
               <div className="relative">
                 <button
-                  onClick={() => setGridPickerOpen(!gridPickerOpen)}
+                  onClick={(e) => { e.stopPropagation(); setGridPickerOpen((v) => !v); }}
                   className={`w-full h-9 flex items-center justify-center transition-all cursor-pointer ${
                     layoutStyle === 'grid' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'
                   }`}
-                  title={`グリッド選択 (${gridRows}x${gridCols})`}
+                  title={`グリッド選択 (${gridRows}×${gridCols})`}
                 >
                   <LayoutGrid className="w-4 h-4" />
                 </button>
                 {gridPickerOpen && (
-                  <div className="absolute left-0 top-10 z-50 bg-[#0d101a] border border-[#34394c] p-3 rounded-lg shadow-2xl w-56">
+                  <div
+                    className="absolute left-0 top-10 z-50 bg-[#0d101a] border border-[#34394c] p-3 rounded-lg shadow-2xl w-56"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     <div className="text-[10px] text-gray-400 font-bold mb-2 flex justify-between items-center">
                       <span>グリッドレイアウト選択</span>
                       <span className="text-blue-400 font-mono text-xs">{gridRows} × {gridCols}</span>
                     </div>
                     {/* Interactive 9x9 grid selector */}
-                    <div className="grid grid-cols-9 gap-1 bg-[#070913] p-1.5 border border-[#21263d] rounded">
+                    <div className="grid grid-cols-9 gap-0.5 bg-[#070913] p-1.5 border border-[#21263d] rounded">
                       {Array.from({ length: 9 }).map((_, rIdx) => {
                         const r = rIdx + 1;
                         return Array.from({ length: 9 }).map((__, cIdx) => {
@@ -1962,11 +1987,11 @@ export default function App() {
                                 setGridRows(r);
                                 setGridCols(c);
                               }}
-                              onClick={() => handleSelectCustomGrid(r, c)}
-                              className={`w-4.5 h-4.5 aspect-square border transition-all cursor-pointer rounded-sm ${
+                              onClick={(e) => { e.stopPropagation(); handleSelectCustomGrid(r, c); }}
+                              className={`w-5 h-5 aspect-square border transition-all cursor-pointer rounded-sm ${
                                 isHighlighted
                                   ? 'bg-blue-600 border-blue-400'
-                                  : 'bg-[#151829] border-[#2d3552] hover:bg-gray-800'
+                                  : 'bg-[#151829] border-[#2d3552] hover:bg-gray-700'
                               }`}
                               title={`${r}行 × ${c}列`}
                             />
@@ -1975,7 +2000,7 @@ export default function App() {
                       })}
                     </div>
                     <div className="text-[9px] text-gray-500 mt-2 text-center leading-tight">
-                      マス目をホバーしてサイズを指定し、クリックで適用します (最大 9×9)
+                      ホバーでサイズ確認 → クリックで適用 (最大 9×9)
                     </div>
                   </div>
                 )}
@@ -2072,30 +2097,38 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-1 z-20 shrink-0">
-                {/* Watchlist Tabs Dropdown Trigger */}
+                {/* Watchlist Tabs Dropdown Trigger - stateトグル式 */}
                 {watchlistTabs.length > 2 && (
-                  <div className="relative group">
+                  <div className="relative">
                     <button
                       type="button"
-                      className="w-7 h-7 border border-b-0 border-[#1e2232] text-gray-400 hover:text-white hover:bg-[#171b28] flex items-center justify-center cursor-pointer"
+                      onClick={(e) => { e.stopPropagation(); setTabsDropdownOpen((v) => !v); }}
+                      className={`w-7 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center cursor-pointer transition-colors ${
+                        tabsDropdownOpen ? 'text-white bg-[#171b28]' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'
+                      }`}
                       title="ウォッチリスト一覧"
                     >
-                      <ChevronDown className="w-3.5 h-3.5" />
+                      <ChevronDown className={`w-3.5 h-3.5 transition-transform ${tabsDropdownOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    <div className="absolute right-0 top-7 w-36 bg-[#0b0d16] border border-[#34394c] py-1 shadow-xl hidden group-hover:block z-50">
-                      {watchlistTabs.map((t) => (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => setActiveWatchlistTabId(t.id)}
-                          className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171b28] truncate cursor-pointer block ${
-                            t.id === activeWatchlistTabId ? 'text-blue-400 font-bold bg-[#171b28]' : 'text-gray-300'
-                          }`}
-                        >
-                          {t.name}
-                        </button>
-                      ))}
-                    </div>
+                    {tabsDropdownOpen && (
+                      <div
+                        className="absolute right-0 top-full w-40 bg-[#0b0d16] border border-[#34394c] py-1 shadow-2xl z-50"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {watchlistTabs.map((t) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => { setActiveWatchlistTabId(t.id); setTabsDropdownOpen(false); }}
+                            className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171b28] truncate cursor-pointer block ${
+                              t.id === activeWatchlistTabId ? 'text-blue-400 font-bold bg-[#1a1f32]' : 'text-gray-300'
+                            }`}
+                          >
+                            {t.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
                 
@@ -2290,22 +2323,24 @@ export default function App() {
                       const isMultiSelected = selectedSymbols.includes(ticker.symbol);
 
                       const handleTickerClick = (event: React.MouseEvent) => {
-                        // Shift + Click for range multi-select
+                        // Shift + Click: 表示順(rows)に基づく範囲選択
                         if (event.shiftKey && lastClickedSymbol) {
-                          const allSymbolsInSection = section.symbols;
-                          const startIdx = allSymbolsInSection.indexOf(lastClickedSymbol);
-                          const endIdx = allSymbolsInSection.indexOf(ticker.symbol);
+                          const displayedSymbols = section.rows.map((r) => r.symbol);
+                          const startIdx = displayedSymbols.indexOf(lastClickedSymbol);
+                          const endIdx = displayedSymbols.indexOf(ticker.symbol);
                           if (startIdx !== -1 && endIdx !== -1) {
                             const minIdx = Math.min(startIdx, endIdx);
                             const maxIdx = Math.max(startIdx, endIdx);
-                            const range = allSymbolsInSection.slice(minIdx, maxIdx + 1);
-                            setSelectedSymbols((prev) => {
-                              const base = event.ctrlKey || event.metaKey ? prev : [];
-                              return Array.from(new Set([...base, ...range]));
-                            });
+                            const range = displayedSymbols.slice(minIdx, maxIdx + 1);
+                            setSelectedSymbols(Array.from(new Set([...selectedSymbols, ...range])));
+                          } else {
+                            setSelectedSymbols((prev) =>
+                              prev.includes(ticker.symbol) ? prev.filter((s) => s !== ticker.symbol) : [...prev, ticker.symbol]
+                            );
                           }
+                          setLastClickedSymbol(ticker.symbol);
                         } else if (event.ctrlKey || event.metaKey) {
-                          // Toggle single select with Ctrl/Meta key
+                          // Ctrl/Meta + Click: 1つずつトグル選択
                           setSelectedSymbols((prev) =>
                             prev.includes(ticker.symbol)
                               ? prev.filter((s) => s !== ticker.symbol)
@@ -2313,7 +2348,7 @@ export default function App() {
                           );
                           setLastClickedSymbol(ticker.symbol);
                         } else {
-                          // Plain click: select primary and clean multi-select unless clicked on already multi-selected
+                          // 通常クリック: プライマリチャートに表示
                           selectTickerForPrimaryChart(ticker.symbol);
                           setSelectedSymbols([ticker.symbol]);
                           setLastClickedSymbol(ticker.symbol);

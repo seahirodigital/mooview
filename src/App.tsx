@@ -445,6 +445,21 @@ export default function App() {
     y: number;
   } | null>(null);
 
+  // Watchlist multiple selection and right-click delete state
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [lastClickedSymbol, setLastClickedSymbol] = useState<string | null>(null);
+  const [watchlistContextMenu, setWatchlistContextMenu] = useState<{
+    x: number;
+    y: number;
+    symbols: string[];
+    sectionId: string;
+  } | null>(null);
+
+  // Custom Grid Layout dimensions (max 9x9)
+  const [gridRows, setGridRows] = useState<number>(() => readStoredValue('tv_dashboard_grid_rows', 2));
+  const [gridCols, setGridCols] = useState<number>(() => readStoredValue('tv_dashboard_grid_cols', 2));
+  const [gridPickerOpen, setGridPickerOpen] = useState<boolean>(false);
+
   // Chart Panels state
   const [panels, setPanels] = useState<ChartPanel[]>(() => {
     const saved = localStorage.getItem('tv_dashboard_panels');
@@ -608,6 +623,14 @@ export default function App() {
   }, [layoutStyle]);
 
   useEffect(() => {
+    localStorage.setItem('tv_dashboard_grid_rows', JSON.stringify(gridRows));
+  }, [gridRows]);
+
+  useEffect(() => {
+    localStorage.setItem('tv_dashboard_grid_cols', JSON.stringify(gridCols));
+  }, [gridCols]);
+
+  useEffect(() => {
     localStorage.setItem('tv_dashboard_sidebar_open', JSON.stringify(sidebarOpen));
   }, [sidebarOpen]);
 
@@ -647,6 +670,13 @@ export default function App() {
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, [sectionMenu]);
+
+  useEffect(() => {
+    if (!watchlistContextMenu) return;
+    const closeMenu = () => setWatchlistContextMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [watchlistContextMenu]);
 
   const handleMoomooModeToggle = () => {
     if (!moomooRealTimeActive) {
@@ -884,14 +914,19 @@ export default function App() {
     if (layoutStyle === 'rows') {
       return [panels];
     }
-    // grid layout grouping (panels grouped up to 2 per column)
-    if (panels.length <= 1) return [[panels[0]]];
-    if (panels.length === 2) return [[panels[0]], [panels[1]]];
-    if (panels.length === 3) return [[panels[0]], [panels[1]], [panels[2]]];
-    if (panels.length === 4) return [[panels[0], panels[1]], [panels[2], panels[3]]];
-    if (panels.length === 5) return [[panels[0], panels[1]], [panels[2], panels[3]], [panels[4]]];
-    return [[panels[0], panels[1]], [panels[2], panels[3]], [panels[4], panels[5]]];
-  }, [panels, layoutStyle]);
+    // grid layout grouping (allocate panels into dynamic gridCols)
+    const cols: ChartPanel[][] = [];
+    for (let c = 0; c < gridCols; c++) {
+      cols.push([]);
+    }
+    panels.forEach((panel, index) => {
+      const colIdx = index % gridCols;
+      if (cols[colIdx]) {
+        cols[colIdx].push(panel);
+      }
+    });
+    return cols.filter(col => col.length > 0);
+  }, [panels, layoutStyle, gridCols]);
 
   // Handle column width dragging
   const handleColResizeMouseDown = (
@@ -1178,6 +1213,18 @@ export default function App() {
     }));
   };
 
+  const handleRemoveTickersFromSection = (sectionId: string, symbolsToRemove: string[]) => {
+    updateActiveWatchlistTab((tab) => ({
+      ...tab,
+      sections: tab.sections.map((section) =>
+        section.id === sectionId
+          ? { ...section, symbols: section.symbols.filter((currentSymbol) => !symbolsToRemove.includes(currentSymbol)) }
+          : section
+      ),
+    }));
+    setSelectedSymbols((prev) => prev.filter((s) => !symbolsToRemove.includes(s)));
+  };
+
   const handleDropTicker = (targetSectionId: string, targetSymbol?: string) => {
     if (!draggedTicker) return;
     setWatchlistSort({ column: null, direction: null });
@@ -1247,9 +1294,13 @@ export default function App() {
   };
 
   const registerTickerCandidate = async (candidate: SymbolSearchCandidate) => {
-    if (tickers.some((ticker) => ticker.symbol === candidate.symbol)) {
-      addSymbolToActiveWatchlist(candidate.symbol);
-      selectTickerForPrimaryChart(candidate.symbol);
+    // Remove "US." prefix from symbol if exists
+    const cleanSymbol = candidate.symbol.startsWith('US.') ? candidate.symbol.slice(3) : candidate.symbol;
+    const cleanName = candidate.name.startsWith('US.') ? candidate.name.slice(3) : candidate.name;
+
+    if (tickers.some((ticker) => ticker.symbol === cleanSymbol)) {
+      addSymbolToActiveWatchlist(cleanSymbol);
+      selectTickerForPrimaryChart(cleanSymbol);
       setTickerSearchOpen(false);
       return;
     }
@@ -1260,7 +1311,7 @@ export default function App() {
       const response = await fetch('/api/moomoo/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: candidate.symbol }),
+        body: JSON.stringify({ symbol: cleanSymbol }),
       });
       const data = await response.json();
       if (!data.success || !Number(data.price)) {
@@ -1268,8 +1319,8 @@ export default function App() {
       }
 
       const newTicker: TickerInfo = {
-        symbol: candidate.symbol,
-        name: candidate.name || data.name || candidate.symbol,
+        symbol: cleanSymbol,
+        name: cleanName || data.name || cleanSymbol,
         basePrice: Number(data.price),
         dailyChangePct: Number(data.changePct || 0),
       };
@@ -1277,7 +1328,7 @@ export default function App() {
       setTickers((currentTickers) => [...currentTickers, newTicker]);
       setQuoteCache((currentQuotes) => ({
         ...currentQuotes,
-        [candidate.symbol]: {
+        [cleanSymbol]: {
           name: newTicker.name,
           price: newTicker.basePrice,
           changePct: newTicker.dailyChangePct,
@@ -1285,11 +1336,11 @@ export default function App() {
       }));
       setIndicatorDatabase((currentDatabase) => ({
         ...currentDatabase,
-        [candidate.symbol]: currentDatabase[candidate.symbol]
-          || createDefaultIndicatorSettings(candidate.symbol),
+        [cleanSymbol]: currentDatabase[cleanSymbol]
+          || createDefaultIndicatorSettings(cleanSymbol),
       }));
-      addSymbolToActiveWatchlist(candidate.symbol);
-      selectTickerForPrimaryChart(candidate.symbol);
+      addSymbolToActiveWatchlist(cleanSymbol);
+      selectTickerForPrimaryChart(cleanSymbol);
       setNewSymbolInput('');
       setTickerSearchCandidates([]);
       setTickerSearchOpen(false);
@@ -1305,7 +1356,14 @@ export default function App() {
   // 銘柄名・証券コード・ティッカーから候補を検索する
   const handleAddTicker = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSymbolInput.trim()) return;
+    let queryInput = newSymbolInput.trim();
+    if (!queryInput) return;
+
+    // Clean prefix US. if user types it manually
+    if (queryInput.toUpperCase().startsWith('US.')) {
+      queryInput = queryInput.slice(3);
+    }
+
     setTickerSearchLoading(true);
     setTickerSearchError(null);
     setTickerSearchCandidates([]);
@@ -1313,19 +1371,39 @@ export default function App() {
       const response = await fetch('/api/moomoo/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: newSymbolInput.trim(), limit: 10 }),
+        body: JSON.stringify({ query: queryInput, limit: 10 }),
       });
       const data = await response.json();
       const candidates = Array.isArray(data.candidates)
         ? data.candidates as SymbolSearchCandidate[]
         : [];
       if (!data.success || candidates.length === 0) {
+        // If not found in search but seems like a valid ticker code, register directly
+        if (/^[A-Za-z0-9\-\.\/]+$/.test(queryInput)) {
+          const directCandidate: SymbolSearchCandidate = {
+            symbol: queryInput.toUpperCase(),
+            code: queryInput.toUpperCase(),
+            name: queryInput.toUpperCase(),
+            nameEn: queryInput.toUpperCase(),
+            market: 'US',
+            category: 'DIRECT'
+          };
+          await registerTickerCandidate(directCandidate);
+          return;
+        }
         throw new Error(data.error || '該当する銘柄が見つかりません。');
       }
-      if (candidates.length === 1) {
-        await registerTickerCandidate(candidates[0]);
+
+      // Filter and clean prefix from search candidates before handling
+      const processedCandidates = candidates.map(c => {
+        const symbol = c.symbol.startsWith('US.') ? c.symbol.slice(3) : c.symbol;
+        return { ...c, symbol };
+      });
+
+      if (processedCandidates.length === 1) {
+        await registerTickerCandidate(processedCandidates[0]);
       } else {
-        setTickerSearchCandidates(candidates);
+        setTickerSearchCandidates(processedCandidates);
       }
     } catch (error) {
       setTickerSearchError(
@@ -1852,15 +1930,56 @@ export default function App() {
           >
 
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
-          <div className="shrink-0 p-2 border-b border-[#242938]">
+          <div className="shrink-0 p-2 border-b border-[#242938] relative">
             <div className="grid grid-cols-4 gap-1 bg-[#0c0e1a] p-1 border border-[#21263d]">
-              <button
-                onClick={() => setLayoutStyle('grid')}
-                className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'grid' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
-                title="グリッド"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setGridPickerOpen(!gridPickerOpen)}
+                  className={`w-full h-9 flex items-center justify-center transition-all cursor-pointer ${
+                    layoutStyle === 'grid' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'
+                  }`}
+                  title={`グリッド選択 (${gridRows}x${gridCols})`}
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                </button>
+                {gridPickerOpen && (
+                  <div className="absolute left-0 top-10 z-50 bg-[#0d101a] border border-[#34394c] p-3 rounded-lg shadow-2xl w-56">
+                    <div className="text-[10px] text-gray-400 font-bold mb-2 flex justify-between items-center">
+                      <span>グリッドレイアウト選択</span>
+                      <span className="text-blue-400 font-mono text-xs">{gridRows} × {gridCols}</span>
+                    </div>
+                    {/* Interactive 9x9 grid selector */}
+                    <div className="grid grid-cols-9 gap-1 bg-[#070913] p-1.5 border border-[#21263d] rounded">
+                      {Array.from({ length: 9 }).map((_, rIdx) => {
+                        const r = rIdx + 1;
+                        return Array.from({ length: 9 }).map((__, cIdx) => {
+                          const c = cIdx + 1;
+                          const isHighlighted = r <= gridRows && c <= gridCols;
+                          return (
+                            <div
+                              key={`${r}-${c}`}
+                              onMouseEnter={() => {
+                                setGridRows(r);
+                                setGridCols(c);
+                              }}
+                              onClick={() => handleSelectCustomGrid(r, c)}
+                              className={`w-4.5 h-4.5 aspect-square border transition-all cursor-pointer rounded-sm ${
+                                isHighlighted
+                                  ? 'bg-blue-600 border-blue-400'
+                                  : 'bg-[#151829] border-[#2d3552] hover:bg-gray-800'
+                              }`}
+                              title={`${r}行 × ${c}列`}
+                            />
+                          );
+                        });
+                      })}
+                    </div>
+                    <div className="text-[9px] text-gray-500 mt-2 text-center leading-tight">
+                      マス目をホバーしてサイズを指定し、クリックで適用します (最大 9×9)
+                    </div>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={() => setLayoutStyle('columns')}
                 className={`h-9 flex items-center justify-center transition-all cursor-pointer ${layoutStyle === 'columns' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#171b28]'}`}
@@ -1877,7 +1996,7 @@ export default function App() {
               </button>
               <button
                 onClick={handleAddChartPanel}
-                disabled={panels.length >= 6}
+                disabled={panels.length >= gridRows * gridCols}
                 id="btn-add-chart-panel"
                 className="h-9 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#171b28] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                 title="チャートを追加"
@@ -1891,71 +2010,105 @@ export default function App() {
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
           {sidebarView === 'watchlist' && (
           <div className="flex-1 min-h-0 bg-[#10131f] overflow-hidden flex flex-col relative">
-            <div className="h-8 shrink-0 border-b border-[#2a2e3d] bg-[#0c0e18] flex items-end gap-0.5 px-1 overflow-x-auto">
-              {watchlistTabs.map((tab) => {
-                const active = tab.id === activeWatchlistTabId;
-                return (
-                  <div
-                    key={tab.id}
-                    className={`h-7 min-w-[92px] max-w-[148px] px-1.5 border border-b-0 flex items-center gap-1 ${
-                      active
-                        ? 'bg-[#10131f] border-[#34394c] text-white'
-                        : 'bg-[#0a0c14] border-[#1e2232] text-gray-500 hover:text-gray-200'
-                    }`}
-                    onDoubleClick={() => setEditingTabId(tab.id)}
-                  >
-                    {editingTabId === tab.id ? (
-                      <input
-                        value={tab.name}
-                        onChange={(event) => handleRenameWatchlistTab(tab.id, event.target.value)}
-                        onBlur={() => setEditingTabId(null)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') event.currentTarget.blur();
-                        }}
-                        className="min-w-0 flex-1 bg-[#171a27] border border-blue-500 text-[10px] px-1 outline-none"
-                        autoFocus
-                      />
-                    ) : (
+            <div className="h-8 shrink-0 border-b border-[#2a2e3d] bg-[#0c0e18] flex items-center justify-between px-1 overflow-visible relative">
+              {/* Tab container utilizing flex-wrap or drop-down if too many */}
+              <div className="flex items-end gap-0.5 overflow-hidden flex-1 h-full pr-1.5">
+                {watchlistTabs.map((tab) => {
+                  const active = tab.id === activeWatchlistTabId;
+                  return (
+                    <div
+                      key={tab.id}
+                      className={`h-7 shrink-0 px-2 border border-b-0 flex items-center gap-1.5 transition-all ${
+                        active
+                          ? 'bg-[#10131f] border-[#34394c] text-white font-bold'
+                          : 'bg-[#0a0c14] border-[#1e2232] text-gray-500 hover:text-gray-200'
+                      }`}
+                      style={{ width: 'auto', minWidth: 'fit-content' }}
+                      onDoubleClick={() => setEditingTabId(tab.id)}
+                    >
+                      {editingTabId === tab.id ? (
+                        <input
+                          value={tab.name}
+                          onChange={(event) => handleRenameWatchlistTab(tab.id, event.target.value)}
+                          onBlur={() => setEditingTabId(null)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') event.currentTarget.blur();
+                          }}
+                          className="w-16 bg-[#171a27] border border-blue-500 text-[10px] px-1 outline-none text-white"
+                          autoFocus
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setActiveWatchlistTabId(tab.id)}
+                          className="text-[10px] text-left truncate cursor-pointer"
+                          title={tab.name}
+                        >
+                          {tab.name}
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setActiveWatchlistTabId(tab.id)}
-                        className="min-w-0 flex-1 text-left text-[10px] font-bold truncate"
-                        title={tab.name}
+                        onClick={() => setEditingTabId(tab.id)}
+                        className="w-3.5 h-3.5 flex items-center justify-center text-gray-500 hover:text-gray-200 cursor-pointer"
+                        aria-label={`${tab.name}の名称を変更`}
+                        title="名称変更"
                       >
-                        {tab.name}
+                        <Pencil className="w-2.5 h-2.5" style={{ width: '10px', height: '10px' }} />
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteWatchlistTab(tab.id)}
+                        disabled={watchlistTabs.length <= 1}
+                        className="w-3.5 h-3.5 flex items-center justify-center text-gray-600 hover:text-red-300 disabled:opacity-20 cursor-pointer"
+                        aria-label={`${tab.name}を削除`}
+                        title="タブ削除"
+                      >
+                        <X className="w-2.5 h-2.5" style={{ width: '10px', height: '10px' }} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center gap-1 z-20 shrink-0">
+                {/* Watchlist Tabs Dropdown Trigger */}
+                {watchlistTabs.length > 2 && (
+                  <div className="relative group">
                     <button
                       type="button"
-                      onClick={() => setEditingTabId(tab.id)}
-                      className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-gray-200"
-                      aria-label={`${tab.name}の名称を変更`}
-                      title="名称変更"
+                      className="w-7 h-7 border border-b-0 border-[#1e2232] text-gray-400 hover:text-white hover:bg-[#171b28] flex items-center justify-center cursor-pointer"
+                      title="ウォッチリスト一覧"
                     >
-                      <Pencil className="w-2.5 h-2.5" />
+                      <ChevronDown className="w-3.5 h-3.5" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteWatchlistTab(tab.id)}
-                      disabled={watchlistTabs.length <= 1}
-                      className="w-4 h-4 flex items-center justify-center text-gray-600 hover:text-red-300 disabled:opacity-20"
-                      aria-label={`${tab.name}を削除`}
-                      title="タブ削除"
-                    >
-                      <X className="w-2.5 h-2.5" />
-                    </button>
+                    <div className="absolute right-0 top-7 w-36 bg-[#0b0d16] border border-[#34394c] py-1 shadow-xl hidden group-hover:block z-50">
+                      {watchlistTabs.map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => setActiveWatchlistTabId(t.id)}
+                          className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171b28] truncate cursor-pointer block ${
+                            t.id === activeWatchlistTabId ? 'text-blue-400 font-bold bg-[#171b28]' : 'text-gray-300'
+                          }`}
+                        >
+                          {t.name}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                );
-              })}
-              <button
-                type="button"
-                onClick={handleAddWatchlistTab}
-                className="w-7 h-7 border border-b-0 border-[#1e2232] text-gray-400 hover:text-white hover:bg-[#171b28] flex items-center justify-center"
-                aria-label="ウォッチリストタブを追加"
-                title="タブを追加"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
+                )}
+                
+                <button
+                  type="button"
+                  onClick={handleAddWatchlistTab}
+                  className="w-7 h-7 border border-b-0 border-[#1e2232] text-gray-400 hover:text-white hover:bg-[#171b28] flex items-center justify-center cursor-pointer"
+                  aria-label="ウォッチリストタブを追加"
+                  title="タブを追加"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
             <div className="w-full min-w-0">
@@ -2133,7 +2286,57 @@ export default function App() {
                     {!section.collapsed && section.rows.map((ticker) => {
                       const hasQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
                       const isPositive = hasQuote && ticker.computedChange >= 0;
-                      const isSelected = panels[0]?.symbol === ticker.symbol;
+                      const isSelectedPrimary = panels[0]?.symbol === ticker.symbol;
+                      const isMultiSelected = selectedSymbols.includes(ticker.symbol);
+
+                      const handleTickerClick = (event: React.MouseEvent) => {
+                        // Shift + Click for range multi-select
+                        if (event.shiftKey && lastClickedSymbol) {
+                          const allSymbolsInSection = section.symbols;
+                          const startIdx = allSymbolsInSection.indexOf(lastClickedSymbol);
+                          const endIdx = allSymbolsInSection.indexOf(ticker.symbol);
+                          if (startIdx !== -1 && endIdx !== -1) {
+                            const minIdx = Math.min(startIdx, endIdx);
+                            const maxIdx = Math.max(startIdx, endIdx);
+                            const range = allSymbolsInSection.slice(minIdx, maxIdx + 1);
+                            setSelectedSymbols((prev) => {
+                              const base = event.ctrlKey || event.metaKey ? prev : [];
+                              return Array.from(new Set([...base, ...range]));
+                            });
+                          }
+                        } else if (event.ctrlKey || event.metaKey) {
+                          // Toggle single select with Ctrl/Meta key
+                          setSelectedSymbols((prev) =>
+                            prev.includes(ticker.symbol)
+                              ? prev.filter((s) => s !== ticker.symbol)
+                              : [...prev, ticker.symbol]
+                          );
+                          setLastClickedSymbol(ticker.symbol);
+                        } else {
+                          // Plain click: select primary and clean multi-select unless clicked on already multi-selected
+                          selectTickerForPrimaryChart(ticker.symbol);
+                          setSelectedSymbols([ticker.symbol]);
+                          setLastClickedSymbol(ticker.symbol);
+                        }
+                      };
+
+                      const handleTickerContextMenu = (event: React.MouseEvent) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        // If current clicked symbol is not in the selection, select only it
+                        let currentSelection = selectedSymbols;
+                        if (!selectedSymbols.includes(ticker.symbol)) {
+                          currentSelection = [ticker.symbol];
+                          setSelectedSymbols([ticker.symbol]);
+                        }
+                        setWatchlistContextMenu({
+                          x: event.clientX,
+                          y: event.clientY,
+                          symbols: currentSelection,
+                          sectionId: section.id,
+                        });
+                      };
+
                       return (
                         <div
                           key={`${section.id}-${ticker.symbol}`}
@@ -2148,22 +2351,26 @@ export default function App() {
                             event.stopPropagation();
                             handleDropTicker(section.id, ticker.symbol);
                           }}
-                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition ${
-                            isSelected ? 'bg-blue-950/35 ring-1 ring-inset ring-gray-500' : 'hover:bg-[#171b28]'
+                          onClick={handleTickerClick}
+                          onContextMenu={handleTickerContextMenu}
+                          className={`grid w-full items-center h-5 px-2 border-b border-[#242836] last:border-b-0 transition select-none cursor-pointer ${
+                            isMultiSelected
+                              ? 'bg-blue-900/40 ring-1 ring-inset ring-blue-500'
+                              : isSelectedPrimary
+                              ? 'bg-blue-950/20 ring-1 ring-inset ring-gray-700'
+                              : 'hover:bg-[#171b28]'
                           } ${draggedTicker?.symbol === ticker.symbol ? 'opacity-45' : ''}`}
                           style={{ gridTemplateColumns: watchlistGridTemplate }}
                         >
-                          <button
-                            type="button"
-                            onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                          <div
                             className="min-w-0 flex items-center gap-1 text-left h-full"
-                            title={`${ticker.name}を左側チャートに表示`}
+                            title={`${ticker.name}を左側チャートに表示 (Shift+クリックで複数選択, 右クリックで削除)`}
                           >
                             <GripVertical className="w-2.5 h-2.5 text-gray-700 shrink-0" />
                             <span className="text-[10px] font-bold font-mono text-gray-100 truncate">
                               {formatWatchlistSymbol(ticker.symbol)}
                             </span>
-                          </button>
+                          </div>
                           <span className="text-right font-mono text-[10px] text-gray-200 truncate">
                             {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
                           </span>
@@ -2175,7 +2382,10 @@ export default function App() {
                           </span>
                           <button
                             type="button"
-                            onClick={() => handleRemoveTickerFromSection(section.id, ticker.symbol)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleRemoveTickerFromSection(section.id, ticker.symbol);
+                            }}
                             className="w-5 h-5 text-gray-700 hover:text-red-400 flex items-center justify-end"
                             aria-label={`${ticker.name}をウォッチリストから削除`}
                             title="ウォッチリストから削除"
@@ -2189,6 +2399,28 @@ export default function App() {
                 ))}
               </div>
             </div>
+
+            {watchlistContextMenu && (
+              <div
+                className="fixed z-50 w-44 bg-[#0b0d16] border border-[#34394c] shadow-2xl py-1 text-[10px] text-gray-200"
+                style={{ left: watchlistContextMenu.x, top: watchlistContextMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleRemoveTickersFromSection(watchlistContextMenu.sectionId, watchlistContextMenu.symbols);
+                    setWatchlistContextMenu(null);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-left text-red-300 hover:bg-red-950/30 flex items-center justify-between"
+                >
+                  <span>選択した銘柄を削除</span>
+                  <span className="bg-red-950/60 px-1 rounded text-[8px] font-mono text-red-200">
+                    {watchlistContextMenu.symbols.length}
+                  </span>
+                </button>
+              </div>
+            )}
 
             {sectionMenu && (
               <div

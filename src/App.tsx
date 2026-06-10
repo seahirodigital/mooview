@@ -34,6 +34,13 @@ const INDICATOR_LINE_STYLES: IndicatorLineStyle[] = ['solid', 'dashed', 'dotted'
 type SidebarView = 'watchlist' | 'indicators' | 'settings';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
+type WatchlistImportMode = 'new-tab' | 'active-tab';
+
+const WATCHLIST_IMPORT_CONCURRENCY = 8;
+const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
+const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
+const CANDLES_CACHE_TTL_MS = 30_000;
+const CANDLES_CACHE_MAX_LENGTH = 180;
 
 interface WatchlistSection {
   id: string;
@@ -89,6 +96,67 @@ function readStoredValue<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function normalizeStoredCandlesCache(raw: unknown): Record<string, Candle[]> {
+  if (!raw || typeof raw !== 'object') return {};
+  const next: Record<string, Candle[]> = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([key, value]) => {
+    if (!Array.isArray(value)) return;
+    const candles = value.filter((item): item is Candle => {
+      if (!item || typeof item !== 'object') return false;
+      const candle = item as Partial<Candle>;
+      return Number.isFinite(Number(candle.time))
+        && Number.isFinite(Number(candle.open))
+        && Number.isFinite(Number(candle.high))
+        && Number.isFinite(Number(candle.low))
+        && Number.isFinite(Number(candle.close))
+        && Number.isFinite(Number(candle.volume));
+    });
+    if (candles.length > 0) {
+      next[key] = candles.slice(-CANDLES_CACHE_MAX_LENGTH);
+    }
+  });
+  return next;
+}
+
+function normalizeTimestampMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  const next: Record<string, number> = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([key, value]) => {
+    const timestamp = Number(value);
+    if (Number.isFinite(timestamp) && timestamp > 0) {
+      next[key] = timestamp;
+    }
+  });
+  return next;
+}
+
+function compactCandlesCache(cache: Record<string, Candle[]>): Record<string, Candle[]> {
+  return Object.fromEntries(
+    Object.entries(cache).map(([key, candles]) => [
+      key,
+      candles.slice(-CANDLES_CACHE_MAX_LENGTH),
+    ]),
+  );
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(limit, 1), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex]);
+    }
+  }));
+  return results;
 }
 
 function normalizePanel(panel: ChartPanel): ChartPanel {
@@ -508,6 +576,10 @@ interface MoomooTickerQuote {
 export default function App() {
   // --- STATE ---
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
+  const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
+  const candleFetchTimestampsRef = useRef<Record<string, number>>(
+    normalizeTimestampMap(readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}))
+  );
   // Tickers list management
   const [tickers, setTickers] = useState<TickerInfo[]>(() => {
     const saved = localStorage.getItem('tv_dashboard_tickers');
@@ -556,6 +628,8 @@ export default function App() {
   } | null>(null);
   const [watchlistImporting, setWatchlistImporting] = useState(false);
   const [watchlistImportMessage, setWatchlistImportMessage] = useState<string | null>(null);
+  const [watchlistImportMenuOpen, setWatchlistImportMenuOpen] = useState(false);
+  const [watchlistImportMode, setWatchlistImportMode] = useState<WatchlistImportMode>('new-tab');
 
   // Watchlist multiple selection and right-click delete state
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
@@ -656,7 +730,9 @@ export default function App() {
   );
 
   // Tickers historical candles cache
-  const [candlesCache, setCandlesCache] = useState<Record<string, Candle[]>>({});
+  const [candlesCache, setCandlesCache] = useState<Record<string, Candle[]>>(() =>
+    normalizeStoredCandlesCache(readStoredValue<unknown>(CANDLES_CACHE_STORAGE_KEY, {}))
+  );
   const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
@@ -717,6 +793,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tv_dashboard_panels', JSON.stringify(panels));
   }, [panels]);
+
+  useEffect(() => {
+    const saveTimer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(CANDLES_CACHE_STORAGE_KEY, JSON.stringify(compactCandlesCache(candlesCache)));
+        localStorage.setItem(CANDLES_CACHE_META_STORAGE_KEY, JSON.stringify(candleFetchTimestampsRef.current));
+      } catch (error) {
+        console.warn('ローソク足キャッシュの保存に失敗しました。', error);
+      }
+    }, 600);
+    return () => window.clearTimeout(saveTimer);
+  }, [candlesCache]);
 
   useEffect(() => {
     localStorage.setItem('tv_dashboard_indicators', JSON.stringify(indicatorDatabase));
@@ -802,14 +890,15 @@ export default function App() {
   }, [watchlistContextMenu]);
 
   useEffect(() => {
-    if (!gridPickerOpen && !tabsDropdownOpen) return;
+    if (!gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen) return;
     const handleOutsideClick = () => {
       setGridPickerOpen(false);
       setTabsDropdownOpen(false);
+      setWatchlistImportMenuOpen(false);
     };
     window.addEventListener('click', handleOutsideClick);
     return () => window.removeEventListener('click', handleOutsideClick);
-  }, [gridPickerOpen, tabsDropdownOpen]);
+  }, [gridPickerOpen, tabsDropdownOpen, watchlistImportMenuOpen]);
 
   useEffect(() => {
     const tabsViewport = watchlistTabsViewportRef.current;
@@ -867,6 +956,7 @@ export default function App() {
     let cancelled = false;
 
     const fetchMoomooCandles = async () => {
+      const now = Date.now();
       const requests = new Map<string, { symbol: string; timeframe: Timeframe }>();
       panels.forEach((panel) => {
         requests.set(`${panel.symbol}-${panel.timeframe}`, {
@@ -881,9 +971,21 @@ export default function App() {
         });
       });
 
+      const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
+        const cachedCandles = candlesCache[key];
+        const lastFetchedAt = candleFetchTimestampsRef.current[key] ?? 0;
+        return !cachedCandles?.length || now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
+      });
+
+      if (requestsToFetch.length === 0) {
+        setMoomooStatus('connected');
+        setMoomooError(null);
+        return;
+      }
+
       const updatedCache: Record<string, Candle[]> = {};
       let firstError: string | null = null;
-      await Promise.all(Array.from(requests.entries()).map(async ([key, request]) => {
+      await Promise.all(requestsToFetch.map(async ([key, request]) => {
         try {
           const res = await fetch('/api/moomoo/kline', {
             method: 'POST',
@@ -908,7 +1010,11 @@ export default function App() {
       if (cancelled) return;
 
       if (Object.keys(updatedCache).length > 0) {
-        setCandlesCache((currentCache) => ({
+        const fetchedAt = Date.now();
+        Object.keys(updatedCache).forEach((key) => {
+          candleFetchTimestampsRef.current[key] = fetchedAt;
+        });
+        setCandlesCache((currentCache) => compactCandlesCache({
           ...currentCache,
           ...updatedCache,
         }));
@@ -1379,6 +1485,33 @@ export default function App() {
     });
   };
 
+  const addSymbolsToNewWatchlistTab = (symbols: string[], fileName: string) => {
+    const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
+    if (uniqueSymbols.length === 0) return;
+
+    const tabId = createId('watchlist-import');
+    const sectionId = createId('section-import');
+    const baseName = fileName.replace(/\.[^.]+$/, '').trim();
+    const tabName = (baseName || 'インポート').slice(0, 24);
+
+    setWatchlistTabs((currentTabs) => [
+      ...currentTabs,
+      {
+        id: tabId,
+        name: tabName,
+        sections: [{
+          id: sectionId,
+          name: 'インポート',
+          collapsed: false,
+          symbols: uniqueSymbols,
+        }],
+      },
+    ]);
+    setActiveWatchlistTabId(tabId);
+    setSidebarView('watchlist');
+    setSidebarOpen(true);
+  };
+
   const addSymbolToActiveWatchlist = (symbol: string) => {
     addSymbolsToActiveWatchlist([symbol]);
   };
@@ -1595,11 +1728,19 @@ export default function App() {
     }
   };
 
+  const beginWatchlistImport = (mode: WatchlistImportMode) => {
+    watchlistImportModeRef.current = mode;
+    setWatchlistImportMode(mode);
+    setWatchlistImportMenuOpen(false);
+    window.setTimeout(() => csvImportInputRef.current?.click(), 0);
+  };
+
   const handleImportWatchlistCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
     if (!file) return;
 
+    const importMode = watchlistImportModeRef.current;
     setWatchlistImporting(true);
     setWatchlistImportMessage(null);
     setTickerSearchError(null);
@@ -1612,60 +1753,114 @@ export default function App() {
         return;
       }
 
-      const knownSymbols = new Set(tickers.map((ticker) => ticker.symbol));
+      const tickerBySymbol = new Map(tickers.map((ticker) => [ticker.symbol, ticker]));
+      const queuedSymbols = new Set<string>();
+      const normalizedCandidates: Array<{ symbol: string; name: string }> = [];
       const importedSymbols: string[] = [];
       const newTickers: TickerInfo[] = [];
       const newQuotes: Record<string, MoomooTickerQuote> = {};
       let skippedCount = 0;
 
-      for (const candidate of candidates) {
+      candidates.forEach((candidate) => {
         const symbol = normalizeImportedSymbol(candidate.code);
-        if (!symbol) {
+        if (!symbol || queuedSymbols.has(symbol)) {
           skippedCount += 1;
-          continue;
+          return;
+        }
+        queuedSymbols.add(symbol);
+        normalizedCandidates.push({
+          symbol,
+          name: candidate.name || symbol,
+        });
+      });
+
+      if (normalizedCandidates.length === 0) {
+        setWatchlistImportMessage('有効な銘柄を読み取れませんでした。');
+        return;
+      }
+
+      const quoteRequests: Array<{ symbol: string; name: string }> = [];
+      normalizedCandidates.forEach((candidate) => {
+        const existingTicker = tickerBySymbol.get(candidate.symbol);
+        if (existingTicker) {
+          importedSymbols.push(candidate.symbol);
+          return;
         }
 
-        const existingTicker = tickers.find((ticker) => ticker.symbol === symbol);
-        if (importedSymbols.includes(symbol)) {
-          skippedCount += 1;
-          continue;
-        }
-
-        if (existingTicker || knownSymbols.has(symbol)) {
-          importedSymbols.push(symbol);
-          continue;
-        }
-
-        try {
-          const response = await fetch('/api/moomoo/quote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbol }),
-          });
-          const data = await response.json();
-          if (!data.success || !Number(data.price)) {
-            skippedCount += 1;
-            continue;
-          }
-
+        const cachedQuote = quoteCache[candidate.symbol];
+        if (cachedQuote && Number.isFinite(Number(cachedQuote.price)) && Number(cachedQuote.price) > 0) {
           const importedTicker: TickerInfo = {
-            symbol,
-            name: candidate.name || data.name || symbol,
-            basePrice: Number(data.price),
-            dailyChangePct: Number(data.changePct || 0),
+            symbol: candidate.symbol,
+            name: candidate.name || cachedQuote.name || candidate.symbol,
+            basePrice: Number(cachedQuote.price),
+            dailyChangePct: Number(cachedQuote.changePct || 0),
           };
-          knownSymbols.add(symbol);
-          importedSymbols.push(symbol);
+          tickerBySymbol.set(candidate.symbol, importedTicker);
+          importedSymbols.push(candidate.symbol);
           newTickers.push(importedTicker);
-          newQuotes[symbol] = {
+          newQuotes[candidate.symbol] = {
             name: importedTicker.name,
             price: importedTicker.basePrice,
             changePct: importedTicker.dailyChangePct,
           };
-        } catch {
-          skippedCount += 1;
+          return;
         }
-      }
+
+        quoteRequests.push(candidate);
+      });
+
+      const quoteResults = await mapWithConcurrency(
+        quoteRequests,
+        WATCHLIST_IMPORT_CONCURRENCY,
+        async (candidate) => {
+          try {
+            const response = await fetch('/api/moomoo/quote', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ symbol: candidate.symbol }),
+            });
+            const data = await response.json();
+            const price = Number(data.price);
+            if (!data.success || !Number.isFinite(price) || price <= 0) {
+              return null;
+            }
+
+            const changePct = Number(data.changePct || 0);
+            const importedTicker: TickerInfo = {
+              symbol: candidate.symbol,
+              name: candidate.name || data.name || candidate.symbol,
+              basePrice: price,
+              dailyChangePct: Number.isFinite(changePct) ? changePct : 0,
+            };
+
+            return {
+              ticker: importedTicker,
+              quote: {
+                name: importedTicker.name,
+                price: importedTicker.basePrice,
+                changePct: importedTicker.dailyChangePct,
+              } satisfies MoomooTickerQuote,
+            };
+          } catch {
+            return null;
+          }
+        },
+      );
+
+      quoteResults.forEach((result) => {
+        if (!result) {
+          skippedCount += 1;
+          return;
+        }
+        if (!tickerBySymbol.has(result.ticker.symbol)) {
+          tickerBySymbol.set(result.ticker.symbol, result.ticker);
+          newTickers.push(result.ticker);
+          newQuotes[result.ticker.symbol] = result.quote;
+        }
+        importedSymbols.push(result.ticker.symbol);
+      });
+
+      const finalImportedSymbols = Array.from(new Set(importedSymbols));
 
       if (newTickers.length > 0) {
         setTickers((currentTickers) => {
@@ -1689,17 +1884,25 @@ export default function App() {
         });
       }
 
-      addSymbolsToActiveWatchlist(importedSymbols);
-      setSelectedSymbols(importedSymbols);
-      setLastClickedSymbol(importedSymbols.at(-1) ?? null);
+      if (importMode === 'new-tab') {
+        addSymbolsToNewWatchlistTab(finalImportedSymbols, file.name);
+      } else {
+        addSymbolsToActiveWatchlist(finalImportedSymbols);
+      }
+
+      setSelectedSymbols(finalImportedSymbols);
+      setLastClickedSymbol(finalImportedSymbols.at(-1) ?? null);
+      const destinationLabel = importMode === 'new-tab' ? '新規タブ' : 'アクティブなウォッチリスト';
       setWatchlistImportMessage(
-        `${importedSymbols.length}件をインポートしました。${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
+        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
       );
     } catch (error) {
       setWatchlistImportMessage(
         error instanceof Error ? error.message : 'CSVのインポートに失敗しました。'
       );
     } finally {
+      watchlistImportModeRef.current = 'new-tab';
+      setWatchlistImportMode('new-tab');
       setWatchlistImporting(false);
     }
   };
@@ -2431,16 +2634,50 @@ export default function App() {
                 >
                   <Plus className="w-3.5 h-3.5" />
                 </button>
-                <button
-                  type="button"
-                  onClick={() => csvImportInputRef.current?.click()}
-                  disabled={watchlistImporting}
-                  className="w-7 h-7 border border-b-0 border-[#202020] text-gray-400 hover:text-white hover:bg-[#171717] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
-                  aria-label="CSVをインポート"
-                  title="CSVをインポート"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      watchlistImportModeRef.current = 'new-tab';
+                      setWatchlistImportMode('new-tab');
+                      setWatchlistImportMenuOpen((open) => !open);
+                    }}
+                    disabled={watchlistImporting}
+                    className="w-7 h-7 border border-b-0 border-[#202020] text-gray-400 hover:text-white hover:bg-[#171717] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
+                    aria-label="CSVをインポート"
+                    title={watchlistImporting ? 'CSVをインポート中' : 'CSVをインポート'}
+                  >
+                    <Upload className={`w-3.5 h-3.5 ${watchlistImporting ? 'animate-spin text-emerald-300' : ''}`} />
+                  </button>
+                  {watchlistImportMenuOpen && !watchlistImporting && (
+                    <div
+                      className="absolute right-0 top-full z-50 w-56 bg-[#080808] border border-[#343434] py-1 shadow-2xl text-[10px] text-gray-200"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          beginWatchlistImport('new-tab');
+                        }}
+                        className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'new-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
+                      >
+                        新規タブへ追加
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          beginWatchlistImport('active-tab');
+                        }}
+                        className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'active-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
+                      >
+                        アクティブなウォッチリストへ追加
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   ref={csvImportInputRef}
                   type="file"

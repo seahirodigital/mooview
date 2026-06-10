@@ -14,7 +14,8 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsLeft,
-  ChevronsRight
+  ChevronsRight,
+  Upload
 } from 'lucide-react';
 
 import { Timeframe, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle } from './types';
@@ -188,6 +189,109 @@ function calculateWatchlistLayoutColumnWidths(
   });
 
   return next;
+}
+
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let value = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(value);
+      value = '';
+      continue;
+    }
+
+    if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && nextChar === '\n') {
+        index += 1;
+      }
+      row.push(value);
+      if (row.some((cell) => cell.trim())) {
+        rows.push(row);
+      }
+      row = [];
+      value = '';
+      continue;
+    }
+
+    value += char;
+  }
+
+  row.push(value);
+  if (row.some((cell) => cell.trim())) {
+    rows.push(row);
+  }
+  return rows;
+}
+
+function extractWatchlistCsvCandidates(text: string): Array<{ code: string; name: string }> {
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((header) => header.replace(/^\uFEFF/, '').trim());
+  const codeIndex = headers.findIndex((header) => header === 'コード' || header.toLowerCase() === 'code');
+  const nameIndex = headers.findIndex((header) => header === '銘柄' || header.toLowerCase() === 'name');
+  if (codeIndex === -1) return [];
+
+  return rows.slice(1)
+    .map((row) => ({
+      code: String(row[codeIndex] ?? '').trim(),
+      name: String(nameIndex >= 0 ? row[nameIndex] ?? '' : '').trim(),
+    }))
+    .filter((candidate) => candidate.code);
+}
+
+function normalizeImportedSymbol(rawCode: string): string | null {
+  const cleaned = rawCode.trim().replace(/^["']|["']$/g, '').toUpperCase();
+  if (!cleaned) return null;
+  if (cleaned.startsWith('US.')) return cleaned.slice(3);
+  if (cleaned.endsWith('.US')) return cleaned.slice(0, -3);
+
+  const parts = cleaned.split('.');
+  if (parts.length === 2) {
+    const [first, second] = parts;
+    if (first === 'US' && second) {
+      return second;
+    }
+    if (second === 'US' && first) {
+      return first;
+    }
+    if (first === 'HK' && second) {
+      return /^\d+$/.test(second) ? `HK.${second.padStart(5, '0')}` : cleaned;
+    }
+    if (second === 'HK' && first) {
+      return /^\d+$/.test(first) ? `HK.${first.padStart(5, '0')}` : `HK.${first}`;
+    }
+    if (first === 'JP' && second) {
+      return `JP.${second}`;
+    }
+    if (second === 'JP' && first) {
+      return `JP.${first}`;
+    }
+  }
+
+  if (cleaned.endsWith('.T')) {
+    return `JP.${cleaned.slice(0, -2)}`;
+  }
+  if (/^\d{3}[A-Z0-9]$/.test(cleaned)) {
+    return `JP.${cleaned}`;
+  }
+  return cleaned;
 }
 
 function normalizeWatchlistSort(raw: unknown): WatchlistSortState {
@@ -403,6 +507,7 @@ interface MoomooTickerQuote {
 
 export default function App() {
   // --- STATE ---
+  const csvImportInputRef = useRef<HTMLInputElement | null>(null);
   // Tickers list management
   const [tickers, setTickers] = useState<TickerInfo[]>(() => {
     const saved = localStorage.getItem('tv_dashboard_tickers');
@@ -449,6 +554,8 @@ export default function App() {
     x: number;
     y: number;
   } | null>(null);
+  const [watchlistImporting, setWatchlistImporting] = useState(false);
+  const [watchlistImportMessage, setWatchlistImportMessage] = useState<string | null>(null);
 
   // Watchlist multiple selection and right-click delete state
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
@@ -1250,9 +1357,14 @@ export default function App() {
     setSectionMenu(null);
   };
 
-  const addSymbolToActiveWatchlist = (symbol: string) => {
+  const addSymbolsToActiveWatchlist = (symbols: string[]) => {
+    const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
+    if (uniqueSymbols.length === 0) return;
+
     updateActiveWatchlistTab((tab) => {
-      if (tab.sections.some((section) => section.symbols.includes(symbol))) {
+      const existingSymbols = new Set(tab.sections.flatMap((section) => section.symbols));
+      const symbolsToAdd = uniqueSymbols.filter((symbol) => !existingSymbols.has(symbol));
+      if (symbolsToAdd.length === 0) {
         return tab;
       }
       const firstOpenSection = tab.sections.find((section) => !section.collapsed) ?? tab.sections[0];
@@ -1260,11 +1372,15 @@ export default function App() {
         ...tab,
         sections: tab.sections.map((section) =>
           section.id === firstOpenSection.id
-            ? { ...section, symbols: [...section.symbols, symbol] }
+            ? { ...section, symbols: [...section.symbols, ...symbolsToAdd] }
             : section
         ),
       };
     });
+  };
+
+  const addSymbolToActiveWatchlist = (symbol: string) => {
+    addSymbolsToActiveWatchlist([symbol]);
   };
 
   const handleRemoveTickerFromSection = (sectionId: string, symbol: string) => {
@@ -1476,6 +1592,115 @@ export default function App() {
       );
     } finally {
       setTickerSearchLoading(false);
+    }
+  };
+
+  const handleImportWatchlistCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+
+    setWatchlistImporting(true);
+    setWatchlistImportMessage(null);
+    setTickerSearchError(null);
+
+    try {
+      const text = await file.text();
+      const candidates = extractWatchlistCsvCandidates(text);
+      if (candidates.length === 0) {
+        setWatchlistImportMessage('CSVからコード列を読み取れませんでした。');
+        return;
+      }
+
+      const knownSymbols = new Set(tickers.map((ticker) => ticker.symbol));
+      const importedSymbols: string[] = [];
+      const newTickers: TickerInfo[] = [];
+      const newQuotes: Record<string, MoomooTickerQuote> = {};
+      let skippedCount = 0;
+
+      for (const candidate of candidates) {
+        const symbol = normalizeImportedSymbol(candidate.code);
+        if (!symbol) {
+          skippedCount += 1;
+          continue;
+        }
+
+        const existingTicker = tickers.find((ticker) => ticker.symbol === symbol);
+        if (importedSymbols.includes(symbol)) {
+          skippedCount += 1;
+          continue;
+        }
+
+        if (existingTicker || knownSymbols.has(symbol)) {
+          importedSymbols.push(symbol);
+          continue;
+        }
+
+        try {
+          const response = await fetch('/api/moomoo/quote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol }),
+          });
+          const data = await response.json();
+          if (!data.success || !Number(data.price)) {
+            skippedCount += 1;
+            continue;
+          }
+
+          const importedTicker: TickerInfo = {
+            symbol,
+            name: candidate.name || data.name || symbol,
+            basePrice: Number(data.price),
+            dailyChangePct: Number(data.changePct || 0),
+          };
+          knownSymbols.add(symbol);
+          importedSymbols.push(symbol);
+          newTickers.push(importedTicker);
+          newQuotes[symbol] = {
+            name: importedTicker.name,
+            price: importedTicker.basePrice,
+            changePct: importedTicker.dailyChangePct,
+          };
+        } catch {
+          skippedCount += 1;
+        }
+      }
+
+      if (newTickers.length > 0) {
+        setTickers((currentTickers) => {
+          const currentSymbols = new Set(currentTickers.map((ticker) => ticker.symbol));
+          return [
+            ...currentTickers,
+            ...newTickers.filter((ticker) => !currentSymbols.has(ticker.symbol)),
+          ];
+        });
+        setQuoteCache((currentQuotes) => ({
+          ...currentQuotes,
+          ...newQuotes,
+        }));
+        setIndicatorDatabase((currentDatabase) => {
+          const nextDatabase = { ...currentDatabase };
+          newTickers.forEach((ticker) => {
+            nextDatabase[ticker.symbol] = nextDatabase[ticker.symbol]
+              || createDefaultIndicatorSettings(ticker.symbol);
+          });
+          return nextDatabase;
+        });
+      }
+
+      addSymbolsToActiveWatchlist(importedSymbols);
+      setSelectedSymbols(importedSymbols);
+      setLastClickedSymbol(importedSymbols.at(-1) ?? null);
+      setWatchlistImportMessage(
+        `${importedSymbols.length}件をインポートしました。${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
+      );
+    } catch (error) {
+      setWatchlistImportMessage(
+        error instanceof Error ? error.message : 'CSVのインポートに失敗しました。'
+      );
+    } finally {
+      setWatchlistImporting(false);
     }
   };
 
@@ -2206,6 +2431,23 @@ export default function App() {
                 >
                   <Plus className="w-3.5 h-3.5" />
                 </button>
+                <button
+                  type="button"
+                  onClick={() => csvImportInputRef.current?.click()}
+                  disabled={watchlistImporting}
+                  className="w-7 h-7 border border-b-0 border-[#202020] text-gray-400 hover:text-white hover:bg-[#171717] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
+                  aria-label="CSVをインポート"
+                  title="CSVをインポート"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                </button>
+                <input
+                  ref={csvImportInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="hidden"
+                  onChange={handleImportWatchlistCsv}
+                />
               </div>
             </div>
 
@@ -2237,6 +2479,12 @@ export default function App() {
                 >
                   タブ削除
                 </button>
+              </div>
+            )}
+
+            {watchlistImportMessage && (
+              <div className="shrink-0 px-2 py-1 border-b border-[#242424] bg-[#0d0d0d] text-[10px] text-gray-400 truncate">
+                {watchlistImportMessage}
               </div>
             )}
 
@@ -2285,7 +2533,7 @@ export default function App() {
                     setTickerSearchError(null);
                     setTickerSearchCandidates([]);
                   }}
-                  className="w-6 h-6 hover:bg-[#242838] text-gray-300 hover:text-white flex items-center justify-center transition"
+                  className="w-6 h-6 hover:bg-[#171717] text-gray-300 hover:text-white flex items-center justify-center transition"
                   aria-label="銘柄を追加"
                   title="銘柄を追加"
                 >

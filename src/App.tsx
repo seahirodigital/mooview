@@ -88,6 +88,20 @@ interface SymbolSearchCandidate {
   category: string;
 }
 
+interface WatchlistCsvCandidate {
+  code: string;
+  name: string;
+  market: string;
+  price: number | null;
+  changePct: number | null;
+}
+
+interface RegisterTickerResult {
+  success: boolean;
+  error?: string;
+  gatewayFailure?: boolean;
+}
+
 function readStoredValue<T>(key: string, fallback: T): T {
   const saved = localStorage.getItem(key);
   if (!saved) return fallback;
@@ -308,58 +322,77 @@ function parseCsvRows(text: string): string[][] {
   return rows;
 }
 
-function extractWatchlistCsvCandidates(text: string): Array<{ code: string; name: string }> {
+function parseImportedNumber(value: string): number | null {
+  const cleaned = value
+    .trim()
+    .replace(/[,%$¥￥\s]/g, '')
+    .replace(/[＋]/g, '+')
+    .replace(/[−ー－]/g, '-');
+  if (!cleaned || cleaned === '-' || cleaned === '--') return null;
+  const numericValue = Number(cleaned);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function normalizeTickerSymbolForStorage(rawSymbol: string): string {
+  const cleaned = rawSymbol.trim().replace(/^["']|["']$/g, '');
+  if (!cleaned) return '';
+  const upper = cleaned.toUpperCase();
+  if (upper.startsWith('US.')) return cleaned.slice(3);
+  if (upper.endsWith('.US')) return cleaned.slice(0, -3);
+  if (upper.startsWith('JP.')) return `JP.${cleaned.slice(3).toUpperCase()}`;
+  if (upper.endsWith('.JP')) return `JP.${cleaned.slice(0, -3).toUpperCase()}`;
+  if (upper.endsWith('.T')) return `JP.${cleaned.slice(0, -2).toUpperCase()}`;
+  if (upper.startsWith('HK.')) {
+    const code = cleaned.slice(3).toUpperCase();
+    return /^\d+$/.test(code) ? `HK.${code.padStart(5, '0')}` : `HK.${code}`;
+  }
+  if (upper.endsWith('.HK')) {
+    const code = cleaned.slice(0, -3).toUpperCase();
+    return /^\d+$/.test(code) ? `HK.${code.padStart(5, '0')}` : `HK.${code}`;
+  }
+  if (upper.endsWith('.FX') || upper.endsWith('.BD')) return upper;
+  if (/^\d{3}[A-Z0-9]?$/.test(upper)) return `JP.${upper}`;
+  return upper;
+}
+
+function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
   const rows = parseCsvRows(text);
   if (rows.length < 2) return [];
   const headers = rows[0].map((header) => header.replace(/^\uFEFF/, '').trim());
   const codeIndex = headers.findIndex((header) => header === 'コード' || header.toLowerCase() === 'code');
   const nameIndex = headers.findIndex((header) => header === '銘柄' || header.toLowerCase() === 'name');
+  const marketIndex = headers.findIndex((header) => header === '市場' || header.toLowerCase() === 'market');
+  const priceIndex = headers.findIndex((header) => header === '現在値' || header.toLowerCase() === 'price');
+  const changePctIndex = headers.findIndex((header) => header === '変化率' || header.toLowerCase() === 'changepct');
   if (codeIndex === -1) return [];
 
   return rows.slice(1)
     .map((row) => ({
       code: String(row[codeIndex] ?? '').trim(),
       name: String(nameIndex >= 0 ? row[nameIndex] ?? '' : '').trim(),
+      market: String(marketIndex >= 0 ? row[marketIndex] ?? '' : '').trim(),
+      price: parseImportedNumber(String(priceIndex >= 0 ? row[priceIndex] ?? '' : '')),
+      changePct: parseImportedNumber(String(changePctIndex >= 0 ? row[changePctIndex] ?? '' : '')),
     }))
     .filter((candidate) => candidate.code);
 }
 
 function normalizeImportedSymbol(rawCode: string): string | null {
-  const cleaned = rawCode.trim().replace(/^["']|["']$/g, '').toUpperCase();
+  const cleaned = rawCode.trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return null;
-  if (cleaned.startsWith('US.')) return cleaned.slice(3);
-  if (cleaned.endsWith('.US')) return cleaned.slice(0, -3);
+  return normalizeTickerSymbolForStorage(cleaned) || null;
+}
 
-  const parts = cleaned.split('.');
-  if (parts.length === 2) {
-    const [first, second] = parts;
-    if (first === 'US' && second) {
-      return second;
-    }
-    if (second === 'US' && first) {
-      return first;
-    }
-    if (first === 'HK' && second) {
-      return /^\d+$/.test(second) ? `HK.${second.padStart(5, '0')}` : cleaned;
-    }
-    if (second === 'HK' && first) {
-      return /^\d+$/.test(first) ? `HK.${first.padStart(5, '0')}` : `HK.${first}`;
-    }
-    if (first === 'JP' && second) {
-      return `JP.${second}`;
-    }
-    if (second === 'JP' && first) {
-      return `JP.${first}`;
-    }
-  }
+function isLikelyTickerInput(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[A-Za-z]{1,6}$/.test(trimmed)
+    || /^[A-Za-z0-9._-]+\.(US|JP|HK|FX|BD)$/i.test(trimmed)
+    || /^\.[A-Za-z0-9._-]+\.(US|JP)$/i.test(trimmed)
+    || /^\d{3,5}[A-Za-z]?(\.T|\.JP)?$/i.test(trimmed);
+}
 
-  if (cleaned.endsWith('.T')) {
-    return `JP.${cleaned.slice(0, -2)}`;
-  }
-  if (/^\d{3}[A-Z0-9]$/.test(cleaned)) {
-    return `JP.${cleaned}`;
-  }
-  return cleaned;
+function isMoomooGatewayFailureMessage(message: string): boolean {
+  return /Moomoo|ゲートウェイ|Unauthorized|認証|接続|aborted|abort|timeout/i.test(message);
 }
 
 function normalizeWatchlistSort(raw: unknown): WatchlistSortState {
@@ -1607,42 +1640,61 @@ export default function App() {
     );
   };
 
-  const registerTickerCandidate = async (candidate: SymbolSearchCandidate) => {
-    // Remove "US." prefix from symbol if exists
-    const cleanSymbol = candidate.symbol.startsWith('US.') ? candidate.symbol.slice(3) : candidate.symbol;
-    const cleanName = candidate.name.startsWith('US.') ? candidate.name.slice(3) : candidate.name;
+  const registerTickerCandidate = async (
+    candidate: SymbolSearchCandidate,
+    options: { reportError?: boolean } = {},
+  ): Promise<RegisterTickerResult> => {
+    const requestedSymbol = normalizeTickerSymbolForStorage(candidate.symbol);
+    const cleanName = candidate.name.replace(/^US\./i, '');
 
-    if (tickers.some((ticker) => ticker.symbol === cleanSymbol)) {
-      addSymbolToActiveWatchlist(cleanSymbol);
-      selectTickerForPrimaryChart(cleanSymbol);
+    if (tickers.some((ticker) => ticker.symbol === requestedSymbol)) {
+      addSymbolToActiveWatchlist(requestedSymbol);
+      selectTickerForPrimaryChart(requestedSymbol);
       setTickerSearchOpen(false);
-      return;
+      return { success: true };
     }
 
     setTickerSearchLoading(true);
-    setTickerSearchError(null);
+    if (options.reportError !== false) {
+      setTickerSearchError(null);
+    }
     try {
       const response = await fetch('/api/moomoo/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: cleanSymbol }),
+        body: JSON.stringify({ symbol: requestedSymbol }),
       });
       const data = await response.json();
-      if (!data.success || !Number(data.price)) {
+      const price = Number(data.price);
+      if (!data.success || !Number.isFinite(price) || price <= 0) {
         throw new Error(data.error || 'Moomooから銘柄情報を取得できません。');
       }
 
+      const storedSymbol = normalizeTickerSymbolForStorage(String(data.symbol || requestedSymbol));
+      if (tickers.some((ticker) => ticker.symbol === storedSymbol)) {
+        addSymbolToActiveWatchlist(storedSymbol);
+        selectTickerForPrimaryChart(storedSymbol);
+        setTickerSearchOpen(false);
+        return { success: true };
+      }
+
+      const changePct = Number(data.changePct || 0);
       const newTicker: TickerInfo = {
-        symbol: cleanSymbol,
-        name: cleanName || data.name || cleanSymbol,
-        basePrice: Number(data.price),
-        dailyChangePct: Number(data.changePct || 0),
+        symbol: storedSymbol,
+        name: cleanName || data.name || storedSymbol,
+        basePrice: price,
+        dailyChangePct: Number.isFinite(changePct) ? changePct : 0,
       };
 
-      setTickers((currentTickers) => [...currentTickers, newTicker]);
+      setTickers((currentTickers) => {
+        if (currentTickers.some((ticker) => ticker.symbol === newTicker.symbol)) {
+          return currentTickers;
+        }
+        return [...currentTickers, newTicker];
+      });
       setQuoteCache((currentQuotes) => ({
         ...currentQuotes,
-        [cleanSymbol]: {
+        [storedSymbol]: {
           name: newTicker.name,
           price: newTicker.basePrice,
           changePct: newTicker.dailyChangePct,
@@ -1650,18 +1702,25 @@ export default function App() {
       }));
       setIndicatorDatabase((currentDatabase) => ({
         ...currentDatabase,
-        [cleanSymbol]: currentDatabase[cleanSymbol]
-          || createDefaultIndicatorSettings(cleanSymbol),
+        [storedSymbol]: currentDatabase[storedSymbol]
+          || createDefaultIndicatorSettings(storedSymbol),
       }));
-      addSymbolToActiveWatchlist(cleanSymbol);
-      selectTickerForPrimaryChart(cleanSymbol);
+      addSymbolToActiveWatchlist(storedSymbol);
+      selectTickerForPrimaryChart(storedSymbol);
       setNewSymbolInput('');
       setTickerSearchCandidates([]);
       setTickerSearchOpen(false);
+      return { success: true };
     } catch (error) {
-      setTickerSearchError(
-        error instanceof Error ? error.message : '銘柄を登録できませんでした。'
-      );
+      const message = error instanceof Error ? error.message : '銘柄を登録できませんでした。';
+      if (options.reportError !== false) {
+        setTickerSearchError(message);
+      }
+      return {
+        success: false,
+        error: message,
+        gatewayFailure: isMoomooGatewayFailureMessage(message),
+      };
     } finally {
       setTickerSearchLoading(false);
     }
@@ -1673,14 +1732,34 @@ export default function App() {
     let queryInput = newSymbolInput.trim();
     if (!queryInput) return;
 
-    // Clean prefix US. if user types it manually
+    // ティッカー入力ではUS.を省略しても同じ銘柄へ届くようにする
     if (queryInput.toUpperCase().startsWith('US.')) {
       queryInput = queryInput.slice(3);
     }
 
-    setTickerSearchLoading(true);
     setTickerSearchError(null);
     setTickerSearchCandidates([]);
+
+    if (isLikelyTickerInput(queryInput)) {
+      const directCandidate: SymbolSearchCandidate = {
+        symbol: queryInput,
+        code: queryInput,
+        name: queryInput.toUpperCase(),
+        nameEn: queryInput.toUpperCase(),
+        market: 'US',
+        category: 'DIRECT',
+      };
+      const directResult = await registerTickerCandidate(directCandidate, { reportError: false });
+      if (directResult.success) {
+        return;
+      }
+      if (directResult.gatewayFailure) {
+        setTickerSearchError(directResult.error || 'Moomooゲートウェイへ接続できません。');
+        return;
+      }
+    }
+
+    setTickerSearchLoading(true);
     try {
       const response = await fetch('/api/moomoo/search', {
         method: 'POST',
@@ -1692,25 +1771,12 @@ export default function App() {
         ? data.candidates as SymbolSearchCandidate[]
         : [];
       if (!data.success || candidates.length === 0) {
-        // If not found in search but seems like a valid ticker code, register directly
-        if (/^[A-Za-z0-9\-\.\/]+$/.test(queryInput)) {
-          const directCandidate: SymbolSearchCandidate = {
-            symbol: queryInput.toUpperCase(),
-            code: queryInput.toUpperCase(),
-            name: queryInput.toUpperCase(),
-            nameEn: queryInput.toUpperCase(),
-            market: 'US',
-            category: 'DIRECT'
-          };
-          await registerTickerCandidate(directCandidate);
-          return;
-        }
         throw new Error(data.error || '該当する銘柄が見つかりません。');
       }
 
-      // Filter and clean prefix from search candidates before handling
+      // 検索候補はアプリの保存形式にそろえてから表示する
       const processedCandidates = candidates.map(c => {
-        const symbol = c.symbol.startsWith('US.') ? c.symbol.slice(3) : c.symbol;
+        const symbol = normalizeTickerSymbolForStorage(c.symbol);
         return { ...c, symbol };
       });
 
@@ -1755,11 +1821,12 @@ export default function App() {
 
       const tickerBySymbol = new Map(tickers.map((ticker) => [ticker.symbol, ticker]));
       const queuedSymbols = new Set<string>();
-      const normalizedCandidates: Array<{ symbol: string; name: string }> = [];
+      const normalizedCandidates: Array<WatchlistCsvCandidate & { symbol: string }> = [];
       const importedSymbols: string[] = [];
       const newTickers: TickerInfo[] = [];
       const newQuotes: Record<string, MoomooTickerQuote> = {};
       let skippedCount = 0;
+      let csvFallbackCount = 0;
 
       candidates.forEach((candidate) => {
         const symbol = normalizeImportedSymbol(candidate.code);
@@ -1769,6 +1836,7 @@ export default function App() {
         }
         queuedSymbols.add(symbol);
         normalizedCandidates.push({
+          ...candidate,
           symbol,
           name: candidate.name || symbol,
         });
@@ -1779,7 +1847,26 @@ export default function App() {
         return;
       }
 
-      const quoteRequests: Array<{ symbol: string; name: string }> = [];
+      const buildTickerFromCsv = (candidate: WatchlistCsvCandidate & { symbol: string }) => {
+        if (!candidate.price || candidate.price <= 0) return null;
+        const importedTicker: TickerInfo = {
+          symbol: candidate.symbol,
+          name: candidate.name || candidate.symbol,
+          basePrice: candidate.price,
+          dailyChangePct: candidate.changePct ?? 0,
+        };
+        return {
+          ticker: importedTicker,
+          quote: {
+            name: importedTicker.name,
+            price: importedTicker.basePrice,
+            changePct: importedTicker.dailyChangePct,
+          } satisfies MoomooTickerQuote,
+          fromCsv: true,
+        };
+      };
+
+      const quoteRequests: Array<WatchlistCsvCandidate & { symbol: string }> = [];
       normalizedCandidates.forEach((candidate) => {
         const existingTicker = tickerBySymbol.get(candidate.symbol);
         if (existingTicker) {
@@ -1822,12 +1909,13 @@ export default function App() {
             const data = await response.json();
             const price = Number(data.price);
             if (!data.success || !Number.isFinite(price) || price <= 0) {
-              return null;
+              return buildTickerFromCsv(candidate);
             }
 
             const changePct = Number(data.changePct || 0);
+            const storedSymbol = normalizeTickerSymbolForStorage(String(data.symbol || candidate.symbol));
             const importedTicker: TickerInfo = {
-              symbol: candidate.symbol,
+              symbol: storedSymbol,
               name: candidate.name || data.name || candidate.symbol,
               basePrice: price,
               dailyChangePct: Number.isFinite(changePct) ? changePct : 0,
@@ -1840,9 +1928,10 @@ export default function App() {
                 price: importedTicker.basePrice,
                 changePct: importedTicker.dailyChangePct,
               } satisfies MoomooTickerQuote,
+              fromCsv: false,
             };
           } catch {
-            return null;
+            return buildTickerFromCsv(candidate);
           }
         },
       );
@@ -1851,6 +1940,9 @@ export default function App() {
         if (!result) {
           skippedCount += 1;
           return;
+        }
+        if (result.fromCsv) {
+          csvFallbackCount += 1;
         }
         if (!tickerBySymbol.has(result.ticker.symbol)) {
           tickerBySymbol.set(result.ticker.symbol, result.ticker);
@@ -1894,7 +1986,7 @@ export default function App() {
       setLastClickedSymbol(finalImportedSymbols.at(-1) ?? null);
       const destinationLabel = importMode === 'new-tab' ? '新規タブ' : 'アクティブなウォッチリスト';
       setWatchlistImportMessage(
-        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
+        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${csvFallbackCount > 0 ? `${csvFallbackCount}件はCSVの価格で登録しました。` : ''}${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
       );
     } catch (error) {
       setWatchlistImportMessage(

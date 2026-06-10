@@ -1,3 +1,8 @@
+import { spawnSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 export type MoomooAction = 'status' | 'quote' | 'kline' | 'search';
 
 export interface MoomooGatewayResult {
@@ -6,6 +11,8 @@ export interface MoomooGatewayResult {
   error?: string;
   [key: string]: unknown;
 }
+
+let cachedGatewayKey: string | null | undefined;
 
 function getGatewayUrl(): string {
   const configuredUrl = process.env.MOOMOO_GATEWAY_URL?.trim();
@@ -16,6 +23,51 @@ function getGatewayUrl(): string {
     throw new Error('MOOMOO_GATEWAY_URLがVercelに設定されていません。');
   }
   return 'http://127.0.0.1:8787';
+}
+
+function readProductionTunnelGatewayKey(): string {
+  if (process.platform !== 'win32') return '';
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const encryptedKeyPath = path.join(
+    localAppData,
+    'mooview',
+    'production-tunnel',
+    'gateway-key.dpapi',
+  );
+  if (!fs.existsSync(encryptedKeyPath)) return '';
+
+  const command = [
+    '$encryptedValue = (Get-Content -LiteralPath $env:MOOVIEW_GATEWAY_KEY_PATH -Raw).Trim()',
+    '$secureValue = $encryptedValue | ConvertTo-SecureString',
+    '$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureValue)',
+    'try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }',
+    'finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }',
+  ].join('; ');
+
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        MOOVIEW_GATEWAY_KEY_PATH: encryptedKeyPath,
+      },
+      timeout: 5000,
+      windowsHide: true,
+    },
+  );
+
+  if (result.status !== 0) return '';
+  return result.stdout.trim();
+}
+
+export function resolveMoomooGatewayKey(): string {
+  const configuredKey = process.env.MOOMOO_GATEWAY_KEY?.trim();
+  if (configuredKey) return configuredKey;
+  if (cachedGatewayKey !== undefined) return cachedGatewayKey || '';
+  cachedGatewayKey = readProductionTunnelGatewayKey() || null;
+  return cachedGatewayKey || '';
 }
 
 export async function callMoomooGateway(
@@ -29,7 +81,7 @@ export async function callMoomooGateway(
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    const gatewayKey = process.env.MOOMOO_GATEWAY_KEY?.trim();
+    const gatewayKey = resolveMoomooGatewayKey();
     if (gatewayKey) {
       headers.Authorization = `Bearer ${gatewayKey}`;
     }
@@ -51,9 +103,19 @@ export async function callMoomooGateway(
         error: 'Moomooゲートウェイから不正な応答を受信しました。',
       };
     }
+    if (response.status === 401) {
+      data = {
+        ...data,
+        success: false,
+        connected: false,
+        error: 'Moomooゲートウェイ認証に失敗しました。ローカルゲートウェイとNodeサーバーのMOOMOO_GATEWAY_KEYが一致していません。',
+      };
+    }
     return { status: response.status, data };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error && error.name === 'AbortError'
+      ? 'リクエストが10秒でタイムアウトしました'
+      : error instanceof Error ? error.message : String(error);
     return {
       status: 502,
       data: {

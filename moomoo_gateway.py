@@ -49,18 +49,40 @@ MARKET_TIMEZONES = {
     "SZ": "Asia/Shanghai",
     "JP": "Asia/Tokyo",
     "SG": "Asia/Singapore",
+    "FX": "UTC",
+    "BD": "UTC",
 }
 
 
-def normalize_symbol(raw_symbol: str) -> str:
-    symbol = raw_symbol.strip().upper()
-    if not symbol:
-        raise ValueError("銘柄コードを指定してください。")
+def normalize_symbol_code(raw_code: str) -> str:
+    code = raw_code.strip()
+    if not code:
+        return code
+    if code.startswith("."):
+        return "." + code[1:].upper()
+    if code.lower().endswith("main"):
+        return f"{code[:-4].upper()}main"
+    return code.upper()
 
-    if "." in symbol:
-        prefix, code = symbol.split(".", 1)
-        if prefix in MARKET_TIMEZONES and code:
-            return f"{prefix}.{code}"
+
+def normalize_symbol(raw_symbol: str) -> str:
+    raw_value = raw_symbol.strip()
+    if not raw_value:
+        raise ValueError("銘柄コードを指定してください。")
+    symbol = raw_value.upper()
+
+    suffix_parts = raw_value.split(".")
+    if len(suffix_parts) >= 2:
+        suffix_market = suffix_parts[-1].upper()
+        suffix_code = ".".join(suffix_parts[:-1])
+        if suffix_market in MARKET_TIMEZONES and suffix_code:
+            return f"{suffix_market}.{normalize_symbol_code(suffix_code)}"
+
+    if "." in raw_value:
+        prefix, code = raw_value.split(".", 1)
+        market = prefix.upper()
+        if market in MARKET_TIMEZONES and code:
+            return f"{market}.{normalize_symbol_code(code)}"
 
     if symbol.endswith(".HK"):
         return f"HK.{symbol[:-3].zfill(5)}"
@@ -72,7 +94,7 @@ def normalize_symbol(raw_symbol: str) -> str:
         return f"JP.{symbol}"
     if symbol.isdigit() and len(symbol) == 5:
         return f"HK.{symbol}"
-    return f"US.{symbol}"
+    return f"US.{normalize_symbol_code(raw_value)}"
 
 
 def normalize_search_text(value: str) -> str:
@@ -171,6 +193,20 @@ class MoomooQuoteService:
             jp_symbols = self._load_jp_symbols()
             english_names = self._load_jp_english_names()
             candidates = []
+
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", query):
+                symbol = normalize_symbol(query)
+                candidates.append(
+                    {
+                        "score": -1,
+                        "symbol": symbol,
+                        "code": symbol.split(".", 1)[1],
+                        "name": query.upper(),
+                        "nameEn": query.upper(),
+                        "market": symbol.split(".", 1)[0],
+                        "category": "DIRECT",
+                    }
+                )
 
             for item in jp_symbols:
                 code = str(item["code"])

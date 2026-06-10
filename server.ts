@@ -3,11 +3,13 @@ import 'dotenv/config';
 import { spawn, type ChildProcess } from 'child_process';
 import express from 'express';
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
 import { handleMoomooRequest } from './server/moomooHandler.js';
+import { resolveMoomooGatewayKey } from './server/moomooClient.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -59,9 +61,19 @@ function resolveLocalPython(): string {
 
 async function gatewayIsHealthy(url: URL): Promise<boolean> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 800);
+  const timeout = setTimeout(() => controller.abort(), 1500);
   try {
-    const response = await fetch(new URL('/health', url), {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const gatewayKey = resolveMoomooGatewayKey();
+    if (gatewayKey) {
+      headers.Authorization = `Bearer ${gatewayKey}`;
+    }
+    const response = await fetch(new URL('/v1/status', url), {
+      method: 'POST',
+      headers,
+      body: '{}',
       signal: controller.signal,
     });
     return response.ok;
@@ -70,6 +82,36 @@ async function gatewayIsHealthy(url: URL): Promise<boolean> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function localPortIsOpen(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const finish = (result: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(700);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function selectLocalGatewayUrl(preferredUrl: URL): Promise<URL> {
+  const preferredPort = Number(preferredUrl.port || 8787);
+  for (let portOffset = 0; portOffset < 10; portOffset += 1) {
+    const candidateUrl = new URL(preferredUrl.toString());
+    candidateUrl.port = String(preferredPort + portOffset);
+    if (await gatewayIsHealthy(candidateUrl)) {
+      return candidateUrl;
+    }
+    if (!(await localPortIsOpen(candidateUrl.hostname, Number(candidateUrl.port)))) {
+      return candidateUrl;
+    }
+  }
+  return preferredUrl;
 }
 
 async function waitForGateway(url: URL): Promise<void> {
@@ -83,18 +125,24 @@ async function waitForGateway(url: URL): Promise<void> {
 }
 
 async function ensureLocalGateway(): Promise<void> {
-  const gatewayUrl = getGatewayUrl();
+  let gatewayUrl = getGatewayUrl();
   if (
     process.env.VERCEL ||
     process.env.MOOMOO_GATEWAY_AUTOSTART === 'false' ||
-    !isLocalGateway(gatewayUrl) ||
-    (await gatewayIsHealthy(gatewayUrl))
+    !isLocalGateway(gatewayUrl)
   ) {
+    return;
+  }
+
+  gatewayUrl = await selectLocalGatewayUrl(gatewayUrl);
+  process.env.MOOMOO_GATEWAY_URL = gatewayUrl.origin;
+  if (await gatewayIsHealthy(gatewayUrl)) {
     return;
   }
 
   const pythonPath = resolveLocalPython();
   const gatewayScript = path.resolve(process.cwd(), 'moomoo_gateway.py');
+  const gatewayKey = resolveMoomooGatewayKey();
   if (!fs.existsSync(pythonPath)) {
     throw new Error(`Moomoo用Pythonが見つかりません: ${pythonPath}`);
   }
@@ -106,6 +154,7 @@ async function ensureLocalGateway(): Promise<void> {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      MOOMOO_GATEWAY_KEY: gatewayKey,
       MOOMOO_GATEWAY_HOST: gatewayUrl.hostname,
       MOOMOO_GATEWAY_PORT: gatewayUrl.port || '8787',
     },

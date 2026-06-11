@@ -23,6 +23,13 @@ import { DEFAULT_TICKERS, generateCandles, simulateTick } from './mockData';
 import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
+import {
+  calculateExpressionQuote,
+  combineExpressionCandles,
+  formatSymbolExpression,
+  parseSymbolExpression,
+  SymbolExpression,
+} from './symbolExpression';
 
 const DEFAULT_PANEL_HEIGHT = 840;
 const DEFAULT_SIDEBAR_WIDTH = 420;
@@ -197,6 +204,12 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
 
 function formatTickerPrice(symbol: string, price: number | null): string {
   if (price === null) return 'N/A';
+  if (parseSymbolExpression(symbol)) {
+    return price.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
+    });
+  }
   if (symbol.startsWith('JP.')) {
     return `¥${price.toLocaleString('ja-JP', { maximumFractionDigits: 2 })}`;
   }
@@ -207,6 +220,10 @@ function formatTickerPrice(symbol: string, price: number | null): string {
 }
 
 function formatWatchlistSymbol(symbol: string): string {
+  const expression = parseSymbolExpression(symbol);
+  if (expression) {
+    return `${formatWatchlistSymbol(expression.left)}${expression.operator}${formatWatchlistSymbol(expression.right)}`;
+  }
   return symbol.startsWith('JP.') ? symbol.slice(3) : symbol;
 }
 
@@ -399,6 +416,41 @@ function normalizeTickerSymbolForStorage(rawSymbol: string): string {
   if (upper.endsWith('.FX') || upper.endsWith('.BD')) return upper;
   if (/^\d{3}[A-Z0-9]?$/.test(upper)) return `JP.${upper}`;
   return upper;
+}
+
+function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpression | null {
+  const expression = parseSymbolExpression(rawExpression);
+  if (!expression) return null;
+  const left = normalizeTickerSymbolForStorage(expression.left);
+  const right = normalizeTickerSymbolForStorage(expression.right);
+  if (!left || !right) return null;
+  return {
+    left,
+    operator: expression.operator,
+    right,
+  };
+}
+
+function getStoredSymbolOperands(symbol: string): string[] {
+  const expression = normalizeSymbolExpressionForStorage(symbol);
+  return expression ? [expression.left, expression.right] : [symbol];
+}
+
+function resolveCandlesForSymbol(
+  symbol: string,
+  timeframe: Timeframe,
+  cache: Record<string, Candle[]>,
+): Candle[] {
+  const expression = normalizeSymbolExpressionForStorage(symbol);
+  if (!expression) {
+    return cache[`${symbol}-${timeframe}`] || [];
+  }
+  return combineExpressionCandles(
+    expression,
+    cache[`${expression.left}-${timeframe}`] || [],
+    cache[`${expression.right}-${timeframe}`] || [],
+    timeframe,
+  );
 }
 
 function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
@@ -1094,14 +1146,18 @@ export default function App() {
       const now = Date.now();
       const requests = new Map<string, { symbol: string; timeframe: Timeframe }>();
       panels.forEach((panel) => {
-        requests.set(`${panel.symbol}-${panel.timeframe}`, {
-          symbol: panel.symbol,
-          timeframe: panel.timeframe,
-        });
-        panel.comparisonSymbols?.forEach((symbol) => {
+        getStoredSymbolOperands(panel.symbol).forEach((symbol) => {
           requests.set(`${symbol}-${panel.timeframe}`, {
             symbol,
             timeframe: panel.timeframe,
+          });
+        });
+        panel.comparisonSymbols?.forEach((symbol) => {
+          getStoredSymbolOperands(symbol).forEach((operand) => {
+            requests.set(`${operand}-${panel.timeframe}`, {
+              symbol: operand,
+              timeframe: panel.timeframe,
+            });
           });
         });
       });
@@ -1174,10 +1230,13 @@ export default function App() {
     const fetchMoomooQuotes = async () => {
       quoteFetchInFlightRef.current = true;
       try {
+        const quoteSymbols = Array.from(new Set(
+          tickers.flatMap((ticker) => getStoredSymbolOperands(ticker.symbol)),
+        ));
         const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbols: tickers.map((ticker) => ticker.symbol) }),
+          body: JSON.stringify({ symbols: quoteSymbols }),
         }, 35_000);
         if (!response.ok || !data.success || !data.quotes) {
           throw new Error(data.error || 'Moomoo価格一覧を取得できません。');
@@ -1231,34 +1290,37 @@ export default function App() {
       if (panels.length === 0) return;
       const rIdx = Math.floor(Math.random() * panels.length);
       const targetPanel = panels[rIdx];
-      const targetSym = targetPanel.symbol;
       
       setCandlesCache(prevCache => {
-        const key = `${targetSym}-${targetPanel.timeframe}`;
-        if (!prevCache[key] || prevCache[key].length === 0) return prevCache;
-        
         const updated = { ...prevCache };
-        
-        // Tick main symbol
-        const mainCandles = [...updated[key]];
-        const mainLastIdx = mainCandles.length - 1;
-        mainCandles[mainLastIdx] = simulateTick(mainCandles[mainLastIdx]);
-        updated[key] = mainCandles;
+        let changed = false;
+
+        getStoredSymbolOperands(targetPanel.symbol).forEach((symbol) => {
+          const key = `${symbol}-${targetPanel.timeframe}`;
+          if (!updated[key]?.length) return;
+          const candles = [...updated[key]];
+          const lastIndex = candles.length - 1;
+          candles[lastIndex] = simulateTick(candles[lastIndex]);
+          updated[key] = candles;
+          changed = true;
+        });
         
         // Tick overlay/comparison symbols if present
         if (targetPanel.comparisonSymbols) {
           targetPanel.comparisonSymbols.forEach(compSym => {
-            const compKey = `${compSym}-${targetPanel.timeframe}`;
-            if (updated[compKey] && updated[compKey].length > 0) {
+            getStoredSymbolOperands(compSym).forEach((symbol) => {
+              const compKey = `${symbol}-${targetPanel.timeframe}`;
+              if (!updated[compKey]?.length) return;
               const compCandles = [...updated[compKey]];
               const compLastIdx = compCandles.length - 1;
               compCandles[compLastIdx] = simulateTick(compCandles[compLastIdx]);
               updated[compKey] = compCandles;
-            }
+              changed = true;
+            });
           });
         }
         
-        return updated;
+        return changed ? updated : prevCache;
       });
     }, 3500);
 
@@ -1275,21 +1337,24 @@ export default function App() {
       let changed = false;
       
       panels.forEach(p => {
-        // Core symbol candle key
-        const key = `${p.symbol}-${p.timeframe}`;
-        if (!updated[key]) {
-          updated[key] = generateCandles(p.symbol, p.timeframe, 220);
-          changed = true;
-        }
+        getStoredSymbolOperands(p.symbol).forEach((symbol) => {
+          const key = `${symbol}-${p.timeframe}`;
+          if (!updated[key]) {
+            updated[key] = generateCandles(symbol, p.timeframe, 220);
+            changed = true;
+          }
+        });
 
         // Comparison symbols overlay candles key
         if (p.comparisonSymbols) {
           p.comparisonSymbols.forEach(compSym => {
-            const compKey = `${compSym}-${p.timeframe}`;
-            if (!updated[compKey]) {
-              updated[compKey] = generateCandles(compSym, p.timeframe, 220);
-              changed = true;
-            }
+            getStoredSymbolOperands(compSym).forEach((symbol) => {
+              const compKey = `${symbol}-${p.timeframe}`;
+              if (!updated[compKey]) {
+                updated[compKey] = generateCandles(symbol, p.timeframe, 220);
+                changed = true;
+              }
+            });
           });
         }
       });
@@ -1794,6 +1859,121 @@ export default function App() {
     );
   };
 
+  const registerTickerExpression = async (
+    rawExpression: string,
+    options: { reportError?: boolean } = {},
+  ): Promise<RegisterTickerResult> => {
+    const requestedExpression = normalizeSymbolExpressionForStorage(rawExpression);
+    if (!requestedExpression) {
+      return {
+        success: false,
+        error: '式は「ティッカー/ティッカー」または「ティッカー-ティッカー」で入力してください。',
+      };
+    }
+
+    const requestedSymbol = formatSymbolExpression(requestedExpression);
+    if (tickers.some((ticker) => ticker.symbol === requestedSymbol)) {
+      addSymbolToActiveWatchlist(requestedSymbol);
+      selectTickerForPrimaryChart(requestedSymbol);
+      setTickerSearchOpen(false);
+      return { success: true };
+    }
+
+    setTickerSearchLoading(true);
+    if (options.reportError !== false) {
+      setTickerSearchError(null);
+    }
+
+    try {
+      const fetchOperandQuote = async (symbol: string) => {
+        const { data } = await fetchJsonWithTimeout('/api/moomoo/quote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol }),
+        });
+        const price = Number(data.price);
+        if (!data.success || !Number.isFinite(price)) {
+          throw new Error(data.error || `${symbol}の価格を取得できません。`);
+        }
+        return {
+          symbol: normalizeTickerSymbolForStorage(String(data.symbol || symbol)),
+          name: String(data.name || symbol).replace(/^US\./i, ''),
+          price,
+          changePct: Number.isFinite(Number(data.changePct)) ? Number(data.changePct) : 0,
+        };
+      };
+
+      const [leftQuote, rightQuote] = await Promise.all([
+        fetchOperandQuote(requestedExpression.left),
+        fetchOperandQuote(requestedExpression.right),
+      ]);
+      const expression: SymbolExpression = {
+        left: leftQuote.symbol,
+        operator: requestedExpression.operator,
+        right: rightQuote.symbol,
+      };
+      const storedSymbol = formatSymbolExpression(expression);
+      const calculatedQuote = calculateExpressionQuote(expression, leftQuote, rightQuote);
+      if (!calculatedQuote) {
+        throw new Error(
+          expression.operator === '/'
+            ? '右辺の値が0のため、割り算の式を計算できません。'
+            : '式の現在値を計算できません。',
+        );
+      }
+
+      const newTicker: TickerInfo = {
+        symbol: storedSymbol,
+        name: `${leftQuote.name} ${expression.operator} ${rightQuote.name}`,
+        basePrice: calculatedQuote.price,
+        dailyChangePct: calculatedQuote.changePct ?? 0,
+      };
+
+      setTickers((currentTickers) => {
+        if (currentTickers.some((ticker) => ticker.symbol === storedSymbol)) {
+          return currentTickers;
+        }
+        return [...currentTickers, newTicker];
+      });
+      setQuoteCache((currentQuotes) => ({
+        ...currentQuotes,
+        [leftQuote.symbol]: {
+          name: leftQuote.name,
+          price: leftQuote.price,
+          changePct: leftQuote.changePct,
+        },
+        [rightQuote.symbol]: {
+          name: rightQuote.name,
+          price: rightQuote.price,
+          changePct: rightQuote.changePct,
+        },
+      }));
+      setIndicatorDatabase((currentDatabase) => ({
+        ...currentDatabase,
+        [storedSymbol]: currentDatabase[storedSymbol]
+          || createDefaultIndicatorSettings(storedSymbol),
+      }));
+      addSymbolToActiveWatchlist(storedSymbol);
+      selectTickerForPrimaryChart(storedSymbol);
+      setNewSymbolInput('');
+      setTickerSearchCandidates([]);
+      setTickerSearchOpen(false);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '演算式を登録できませんでした。';
+      if (options.reportError !== false) {
+        setTickerSearchError(message);
+      }
+      return {
+        success: false,
+        error: message,
+        gatewayFailure: isMoomooGatewayFailureMessage(message),
+      };
+    } finally {
+      setTickerSearchLoading(false);
+    }
+  };
+
   const registerTickerCandidate = async (
     candidate: SymbolSearchCandidate,
     options: { reportError?: boolean } = {},
@@ -1882,16 +2062,25 @@ export default function App() {
   // 銘柄名・証券コード・ティッカーから候補を検索する
   const handleAddTicker = async (e: React.FormEvent) => {
     e.preventDefault();
-    let queryInput = newSymbolInput.trim();
+    const queryInput = newSymbolInput.trim();
     if (!queryInput) return;
-
-    // ティッカー入力ではUS.を省略しても同じ銘柄へ届くようにする
-    if (queryInput.toUpperCase().startsWith('US.')) {
-      queryInput = queryInput.slice(3);
-    }
 
     setTickerSearchError(null);
     setTickerSearchCandidates([]);
+    const expressionInput = parseSymbolExpression(queryInput);
+    let expressionError: string | undefined;
+
+    if (expressionInput) {
+      const expressionResult = await registerTickerExpression(queryInput, { reportError: false });
+      if (expressionResult.success) {
+        return;
+      }
+      expressionError = expressionResult.error;
+      if (expressionInput.operator === '/') {
+        setTickerSearchError(expressionError || '割り算の式を登録できませんでした。');
+        return;
+      }
+    }
 
     if (isLikelyTickerInput(queryInput)) {
       const directCandidate: SymbolSearchCandidate = {
@@ -1904,6 +2093,10 @@ export default function App() {
       };
       const directResult = await registerTickerCandidate(directCandidate, { reportError: false });
       if (directResult.success) {
+        return;
+      }
+      if (expressionInput) {
+        setTickerSearchError(expressionError || directResult.error || '引き算の式を登録できませんでした。');
         return;
       }
       if (directResult.gatewayFailure) {
@@ -2211,6 +2404,19 @@ export default function App() {
   const liveTickerStats = useMemo(() => {
     return tickers.map(t => {
       if (moomooRealTimeActive) {
+        const expression = normalizeSymbolExpressionForStorage(t.symbol);
+        if (expression) {
+          const leftQuote = quoteCache[expression.left];
+          const rightQuote = quoteCache[expression.right];
+          const expressionQuote = leftQuote && rightQuote
+            ? calculateExpressionQuote(expression, leftQuote, rightQuote)
+            : null;
+          return {
+            ...t,
+            currentPrice: expressionQuote?.price ?? null,
+            computedChange: expressionQuote?.changePct ?? null,
+          };
+        }
         const quote = quoteCache[t.symbol];
         return {
           ...t,
@@ -2219,10 +2425,12 @@ export default function App() {
         };
       }
 
-      const cached = candlesCache[`${t.symbol}-5m`];
+      const cached = resolveCandlesForSymbol(t.symbol, '5m', candlesCache);
       const curPrice = cached && cached.length > 0 ? cached[cached.length - 1].close : t.basePrice;
       const initialPrice = cached && cached.length > 0 ? cached[0].close : t.basePrice;
-      const changePct = ((curPrice - initialPrice) / initialPrice) * 100;
+      const changePct = cached.length > 1 && initialPrice !== 0
+        ? ((curPrice - initialPrice) / Math.abs(initialPrice)) * 100
+        : t.dailyChangePct;
       return {
         ...t,
         currentPrice: curPrice,
@@ -2360,10 +2568,10 @@ export default function App() {
                   className="flex flex-col min-h-0 min-w-[120px]"
                 >
                   {col.map((panel, pIdx) => {
-                    const cacheKey = `${panel.symbol}-${panel.timeframe}`;
-                    const pCandles = candlesCache[cacheKey] || [];
+                    const panelExpression = normalizeSymbolExpressionForStorage(panel.symbol);
+                    const pCandles = resolveCandlesForSymbol(panel.symbol, panel.timeframe, candlesCache);
                     const pSettings = indicatorDatabase[panel.symbol.toUpperCase()] || createDefaultIndicatorSettings(panel.symbol);
-                    const isTvEmbed = panelEngineToggle[panel.id];
+                    const isTvEmbed = Boolean(panelEngineToggle[panel.id]) && !panelExpression;
 
                     return (
                       <React.Fragment key={panel.id}>
@@ -2420,7 +2628,7 @@ export default function App() {
                                             <span className="text-[10px] text-gray-500 truncate max-w-[90px]">{t.name}</span>
                                           </div>
                                           <span className="text-[10px] text-gray-400 font-mono">
-                                            {t.currentPrice !== null ? `$${t.currentPrice.toFixed(2)}` : '取得不可'}
+                                            {formatTickerPrice(t.symbol, t.currentPrice)}
                                           </span>
                                         </label>
                                       );
@@ -2496,15 +2704,22 @@ export default function App() {
 
                                 {/* ENGINE SELECT SWITCH */}
                                 <button
-                                  onClick={() => togglePanelEngine(panel.id)}
+                                  onClick={() => {
+                                    if (!panelExpression) togglePanelEngine(panel.id);
+                                  }}
+                                  disabled={Boolean(panelExpression)}
                                   className={`text-[9px] px-2 py-0.5 rounded font-bold uppercase transition-colors ${
-                                    isTvEmbed 
+                                    panelExpression
+                                      ? 'bg-[#171717] text-gray-500 border border-[#2a2a2a] cursor-not-allowed'
+                                    : isTvEmbed
                                       ? 'bg-purple-950/80 text-purple-300 border border-purple-800' 
                                       : 'bg-emerald-950/80 text-emerald-300 border border-emerald-900'
                                   }`}
-                                  title="TradingView公式ライブウィジェットとカスタムチャートを切り替えます"
+                                  title={panelExpression
+                                    ? '演算式はカスタムチャートで描画します'
+                                    : 'TradingView公式ライブウィジェットとカスタムチャートを切り替えます'}
                                 >
-                                  {isTvEmbed ? 'TradingView公式' : 'カスタム' }
+                                  {panelExpression ? '演算式' : isTvEmbed ? 'TradingView公式' : 'カスタム' }
                                 </button>
 
                               </div>
@@ -2589,9 +2804,13 @@ export default function App() {
                                   comparisonSymbols={panel.comparisonSymbols || []}
                                   comparisonCandles={
                                     (panel.comparisonSymbols || []).reduce((acc, compSym) => {
-                                      const key = `${compSym}-${panel.timeframe}`;
-                                      if (candlesCache[key]) {
-                                        acc[compSym] = candlesCache[key];
+                                      const candles = resolveCandlesForSymbol(
+                                        compSym,
+                                        panel.timeframe,
+                                        candlesCache,
+                                      );
+                                      if (candles.length > 0) {
+                                        acc[compSym] = candles;
                                       }
                                       return acc;
                                     }, {} as Record<string, Candle[]>)
@@ -2604,6 +2823,8 @@ export default function App() {
                                   macdHeightPct={panel.macdHeightPct ?? 25}
                                   setMacdHeightPct={(pct) => handleUpdatePanel(panel.id, { macdHeightPct: pct })}
                                   onOpenIndicatorSettings={() => openIndicatorSettingsForSymbol(panel.symbol)}
+                                  allowNegativeValues={Boolean(panelExpression)}
+                                  valuePrecision={panelExpression ? 4 : 2}
                                 />
                               )}
                             </div>
@@ -3055,7 +3276,7 @@ export default function App() {
                     <Search className="absolute left-2 top-2 w-3 h-3 text-gray-500" />
                     <input
                       type="text"
-                      placeholder="任天堂、Nintendo、7974、AAPL"
+                      placeholder="AAPL、CRM/SPY、US10Y.BD-JP10Y.BD"
                       value={newSymbolInput}
                       onChange={(e) => setNewSymbolInput(e.target.value)}
                       className="h-7 bg-[#121212] border border-[#303030] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-emerald-500 placeholder-gray-600"
@@ -3071,6 +3292,9 @@ export default function App() {
                     {tickerSearchLoading ? '検索中' : '検索'}
                   </button>
                 </form>
+                <div className="mt-1 text-[9px] text-gray-600">
+                  銘柄検索のほか、割り算は「CRM/SPY」、引き算は「左辺-右辺」で追加できます。
+                </div>
 
                 {tickerSearchError && (
                   <div className="mt-2 text-[10px] text-red-300 bg-red-950/30 border border-red-900/50 rounded p-2">

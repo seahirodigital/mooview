@@ -31,6 +31,8 @@ interface InteractiveCustomChartProps {
   macdHeightPct: number;
   setMacdHeightPct: (pct: number) => void;
   onOpenIndicatorSettings?: () => void;
+  allowNegativeValues?: boolean;
+  valuePrecision?: number;
 }
 
 function getLineDasharray(style: IndicatorLineStyle): string | undefined {
@@ -76,6 +78,8 @@ export function InteractiveCustomChart({
   macdHeightPct,
   setMacdHeightPct,
   onOpenIndicatorSettings,
+  allowNegativeValues = false,
+  valuePrecision = 2,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -217,14 +221,19 @@ export function InteractiveCustomChart({
   }, [visibleCandles]);
 
   const comparisonCandleMaps = useMemo(() => {
-    const result: Record<string, Map<number, Candle>> = {};
+    const result: Record<string, Map<string, Candle>> = {};
     comparisonSymbols.forEach((symbol) => {
       result[symbol] = new Map(
-        (comparisonCandles[symbol] || []).map((candle) => [candle.time, candle])
+        (comparisonCandles[symbol] || []).map((candle) => [
+          timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+            ? candle.timeStr.slice(0, 10)
+            : String(candle.time),
+          candle,
+        ])
       );
     });
     return result;
-  }, [comparisonSymbols, comparisonCandles]);
+  }, [comparisonSymbols, comparisonCandles, timeframe]);
 
   // 表示範囲の主銘柄と同じ時刻にある比較銘柄の最初の価格を基準にする
   const compStartPrice = useMemo(() => {
@@ -232,12 +241,16 @@ export function InteractiveCustomChart({
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
       const firstAlignedCandle = visibleCandles
-        .map((mainCandle) => candleMap?.get(mainCandle.time))
+        .map((mainCandle) => candleMap?.get(
+          timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+            ? mainCandle.timeStr.slice(0, 10)
+            : String(mainCandle.time)
+        ))
         .find((candle): candle is Candle => Boolean(candle));
       result[symbol] = firstAlignedCandle?.close || 1;
     });
     return result;
-  }, [comparisonSymbols, comparisonCandleMaps, visibleCandles]);
+  }, [comparisonSymbols, comparisonCandleMaps, timeframe, visibleCandles]);
 
   // Calculate high and low price ranges for scale bounds of visible candles
   const priceMinMax = useMemo(() => {
@@ -280,7 +293,10 @@ export function InteractiveCustomChart({
       const candleMap = comparisonCandleMaps[symbol];
       const startPrice = compStartPrice[symbol] || 1;
       visibleCandles.forEach((mainCandle) => {
-        const compCandle = candleMap?.get(mainCandle.time);
+        const alignmentKey = timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+          ? mainCandle.timeStr.slice(0, 10)
+          : String(mainCandle.time);
+        const compCandle = candleMap?.get(alignmentKey);
         if (compCandle) {
           const ratio = compCandle.close / startPrice;
           const scaledPrice = ratio * mainStartPrice;
@@ -292,16 +308,16 @@ export function InteractiveCustomChart({
 
     const delta = highest - lowest;
     const pad = delta * 0.05 || 2.0;
-    const rawMin = Math.max(0.01, lowest - pad);
+    const rawMin = allowNegativeValues ? lowest - pad : Math.max(0.01, lowest - pad);
     const rawMax = highest + pad;
     const center = (rawMin + rawMax) / 2;
     const halfRange = (rawMax - rawMin) / 2 / Math.max(0.25, priceScale);
 
     return {
-      min: Math.max(0.01, center - halfRange),
+      min: allowNegativeValues ? center - halfRange : Math.max(0.01, center - halfRange),
       max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, timeframe, allowNegativeValues]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -322,6 +338,11 @@ export function InteractiveCustomChart({
     if (visibleCandles.length === 0) return 1000;
     return Math.max(...visibleCandles.map(c => c.volume), 1000);
   }, [visibleCandles]);
+  const macdScaleBase = Math.max(
+    Math.abs(priceMinMax.max),
+    Math.abs(priceMinMax.min),
+    0.000001,
+  );
 
   const volumeProfile = useMemo(() => {
     if (!indicators.vrvp.enabled || visibleCandles.length === 0) {
@@ -501,7 +522,10 @@ export function InteractiveCustomChart({
     if (!candleMap) return '';
 
     visibleCandles.forEach((mainCandle, i) => {
-      const compCandle = candleMap.get(mainCandle.time);
+      const alignmentKey = timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+        ? mainCandle.timeStr.slice(0, 10)
+        : String(mainCandle.time);
+      const compCandle = candleMap.get(alignmentKey);
       if (compCandle) {
         const ratio = compCandle.close / startPrice;
         const scaledPrice = ratio * mainStartPrice;
@@ -522,10 +546,10 @@ export function InteractiveCustomChart({
         <div className="absolute top-2 left-3 bg-[#0d101a]/95 border border-[#232b45] px-2.5 py-1 rounded text-[10px] font-mono text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
           <span className="text-white font-bold">{symbol}</span>
           <span>日付: <b className="text-[#a5b4fc]">{currentCandle.timeStr}</b></span>
-          <span>始: <b className="text-white">{currentCandle.open.toFixed(2)}</b></span>
-          <span>高: <b className="text-[#26a69a]">{currentCandle.high.toFixed(2)}</b></span>
-          <span>安: <b className="text-[#ef5350]">{currentCandle.low.toFixed(2)}</b></span>
-          <span>終: <b className="text-white">{currentCandle.close.toFixed(2)}</b></span>
+          <span>始: <b className="text-white">{currentCandle.open.toFixed(valuePrecision)}</b></span>
+          <span>高: <b className="text-[#26a69a]">{currentCandle.high.toFixed(valuePrecision)}</b></span>
+          <span>安: <b className="text-[#ef5350]">{currentCandle.low.toFixed(valuePrecision)}</b></span>
+          <span>終: <b className="text-white">{currentCandle.close.toFixed(valuePrecision)}</b></span>
           <span className="hidden sm:inline">出来高: <b className="text-[#8e98bd]">{currentCandle.volume.toLocaleString()}</b></span>
           
           {/* Legend for comparison symbols */}
@@ -534,14 +558,18 @@ export function InteractiveCustomChart({
             const color = lineColors[index % lineColors.length];
             const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
             const compCandle = activeCandle
-              ? comparisonCandleMaps[compSym]?.get(activeCandle.time)
+              ? comparisonCandleMaps[compSym]?.get(
+                  timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+                    ? activeCandle.timeStr.slice(0, 10)
+                    : String(activeCandle.time)
+                )
               : null;
             const startPrice = compStartPrice[compSym] || 1;
             if (!compCandle) return null;
             const changePct = ((compCandle.close - startPrice) / startPrice) * 100;
             return (
               <span key={compSym} style={{ color }} className="font-bold border-l border-gray-800 pl-2">
-                {compSym}: ${compCandle.close.toFixed(2)} ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
+                {compSym}: {compCandle.close.toFixed(valuePrecision)} ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
               </span>
             );
           })}
@@ -628,7 +656,7 @@ export function InteractiveCustomChart({
                       fontSize="9" 
                       fontFamily="monospace"
                     >
-                      {val.toFixed(2)}
+                      {val.toFixed(valuePrecision)}
                     </text>
                   </g>
                 );
@@ -922,7 +950,7 @@ export function InteractiveCustomChart({
                   if (val === null || val === undefined) return null;
 
                   // High auto rescaling for scale
-                  const scaleFactor = (macdHeight * 0.4) / (priceMinMax.max * 0.04);
+                  const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
                   const barH = val * scaleFactor;
                   const isPos = val >= 0;
 
@@ -948,7 +976,7 @@ export function InteractiveCustomChart({
                     visibleCandles.map((_, i) => {
                       const idx = startIndex + i;
                       const val = macd.macd[idx];
-                      const scaleFactor = (macdHeight * 0.4) / (priceMinMax.max * 0.04);
+                      const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
                       const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
                       return `${getX(i)},${mY}`;
                     }).join(' ')
@@ -965,7 +993,7 @@ export function InteractiveCustomChart({
                     visibleCandles.map((_, i) => {
                       const idx = startIndex + i;
                       const val = macd.signal[idx];
-                      const scaleFactor = (macdHeight * 0.4) / (priceMinMax.max * 0.04);
+                      const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
                       const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
                       return `${getX(i)},${mY}`;
                     }).join(' ')
@@ -1063,7 +1091,7 @@ export function InteractiveCustomChart({
                         const topMargin = 15;
                         const pct = (plotH - hoverData.mouseY) / (plotH - topMargin);
                         const calcVal = priceMinMax.min + pct * (priceMinMax.max - priceMinMax.min);
-                        return calcVal.toFixed(2);
+                        return calcVal.toFixed(valuePrecision);
                       })()}
                     </text>
                   </g>

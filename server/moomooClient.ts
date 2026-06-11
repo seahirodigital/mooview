@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-export type MoomooAction = 'status' | 'quote' | 'kline' | 'search';
+export type MoomooAction = 'status' | 'quote' | 'quotes' | 'kline' | 'search';
 
 export interface MoomooGatewayResult {
   success?: boolean;
@@ -75,7 +75,11 @@ export async function callMoomooGateway(
   payload: Record<string, unknown> = {},
 ): Promise<{ status: number; data: MoomooGatewayResult }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeoutMs =
+    action === 'quotes' ? 30000
+    : action === 'kline' || action === 'search' ? 20000
+    : 10000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const headers: Record<string, string> = {
@@ -114,7 +118,7 @@ export async function callMoomooGateway(
     return { status: response.status, data };
   } catch (error) {
     const message = error instanceof Error && error.name === 'AbortError'
-      ? 'リクエストが10秒でタイムアウトしました'
+      ? `リクエストが${Math.ceil(timeoutMs / 1000)}秒でタイムアウトしました`
       : error instanceof Error ? error.message : String(error);
     return {
       status: 502,

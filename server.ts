@@ -23,6 +23,9 @@ app.post('/api/moomoo/status', (request, response) =>
 app.post('/api/moomoo/quote', (request, response) =>
   handleMoomooRequest('quote', request, response),
 );
+app.post('/api/moomoo/quotes', (request, response) =>
+  handleMoomooRequest('quotes', request, response),
+);
 app.post('/api/moomoo/kline', (request, response) =>
   handleMoomooRequest('kline', request, response),
 );

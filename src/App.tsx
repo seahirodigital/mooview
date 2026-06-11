@@ -26,6 +26,7 @@ import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
 
 const DEFAULT_PANEL_HEIGHT = 840;
 const DEFAULT_SIDEBAR_WIDTH = 420;
+const MIN_SIDEBAR_WIDTH = 164;
 const SIDEBAR_NAV_WIDTH = 44;
 const DEFAULT_WATCHLIST_TAB_ID = 'watchlist-default';
 const DEFAULT_WATCHLIST_SECTION_ID = 'section-default';
@@ -57,19 +58,32 @@ interface WatchlistTab {
 
 interface WatchlistColumnWidths {
   symbol: number;
+  name: number;
   price: number;
   change: number;
 }
 
+interface WatchlistLayout {
+  widths: WatchlistColumnWidths;
+  showName: boolean;
+  showPrice: boolean;
+}
+
 const WATCHLIST_COLUMN_MIN_WIDTHS: WatchlistColumnWidths = {
   symbol: 72,
+  name: 90,
   price: 74,
   change: 66,
 };
 const WATCHLIST_COLUMN_MAX_WIDTHS: WatchlistColumnWidths = {
   symbol: 420,
+  name: 420,
   price: 220,
   change: 180,
+};
+const WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS = {
+  symbol: 48,
+  change: 52,
 };
 const WATCHLIST_ACTION_COLUMN_WIDTH = 24;
 const WATCHLIST_GRID_HORIZONTAL_PADDING = 16;
@@ -92,8 +106,6 @@ interface WatchlistCsvCandidate {
   code: string;
   name: string;
   market: string;
-  price: number | null;
-  changePct: number | null;
 }
 
 interface RegisterTickerResult {
@@ -219,6 +231,7 @@ function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
   const source = raw && typeof raw === 'object' ? raw as Partial<WatchlistColumnWidths> : {};
   return {
     symbol: clampStoredNumber(source.symbol, 180, WATCHLIST_COLUMN_MIN_WIDTHS.symbol, WATCHLIST_COLUMN_MAX_WIDTHS.symbol),
+    name: clampStoredNumber(source.name, 150, WATCHLIST_COLUMN_MIN_WIDTHS.name, WATCHLIST_COLUMN_MAX_WIDTHS.name),
     price: clampStoredNumber(source.price, 92, WATCHLIST_COLUMN_MIN_WIDTHS.price, WATCHLIST_COLUMN_MAX_WIDTHS.price),
     change: clampStoredNumber(source.change, 70, WATCHLIST_COLUMN_MIN_WIDTHS.change, WATCHLIST_COLUMN_MAX_WIDTHS.change),
   };
@@ -227,14 +240,12 @@ function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
 function calculateWatchlistLayoutColumnWidths(
   preferredWidths: WatchlistColumnWidths,
   availableWidth: number,
-): WatchlistColumnWidths {
-  const minimumTotal =
-    WATCHLIST_COLUMN_MIN_WIDTHS.symbol +
-    WATCHLIST_COLUMN_MIN_WIDTHS.price +
-    WATCHLIST_COLUMN_MIN_WIDTHS.change;
+  showNameColumn: boolean,
+): WatchlistLayout {
   const availableForColumns = Math.max(
-    minimumTotal,
-    Math.floor(availableWidth - WATCHLIST_ACTION_COLUMN_WIDTH),
+    WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.symbol +
+      WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.change,
+    Math.floor(availableWidth - WATCHLIST_ACTION_COLUMN_WIDTH * 2),
   );
   const next: WatchlistColumnWidths = {
     symbol: clampStoredNumber(
@@ -242,6 +253,12 @@ function calculateWatchlistLayoutColumnWidths(
       180,
       WATCHLIST_COLUMN_MIN_WIDTHS.symbol,
       WATCHLIST_COLUMN_MAX_WIDTHS.symbol,
+    ),
+    name: clampStoredNumber(
+      preferredWidths.name,
+      150,
+      WATCHLIST_COLUMN_MIN_WIDTHS.name,
+      WATCHLIST_COLUMN_MAX_WIDTHS.name,
     ),
     price: clampStoredNumber(
       preferredWidths.price,
@@ -256,21 +273,61 @@ function calculateWatchlistLayoutColumnWidths(
       WATCHLIST_COLUMN_MAX_WIDTHS.change,
     ),
   };
-  let overflow = next.symbol + next.price + next.change - availableForColumns;
-  if (overflow <= 0) {
-    return next;
+
+  let showName = showNameColumn;
+  let showPrice = true;
+
+  const widthWithAllColumns =
+    next.symbol +
+    (showName ? next.name : 0) +
+    next.change +
+    next.price;
+  if (widthWithAllColumns > availableForColumns) {
+    showPrice = false;
   }
 
-  const shrinkOrder: WatchlistColumnKey[] = ['symbol', 'price', 'change'];
-  shrinkOrder.forEach((key) => {
-    if (overflow <= 0) return;
-    const shrinkable = next[key] - WATCHLIST_COLUMN_MIN_WIDTHS[key];
-    const reduction = Math.min(shrinkable, overflow);
-    next[key] -= reduction;
-    overflow -= reduction;
-  });
+  if (showName && !showPrice) {
+    const overflowWithoutPrice = next.symbol + next.name + next.change - availableForColumns;
+    if (overflowWithoutPrice > 0) {
+      next.name = Math.max(
+        WATCHLIST_COLUMN_MIN_WIDTHS.name,
+        next.name - overflowWithoutPrice,
+      );
+    }
+    if (next.symbol + next.name + next.change > availableForColumns) {
+      showName = false;
+    }
+  }
 
-  return next;
+  const visibleOptionalWidth =
+    (showName ? next.name : 0) +
+    (showPrice ? next.price : 0);
+  const availableForRequiredColumns = Math.max(
+    WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.symbol +
+      WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.change,
+    availableForColumns - visibleOptionalWidth,
+  );
+  const requiredOverflow = next.symbol + next.change - availableForRequiredColumns;
+  if (requiredOverflow > 0) {
+    const symbolReduction = Math.min(
+      next.symbol - WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.symbol,
+      requiredOverflow,
+    );
+    next.symbol -= symbolReduction;
+    const remainingOverflow = requiredOverflow - symbolReduction;
+    if (remainingOverflow > 0) {
+      next.change = Math.max(
+        WATCHLIST_REQUIRED_RESPONSIVE_MIN_WIDTHS.change,
+        next.change - remainingOverflow,
+      );
+    }
+  }
+
+  return {
+    widths: next,
+    showName,
+    showPrice,
+  };
 }
 
 function parseCsvRows(text: string): string[][] {
@@ -322,17 +379,6 @@ function parseCsvRows(text: string): string[][] {
   return rows;
 }
 
-function parseImportedNumber(value: string): number | null {
-  const cleaned = value
-    .trim()
-    .replace(/[,%$¥￥\s]/g, '')
-    .replace(/[＋]/g, '+')
-    .replace(/[−ー－]/g, '-');
-  if (!cleaned || cleaned === '-' || cleaned === '--') return null;
-  const numericValue = Number(cleaned);
-  return Number.isFinite(numericValue) ? numericValue : null;
-}
-
 function normalizeTickerSymbolForStorage(rawSymbol: string): string {
   const cleaned = rawSymbol.trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return '';
@@ -362,8 +408,6 @@ function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
   const codeIndex = headers.findIndex((header) => header === 'コード' || header.toLowerCase() === 'code');
   const nameIndex = headers.findIndex((header) => header === '銘柄' || header.toLowerCase() === 'name');
   const marketIndex = headers.findIndex((header) => header === '市場' || header.toLowerCase() === 'market');
-  const priceIndex = headers.findIndex((header) => header === '現在値' || header.toLowerCase() === 'price');
-  const changePctIndex = headers.findIndex((header) => header === '変化率' || header.toLowerCase() === 'changepct');
   if (codeIndex === -1) return [];
 
   return rows.slice(1)
@@ -371,8 +415,6 @@ function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
       code: String(row[codeIndex] ?? '').trim(),
       name: String(nameIndex >= 0 ? row[nameIndex] ?? '' : '').trim(),
       market: String(marketIndex >= 0 ? row[marketIndex] ?? '' : '').trim(),
-      price: parseImportedNumber(String(priceIndex >= 0 ? row[priceIndex] ?? '' : '')),
-      changePct: parseImportedNumber(String(changePctIndex >= 0 ? row[changePctIndex] ?? '' : '')),
     }))
     .filter((candidate) => candidate.code);
 }
@@ -606,10 +648,46 @@ interface MoomooTickerQuote {
   changePct: number;
 }
 
+interface MoomooBatchQuoteResult {
+  success?: boolean;
+  symbol?: string;
+  name?: string;
+  price?: number;
+  changePct?: number;
+  error?: string;
+}
+
+async function fetchJsonWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs = 15_000,
+): Promise<{ response: Response; data: any }> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+    const data = await response.json();
+    return { response, data };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`通信が${Math.ceil(timeoutMs / 1000)}秒でタイムアウトしました。`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export default function App() {
   // --- STATE ---
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
+  const candleFetchInFlightRef = useRef(false);
+  const quoteFetchInFlightRef = useRef(false);
+  const moomooRealTimeActiveRef = useRef(true);
   const candleFetchTimestampsRef = useRef<Record<string, number>>(
     normalizeTimestampMap(readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}))
   );
@@ -639,8 +717,12 @@ export default function App() {
   );
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  const [sectionNameDraft, setSectionNameDraft] = useState('');
   const [watchlistColumnWidths, setWatchlistColumnWidths] = useState<WatchlistColumnWidths>(() =>
     normalizeWatchlistColumnWidths(readStoredValue<unknown>('tv_dashboard_watchlist_column_widths', null))
+  );
+  const [showWatchlistNameColumn, setShowWatchlistNameColumn] = useState<boolean>(() =>
+    readStoredValue('tv_dashboard_watchlist_show_name_column', true)
   );
   const [watchlistSort, setWatchlistSort] = useState<WatchlistSortState>(() =>
     normalizeWatchlistSort(readStoredValue<unknown>('tv_dashboard_watchlist_sort', null))
@@ -649,8 +731,13 @@ export default function App() {
     symbol: string;
     sectionId: string;
   } | null>(null);
+  const [draggedSectionId, setDraggedSectionId] = useState<string | null>(null);
   const [sectionMenu, setSectionMenu] = useState<{
     sectionId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [watchlistHeaderMenu, setWatchlistHeaderMenu] = useState<{
     x: number;
     y: number;
   } | null>(null);
@@ -781,7 +868,12 @@ export default function App() {
     readStoredValue('tv_dashboard_sidebar_view', 'watchlist')
   );
   const [sidebarWidth, setSidebarWidth] = useState(() =>
-    clampStoredNumber(readStoredValue<unknown>('tv_dashboard_sidebar_width', DEFAULT_SIDEBAR_WIDTH), DEFAULT_SIDEBAR_WIDTH, 280, 860)
+    clampStoredNumber(
+      readStoredValue<unknown>('tv_dashboard_sidebar_width', DEFAULT_SIDEBAR_WIDTH),
+      DEFAULT_SIDEBAR_WIDTH,
+      MIN_SIDEBAR_WIDTH,
+      860,
+    )
   );
 
   // Active panel ID currently displaying comparison symbol overlay selector
@@ -845,6 +937,7 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
+    moomooRealTimeActiveRef.current = moomooRealTimeActive;
   }, [moomooRealTimeActive]);
 
   useEffect(() => {
@@ -892,6 +985,10 @@ export default function App() {
   }, [watchlistColumnWidths]);
 
   useEffect(() => {
+    localStorage.setItem('tv_dashboard_watchlist_show_name_column', JSON.stringify(showWatchlistNameColumn));
+  }, [showWatchlistNameColumn]);
+
+  useEffect(() => {
     localStorage.setItem('tv_dashboard_watchlist_sort', JSON.stringify(watchlistSort));
   }, [watchlistSort]);
 
@@ -907,6 +1004,13 @@ export default function App() {
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, [sectionMenu]);
+
+  useEffect(() => {
+    if (!watchlistHeaderMenu) return;
+    const closeMenu = () => setWatchlistHeaderMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [watchlistHeaderMenu]);
 
   useEffect(() => {
     if (!watchlistTabMenu) return;
@@ -963,12 +1067,11 @@ export default function App() {
     }
     setMoomooStatus('connecting');
     try {
-      const res = await fetch('/api/moomoo/status', {
+      const { data } = await fetchJsonWithTimeout('/api/moomoo/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
       });
-      const data = await res.json();
       if (data.connected) {
         setMoomooStatus('connected');
         setMoomooError(null);
@@ -985,8 +1088,7 @@ export default function App() {
   // --- REAL MOOMOO DATA FETCH MECHANISM ---
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
-    if (!moomooRealTimeActive) return;
-    let cancelled = false;
+    if (!moomooRealTimeActive || candleFetchInFlightRef.current) return;
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
@@ -1016,93 +1118,100 @@ export default function App() {
         return;
       }
 
+      candleFetchInFlightRef.current = true;
       const updatedCache: Record<string, Candle[]> = {};
       let firstError: string | null = null;
-      await Promise.all(requestsToFetch.map(async ([key, request]) => {
-        try {
-          const res = await fetch('/api/moomoo/kline', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              symbol: request.symbol,
-              timeframe: request.timeframe,
-              reqNum: 150
-            })
-          });
-          const data = await res.json();
-          if (data.success && data.candles && data.candles.length > 0) {
-            updatedCache[key] = data.candles;
-          } else {
-            firstError ||= data.error || `${key}のローソク足を取得できません。`;
+      try {
+        await Promise.all(requestsToFetch.map(async ([key, request]) => {
+          try {
+            const { data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                symbol: request.symbol,
+                timeframe: request.timeframe,
+                reqNum: 150
+              })
+            }, 25_000);
+            if (data.success && data.candles && data.candles.length > 0) {
+              updatedCache[key] = data.candles;
+            } else {
+              firstError ||= data.error || `${key}のローソク足を取得できません。`;
+            }
+          } catch (error) {
+            firstError ||= error instanceof Error ? error.message : String(error);
           }
-        } catch (error) {
-          firstError ||= error instanceof Error ? error.message : String(error);
-        }
-      }));
-
-      if (cancelled) return;
-
-      if (Object.keys(updatedCache).length > 0) {
-        const fetchedAt = Date.now();
-        Object.keys(updatedCache).forEach((key) => {
-          candleFetchTimestampsRef.current[key] = fetchedAt;
-        });
-        setCandlesCache((currentCache) => compactCandlesCache({
-          ...currentCache,
-          ...updatedCache,
         }));
-        setMoomooStatus('connected');
-        setMoomooError(null);
-      } else if (firstError) {
-        setMoomooStatus('error');
-        setMoomooError(firstError);
+
+        if (!moomooRealTimeActiveRef.current) return;
+
+        if (Object.keys(updatedCache).length > 0) {
+          const fetchedAt = Date.now();
+          Object.keys(updatedCache).forEach((key) => {
+            candleFetchTimestampsRef.current[key] = fetchedAt;
+          });
+          setCandlesCache((currentCache) => compactCandlesCache({
+            ...currentCache,
+            ...updatedCache,
+          }));
+          setMoomooStatus('connected');
+          setMoomooError(null);
+        } else if (firstError) {
+          setMoomooStatus('error');
+          setMoomooError(firstError);
+        }
+      } finally {
+        candleFetchInFlightRef.current = false;
       }
     };
 
     fetchMoomooCandles();
-    return () => {
-      cancelled = true;
-    };
   }, [panels, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
-    if (!moomooRealTimeActive) return;
-    let cancelled = false;
+    if (!moomooRealTimeActive || quoteFetchInFlightRef.current || tickers.length === 0) return;
 
     const fetchMoomooQuotes = async () => {
-      const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
-      await Promise.all(tickers.map(async (ticker) => {
-        try {
-          const response = await fetch('/api/moomoo/quote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbol: ticker.symbol }),
-          });
-          const data = await response.json();
-          updatedQuotes[ticker.symbol] = data.success && Number(data.price) > 0
+      quoteFetchInFlightRef.current = true;
+      try {
+        const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbols: tickers.map((ticker) => ticker.symbol) }),
+        }, 35_000);
+        if (!response.ok || !data.success || !data.quotes) {
+          throw new Error(data.error || 'Moomoo価格一覧を取得できません。');
+        }
+
+        const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
+        Object.values(data.quotes as Record<string, MoomooBatchQuoteResult>).forEach((quote) => {
+          const storedSymbol = normalizeTickerSymbolForStorage(String(quote.symbol || ''));
+          if (!storedSymbol) return;
+          const price = Number(quote.price);
+          updatedQuotes[storedSymbol] = quote.success && Number.isFinite(price) && price > 0
             ? {
-                name: data.name || ticker.name,
-                price: Number(data.price),
-                changePct: Number(data.changePct || 0),
+                name: quote.name || storedSymbol,
+                price,
+                changePct: Number(quote.changePct || 0),
               }
             : null;
-        } catch {
-          updatedQuotes[ticker.symbol] = null;
-        }
-      }));
+        });
 
-      if (cancelled) return;
-
-      setQuoteCache((currentQuotes) => ({
-        ...currentQuotes,
-        ...updatedQuotes,
-      }));
+        if (!moomooRealTimeActiveRef.current) return;
+        setQuoteCache((currentQuotes) => ({
+          ...currentQuotes,
+          ...updatedQuotes,
+        }));
+      } catch (error) {
+        if (!moomooRealTimeActiveRef.current) return;
+        setMoomooStatus('error');
+        setMoomooError(error instanceof Error ? error.message : String(error));
+      } finally {
+        quoteFetchInFlightRef.current = false;
+      }
     };
 
     fetchMoomooQuotes();
-    return () => {
-      cancelled = true;
-    };
   }, [tickers, moomooRealTimeActive, tickTrigger]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
@@ -1304,7 +1413,7 @@ export default function App() {
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = startX - moveEvent.clientX;
       const maxWidth = Math.max(300, window.innerWidth - 360);
-      setSidebarWidth(Math.max(280, Math.min(maxWidth, initialWidth + delta)));
+      setSidebarWidth(Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxWidth, initialWidth + delta)));
     };
 
     const handleMouseUp = () => {
@@ -1324,8 +1433,8 @@ export default function App() {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const initialLeft = watchlistLayoutColumnWidths[leftKey];
-    const initialRight = watchlistLayoutColumnWidths[rightKey];
+    const initialLeft = watchlistLayout.widths[leftKey];
+    const initialRight = watchlistLayout.widths[rightKey];
     const leftMin = WATCHLIST_COLUMN_MIN_WIDTHS[leftKey];
     const rightMin = WATCHLIST_COLUMN_MIN_WIDTHS[rightKey];
     const pairTotal = initialLeft + initialRight;
@@ -1337,9 +1446,10 @@ export default function App() {
       const nextRight = pairTotal - nextLeft;
       setWatchlistColumnWidths((prev) => ({
         ...prev,
-        symbol: watchlistLayoutColumnWidths.symbol,
-        price: watchlistLayoutColumnWidths.price,
-        change: watchlistLayoutColumnWidths.change,
+        symbol: watchlistLayout.widths.symbol,
+        name: watchlistLayout.widths.name,
+        price: watchlistLayout.widths.price,
+        change: watchlistLayout.widths.change,
         [leftKey]: nextLeft,
         [rightKey]: nextRight,
       }));
@@ -1452,6 +1562,7 @@ export default function App() {
       };
     });
     setEditingSectionId(newSectionId);
+    setSectionNameDraft(newSection.name);
     setSectionMenu(null);
   };
 
@@ -1464,6 +1575,26 @@ export default function App() {
           : section
       ),
     }));
+  };
+
+  const beginRenameWatchlistSection = (sectionId: string, currentName: string) => {
+    setEditingSectionId(sectionId);
+    setSectionNameDraft(currentName);
+  };
+
+  const commitWatchlistSectionRename = () => {
+    if (!editingSectionId) return;
+    const nextName = sectionNameDraft.trim();
+    if (nextName) {
+      handleRenameWatchlistSection(editingSectionId, nextName);
+    }
+    setEditingSectionId(null);
+    setSectionNameDraft('');
+  };
+
+  const cancelWatchlistSectionRename = () => {
+    setEditingSectionId(null);
+    setSectionNameDraft('');
   };
 
   const handleToggleWatchlistSection = (sectionId: string) => {
@@ -1494,6 +1625,29 @@ export default function App() {
       return { ...tab, sections: remainingSections };
     });
     setSectionMenu(null);
+  };
+
+  const handleDropWatchlistSection = (
+    event: React.DragEvent<HTMLDivElement>,
+    targetSectionId: string,
+  ) => {
+    if (!draggedSectionId || draggedSectionId === targetSectionId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const placeAfterTarget =
+      event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.offsetHeight / 2;
+    updateActiveWatchlistTab((tab) => {
+      const draggedSection = tab.sections.find((section) => section.id === draggedSectionId);
+      if (!draggedSection) return tab;
+      const sectionsWithoutDragged = tab.sections.filter((section) => section.id !== draggedSectionId);
+      const targetIndex = sectionsWithoutDragged.findIndex((section) => section.id === targetSectionId);
+      if (targetIndex === -1) return tab;
+      const insertIndex = targetIndex + (placeAfterTarget ? 1 : 0);
+      const reorderedSections = [...sectionsWithoutDragged];
+      reorderedSections.splice(insertIndex, 0, draggedSection);
+      return { ...tab, sections: reorderedSections };
+    });
+    setDraggedSectionId(null);
   };
 
   const addSymbolsToActiveWatchlist = (symbols: string[]) => {
@@ -1659,12 +1813,11 @@ export default function App() {
       setTickerSearchError(null);
     }
     try {
-      const response = await fetch('/api/moomoo/quote', {
+      const { data } = await fetchJsonWithTimeout('/api/moomoo/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: requestedSymbol }),
       });
-      const data = await response.json();
       const price = Number(data.price);
       if (!data.success || !Number.isFinite(price) || price <= 0) {
         throw new Error(data.error || 'Moomooから銘柄情報を取得できません。');
@@ -1761,12 +1914,11 @@ export default function App() {
 
     setTickerSearchLoading(true);
     try {
-      const response = await fetch('/api/moomoo/search', {
+      const { data } = await fetchJsonWithTimeout('/api/moomoo/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: queryInput, limit: 10 }),
-      });
-      const data = await response.json();
+      }, 25_000);
       const candidates = Array.isArray(data.candidates)
         ? data.candidates as SymbolSearchCandidate[]
         : [];
@@ -1825,13 +1977,13 @@ export default function App() {
       const importedSymbols: string[] = [];
       const newTickers: TickerInfo[] = [];
       const newQuotes: Record<string, MoomooTickerQuote> = {};
-      let skippedCount = 0;
-      let csvFallbackCount = 0;
+      let invalidOrDuplicateCount = 0;
+      let unavailableCount = 0;
 
       candidates.forEach((candidate) => {
         const symbol = normalizeImportedSymbol(candidate.code);
         if (!symbol || queuedSymbols.has(symbol)) {
-          skippedCount += 1;
+          invalidOrDuplicateCount += 1;
           return;
         }
         queuedSymbols.add(symbol);
@@ -1847,57 +1999,18 @@ export default function App() {
         return;
       }
 
-      const buildTickerFromCsv = (candidate: WatchlistCsvCandidate & { symbol: string }) => {
-        if (!candidate.price || candidate.price <= 0) return null;
-        const importedTicker: TickerInfo = {
-          symbol: candidate.symbol,
-          name: candidate.name || candidate.symbol,
-          basePrice: candidate.price,
-          dailyChangePct: candidate.changePct ?? 0,
-        };
-        return {
-          ticker: importedTicker,
-          quote: {
-            name: importedTicker.name,
-            price: importedTicker.basePrice,
-            changePct: importedTicker.dailyChangePct,
-          } satisfies MoomooTickerQuote,
-          fromCsv: true,
-        };
-      };
-
-      const quoteRequests: Array<WatchlistCsvCandidate & { symbol: string }> = [];
-      normalizedCandidates.forEach((candidate) => {
-        const existingTicker = tickerBySymbol.get(candidate.symbol);
-        if (existingTicker) {
-          importedSymbols.push(candidate.symbol);
-          return;
-        }
-
-        const cachedQuote = quoteCache[candidate.symbol];
-        if (cachedQuote && Number.isFinite(Number(cachedQuote.price)) && Number(cachedQuote.price) > 0) {
-          const importedTicker: TickerInfo = {
-            symbol: candidate.symbol,
-            name: candidate.name || cachedQuote.name || candidate.symbol,
-            basePrice: Number(cachedQuote.price),
-            dailyChangePct: Number(cachedQuote.changePct || 0),
-          };
-          tickerBySymbol.set(candidate.symbol, importedTicker);
-          importedSymbols.push(candidate.symbol);
-          newTickers.push(importedTicker);
-          newQuotes[candidate.symbol] = {
-            name: importedTicker.name,
-            price: importedTicker.basePrice,
-            changePct: importedTicker.dailyChangePct,
-          };
-          return;
-        }
-
-        quoteRequests.push(candidate);
+      const statusResponse = await fetch('/api/moomoo/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
       });
+      const statusData = await statusResponse.json();
+      if (!statusResponse.ok || !statusData.connected) {
+        throw new Error(statusData.error || 'Moomooゲートウェイへ接続できないため、CSVを照合できません。');
+      }
 
       const quoteResults = await mapWithConcurrency(
-        quoteRequests,
+        normalizedCandidates,
         WATCHLIST_IMPORT_CONCURRENCY,
         async (candidate) => {
           try {
@@ -1908,8 +2021,14 @@ export default function App() {
             });
             const data = await response.json();
             const price = Number(data.price);
+            if (!response.ok && isMoomooGatewayFailureMessage(String(data.error || ''))) {
+              return {
+                kind: 'gateway-error' as const,
+                error: String(data.error || 'Moomooゲートウェイへ接続できません。'),
+              };
+            }
             if (!data.success || !Number.isFinite(price) || price <= 0) {
-              return buildTickerFromCsv(candidate);
+              return { kind: 'unavailable' as const };
             }
 
             const changePct = Number(data.changePct || 0);
@@ -1922,27 +2041,30 @@ export default function App() {
             };
 
             return {
+              kind: 'success' as const,
               ticker: importedTicker,
               quote: {
                 name: importedTicker.name,
                 price: importedTicker.basePrice,
                 changePct: importedTicker.dailyChangePct,
               } satisfies MoomooTickerQuote,
-              fromCsv: false,
             };
-          } catch {
-            return buildTickerFromCsv(candidate);
+          } catch (error) {
+            return {
+              kind: 'gateway-error' as const,
+              error: error instanceof Error ? error.message : String(error),
+            };
           }
         },
       );
 
       quoteResults.forEach((result) => {
-        if (!result) {
-          skippedCount += 1;
-          return;
+        if (result.kind === 'gateway-error') {
+          throw new Error(result.error);
         }
-        if (result.fromCsv) {
-          csvFallbackCount += 1;
+        if (result.kind === 'unavailable') {
+          unavailableCount += 1;
+          return;
         }
         if (!tickerBySymbol.has(result.ticker.symbol)) {
           tickerBySymbol.set(result.ticker.symbol, result.ticker);
@@ -1953,6 +2075,12 @@ export default function App() {
       });
 
       const finalImportedSymbols = Array.from(new Set(importedSymbols));
+      const skippedMessage = `${unavailableCount > 0 ? `${unavailableCount}件はMoomooで確認できないためスキップしました。` : ''}${invalidOrDuplicateCount > 0 ? `${invalidOrDuplicateCount}件は無効または重複のためスキップしました。` : ''}`;
+
+      if (finalImportedSymbols.length === 0) {
+        setWatchlistImportMessage(`インポートできる銘柄がありませんでした。${skippedMessage}`);
+        return;
+      }
 
       if (newTickers.length > 0) {
         setTickers((currentTickers) => {
@@ -1986,7 +2114,7 @@ export default function App() {
       setLastClickedSymbol(finalImportedSymbols.at(-1) ?? null);
       const destinationLabel = importMode === 'new-tab' ? '新規タブ' : 'アクティブなウォッチリスト';
       setWatchlistImportMessage(
-        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${csvFallbackCount > 0 ? `${csvFallbackCount}件はCSVの価格で登録しました。` : ''}${skippedCount > 0 ? `${skippedCount}件はスキップしました。` : ''}`
+        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${skippedMessage}`
       );
     } catch (error) {
       setWatchlistImportMessage(
@@ -2117,15 +2245,23 @@ export default function App() {
     activeWatchlistTabIndex >= 0 &&
     activeWatchlistTabIndex < watchlistTabs.length - 1;
 
-  const watchlistLayoutColumnWidths = useMemo(
+  const watchlistLayout = useMemo(
     () => calculateWatchlistLayoutColumnWidths(
       watchlistColumnWidths,
       Math.max(0, sidebarWidth - WATCHLIST_GRID_HORIZONTAL_PADDING),
+      showWatchlistNameColumn,
     ),
-    [sidebarWidth, watchlistColumnWidths],
+    [showWatchlistNameColumn, sidebarWidth, watchlistColumnWidths],
   );
 
-  const watchlistGridTemplate = `${watchlistLayoutColumnWidths.symbol}px ${watchlistLayoutColumnWidths.price}px ${watchlistLayoutColumnWidths.change}px ${WATCHLIST_ACTION_COLUMN_WIDTH}px`;
+  const watchlistGridTemplate = [
+    `${watchlistLayout.widths.symbol}px`,
+    `${WATCHLIST_ACTION_COLUMN_WIDTH}px`,
+    watchlistLayout.showName ? `${watchlistLayout.widths.name}px` : null,
+    `${watchlistLayout.widths.change}px`,
+    watchlistLayout.showPrice ? `${watchlistLayout.widths.price}px` : null,
+    `${WATCHLIST_ACTION_COLUMN_WIDTH}px`,
+  ].filter(Boolean).join(' ');
 
   const visibleWatchlistSections = useMemo(() => {
     const compareRows = (
@@ -2821,6 +2957,10 @@ export default function App() {
               <div
                 className="grid w-full items-center h-8 px-2 border-b border-[#242424] text-[10px] text-gray-500"
                 style={{ gridTemplateColumns: watchlistGridTemplate }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setWatchlistHeaderMenu({ x: event.clientX, y: event.clientY });
+                }}
               >
                 <span className="relative h-full flex items-center">
                   <button
@@ -2828,33 +2968,17 @@ export default function App() {
                     onClick={() => cycleWatchlistSort('symbol')}
                     className="w-full text-left hover:text-gray-200"
                   >
-                    銘柄 <span className="text-[8px] text-emerald-300">{getSortIndicator('symbol')}</span>
+                    コード <span className="text-[8px] text-emerald-300">{getSortIndicator('symbol')}</span>
                   </button>
                   <span
                     className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
-                    onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'symbol', 'price')}
+                    onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(
+                      event,
+                      'symbol',
+                      watchlistLayout.showName ? 'name' : 'change',
+                    )}
                   />
                 </span>
-                <span className="relative h-full flex items-center justify-end">
-                  <button
-                    type="button"
-                    onClick={() => cycleWatchlistSort('price')}
-                    className="w-full text-right hover:text-gray-200"
-                  >
-                    現在値 <span className="text-[8px] text-emerald-300">{getSortIndicator('price')}</span>
-                  </button>
-                  <span
-                    className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
-                    onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'price', 'change')}
-                  />
-                </span>
-                <button
-                  type="button"
-                  onClick={() => cycleWatchlistSort('change')}
-                  className="h-full text-right hover:text-gray-200"
-                >
-                  変動率 <span className="text-[8px] text-emerald-300">{getSortIndicator('change')}</span>
-                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -2862,14 +2986,67 @@ export default function App() {
                     setTickerSearchError(null);
                     setTickerSearchCandidates([]);
                   }}
-                  className="w-6 h-6 hover:bg-[#171717] text-gray-300 hover:text-white flex items-center justify-center transition"
+                  className="w-6 h-6 hover:bg-emerald-950/40 text-emerald-400 hover:text-emerald-300 flex items-center justify-center transition"
                   aria-label="銘柄を追加"
                   title="銘柄を追加"
                 >
                   {tickerSearchOpen ? <X className="w-3.5 h-3.5" /> : <Plus className="w-4 h-4" />}
                 </button>
+                {watchlistLayout.showName && (
+                  <span className="relative h-full flex items-center">
+                    <span className="w-full truncate">銘柄名</span>
+                    <span
+                      className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
+                      onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'name', 'change')}
+                    />
+                  </span>
+                )}
+                <span className="relative h-full flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => cycleWatchlistSort('change')}
+                    className="w-full h-full text-right hover:text-gray-200"
+                  >
+                    変動率 <span className="text-[8px] text-emerald-300">{getSortIndicator('change')}</span>
+                  </button>
+                  {watchlistLayout.showPrice && (
+                    <span
+                      className="absolute right-[-4px] top-0 w-2 h-full cursor-col-resize hover:bg-emerald-500/50"
+                      onMouseDown={(event) => handleWatchlistColumnResizeMouseDown(event, 'change', 'price')}
+                    />
+                  )}
+                </span>
+                {watchlistLayout.showPrice && (
+                  <button
+                    type="button"
+                    onClick={() => cycleWatchlistSort('price')}
+                    className="h-full text-right hover:text-gray-200"
+                  >
+                    現在値 <span className="text-[8px] text-emerald-300">{getSortIndicator('price')}</span>
+                  </button>
+                )}
+                <span aria-hidden="true" />
               </div>
             </div>
+
+            {watchlistHeaderMenu && (
+              <div
+                className="fixed z-50 w-40 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                style={{ left: watchlistHeaderMenu.x, top: watchlistHeaderMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowWatchlistNameColumn((visible) => !visible);
+                    setWatchlistHeaderMenu(null);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717]"
+                >
+                  {showWatchlistNameColumn ? '銘柄名を非表示' : '銘柄名を表示'}
+                </button>
+              </div>
+            )}
 
             {tickerSearchOpen && (
               <div className="p-2 border-b border-[#242424] bg-[#080808]">
@@ -2927,11 +3104,31 @@ export default function App() {
                 {visibleWatchlistSections.map((section) => (
                   <div
                     key={section.id}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => handleDropTicker(section.id)}
+                    onDragOver={(event) => {
+                      if (draggedTicker || draggedSectionId) event.preventDefault();
+                    }}
+                    onDrop={() => {
+                      if (!draggedSectionId) handleDropTicker(section.id);
+                    }}
                   >
                     <div
-                      className="h-6 px-2 border-b border-[#242424] bg-[#0d0d0d] flex items-center text-[10px] text-gray-400 select-none"
+                      draggable={editingSectionId !== section.id}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'move';
+                        setDraggedTicker(null);
+                        setDraggedSectionId(section.id);
+                      }}
+                      onDragEnd={() => setDraggedSectionId(null)}
+                      onDragOver={(event) => {
+                        if (draggedSectionId) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }
+                      }}
+                      onDrop={(event) => handleDropWatchlistSection(event, section.id)}
+                      className={`h-6 px-2 border-b border-[#242424] bg-[#0d0d0d] flex items-center text-[10px] text-gray-400 select-none cursor-grab active:cursor-grabbing ${
+                        draggedSectionId === section.id ? 'opacity-45' : ''
+                      }`}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setSectionMenu({ sectionId: section.id, x: event.clientX, y: event.clientY });
@@ -2940,24 +3137,36 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => handleToggleWatchlistSection(section.id)}
-                        className="min-w-0 flex-1 flex items-center gap-1.5 hover:text-white"
+                        className="shrink-0 flex items-center hover:text-white"
+                        aria-label={`${section.name}を${section.collapsed ? '展開' : '折りたたみ'}`}
                       >
                         {section.collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                        {editingSectionId === section.id ? (
-                          <input
-                            value={section.name}
-                            onChange={(event) => handleRenameWatchlistSection(section.id, event.target.value)}
-                            onBlur={() => setEditingSectionId(null)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') event.currentTarget.blur();
-                            }}
-                            className="w-28 bg-[#121212] border border-emerald-500 text-[10px] text-gray-100 px-1 outline-none"
-                            autoFocus
-                          />
-                        ) : (
-                          <span className="truncate">{section.name}</span>
-                        )}
                       </button>
+                      {editingSectionId === section.id ? (
+                        <input
+                          value={sectionNameDraft}
+                          onChange={(event) => setSectionNameDraft(event.target.value)}
+                          onBlur={commitWatchlistSectionRename}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') event.currentTarget.blur();
+                            if (event.key === 'Escape') {
+                              event.preventDefault();
+                              cancelWatchlistSectionRename();
+                            }
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                          className="ml-1.5 w-28 bg-[#121212] border border-emerald-500 text-[10px] text-gray-100 px-1 outline-none"
+                          autoFocus
+                          onFocus={(event) => event.currentTarget.select()}
+                        />
+                      ) : (
+                        <span
+                          className="ml-1.5 min-w-0 flex-1 truncate"
+                          onDoubleClick={() => beginRenameWatchlistSection(section.id, section.name)}
+                        >
+                          {section.name}
+                        </span>
+                      )}
                     </div>
 
                     {!section.collapsed && section.rows.map((ticker) => {
@@ -3022,6 +3231,7 @@ export default function App() {
                           draggable
                           onDragStart={() => {
                             setWatchlistSort({ column: null, direction: null });
+                            setDraggedSectionId(null);
                             setDraggedTicker({ symbol: ticker.symbol, sectionId: section.id });
                           }}
                           onDragEnd={() => setDraggedTicker(null)}
@@ -3049,15 +3259,23 @@ export default function App() {
                               {formatWatchlistSymbol(ticker.symbol)}
                             </span>
                           </div>
-                          <span className="text-right font-mono text-[10px] text-gray-200 truncate">
-                            {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
-                          </span>
+                          <span aria-hidden="true" />
+                          {watchlistLayout.showName && (
+                            <span className="text-left text-[10px] text-gray-400 truncate" title={ticker.name}>
+                              {ticker.name}
+                            </span>
+                          )}
                           <span className={`text-right font-mono text-[10px] truncate ${
                               !hasQuote ? 'text-gray-600' : isPositive ? 'text-[#20c7b0]' : 'text-[#ff4961]'
                             }`}
                           >
                             {hasQuote ? `${ticker.computedChange >= 0 ? '+' : ''}${ticker.computedChange.toFixed(2)}%` : 'N/A'}
                           </span>
+                          {watchlistLayout.showPrice && (
+                            <span className="text-right font-mono text-[10px] text-gray-200 truncate">
+                              {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={(event) => {
@@ -3109,7 +3327,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setEditingSectionId(sectionMenu.sectionId);
+                    const section = activeWatchlistTab?.sections.find(
+                      (currentSection) => currentSection.id === sectionMenu.sectionId
+                    );
+                    if (section) {
+                      beginRenameWatchlistSection(section.id, section.name);
+                    }
                     setSectionMenu(null);
                   }}
                   className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717]"

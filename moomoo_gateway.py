@@ -4,6 +4,7 @@ import math
 import os
 import re
 import threading
+import time
 import unicodedata
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +28,7 @@ OPEND_PORT = int(os.getenv("MOOMOO_OPEND_PORT", "11111"))
 GATEWAY_HOST = os.getenv("MOOMOO_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("MOOMOO_GATEWAY_PORT", "8787"))
 GATEWAY_KEY = os.getenv("MOOMOO_GATEWAY_KEY", "")
+QUOTE_CACHE_TTL_SECONDS = 30
 JP_SYMBOLS_PATH = Path(__file__).resolve().parent / "data" / "jp_symbols.json"
 
 KLINE_TYPES = {
@@ -128,6 +130,7 @@ class MoomooQuoteService:
         self._lock = threading.RLock()
         self._jp_symbols: Optional[List[Dict[str, str]]] = None
         self._jp_english_names: Optional[Dict[str, str]] = None
+        self._quote_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
     def _get_context(self) -> OpenQuoteContext:
         if self._context is None:
@@ -141,6 +144,20 @@ class MoomooQuoteService:
             finally:
                 self._context = None
                 self._subscriptions.clear()
+
+    def _reset_context_on_connection_error(self, error: Exception) -> None:
+        message = str(error).lower()
+        connection_markers = (
+            "connect",
+            "disconnect",
+            "socket",
+            "network",
+            "broken pipe",
+            "connection reset",
+            "connection closed",
+        )
+        if any(marker in message for marker in connection_markers):
+            self._reset_context()
 
     def _subscribe(self, symbol: str, subtype: Any) -> None:
         subscription = (symbol, str(subtype))
@@ -156,6 +173,102 @@ class MoomooQuoteService:
         if ret != RET_OK:
             raise RuntimeError(str(message))
         self._subscriptions.add(subscription)
+
+    def _quote_from_row(self, row: Any) -> Dict[str, Any]:
+        symbol = str(row.get("code", ""))
+        last_price = as_float(row.get("last_price"))
+        previous_close = as_float(row.get("prev_close_price"))
+        change_pct = (
+            ((last_price - previous_close) / previous_close) * 100
+            if previous_close
+            else 0.0
+        )
+        return {
+            "success": True,
+            "symbol": symbol,
+            "name": str(row.get("name", symbol)),
+            "price": last_price,
+            "open": as_float(row.get("open_price")),
+            "high": as_float(row.get("high_price")),
+            "low": as_float(row.get("low_price")),
+            "previousClose": previous_close,
+            "volume": int(as_float(row.get("volume"))),
+            "changePct": change_pct,
+            "dataDate": str(row.get("update_time", "")).split(" ", 1)[0],
+            "dataTime": (
+                str(row.get("update_time", "")).split(" ", 1)[1]
+                if " " in str(row.get("update_time", ""))
+                else ""
+            ),
+        }
+
+    def _quote_locked(self, symbol: str) -> Dict[str, Any]:
+        cached = self._quote_cache.get(symbol)
+        if cached and time.monotonic() - cached[0] < QUOTE_CACHE_TTL_SECONDS:
+            result = cached[1]
+            if result.get("success"):
+                return result
+            raise RuntimeError(str(result.get("error", "価格を取得できません。")))
+
+        ret, data = self._get_context().get_market_snapshot([symbol])
+        if ret != RET_OK:
+            self._quote_cache[symbol] = (
+                time.monotonic(),
+                {
+                    "success": False,
+                    "symbol": symbol,
+                    "error": str(data),
+                },
+            )
+            raise RuntimeError(str(data))
+        result = self._quote_from_row(data.iloc[0])
+        self._quote_cache[symbol] = (time.monotonic(), result)
+        return result
+
+    def _snapshot_quotes_locked(
+        self,
+        symbols: List[str],
+        results: Dict[str, Dict[str, Any]],
+    ) -> None:
+        if not symbols:
+            return
+
+        unresolved = []
+        now = time.monotonic()
+        for symbol in symbols:
+            cached = self._quote_cache.get(symbol)
+            if cached and now - cached[0] < QUOTE_CACHE_TTL_SECONDS:
+                results[symbol] = cached[1]
+            else:
+                unresolved.append(symbol)
+
+        if not unresolved:
+            return
+
+        ret, data = self._get_context().get_market_snapshot(unresolved)
+        if ret == RET_OK:
+            for _, row in data.iterrows():
+                quote = self._quote_from_row(row)
+                symbol = str(quote["symbol"])
+                self._quote_cache[symbol] = (time.monotonic(), quote)
+                results[symbol] = quote
+            return
+
+        error_message = str(data)
+        if len(unresolved) > 1 and "high frequency" not in error_message.lower():
+            midpoint = len(unresolved) // 2
+            self._snapshot_quotes_locked(unresolved[:midpoint], results)
+            self._snapshot_quotes_locked(unresolved[midpoint:], results)
+            return
+
+        for symbol in unresolved:
+            failure = {
+                "success": False,
+                "symbol": symbol,
+                "error": error_message,
+            }
+            self._quote_cache[symbol] = (time.monotonic(), failure)
+            results[symbol] = failure
 
     def _load_jp_symbols(self) -> List[Dict[str, str]]:
         if self._jp_symbols is None:
@@ -299,36 +412,37 @@ class MoomooQuoteService:
         symbol = normalize_symbol(raw_symbol)
         with self._lock:
             try:
-                self._subscribe(symbol, SubType.QUOTE)
-                ret, data = self._get_context().get_stock_quote([symbol])
-                if ret != RET_OK:
-                    raise RuntimeError(str(data))
-
-                row = data.iloc[0]
-                last_price = as_float(row.get("last_price"))
-                previous_close = as_float(row.get("prev_close_price"))
-                change_pct = (
-                    ((last_price - previous_close) / previous_close) * 100
-                    if previous_close
-                    else 0.0
-                )
-                return {
-                    "success": True,
-                    "symbol": symbol,
-                    "name": str(row.get("name", symbol)),
-                    "price": last_price,
-                    "open": as_float(row.get("open_price")),
-                    "high": as_float(row.get("high_price")),
-                    "low": as_float(row.get("low_price")),
-                    "previousClose": previous_close,
-                    "volume": int(as_float(row.get("volume"))),
-                    "changePct": change_pct,
-                    "dataDate": str(row.get("data_date", "")),
-                    "dataTime": str(row.get("data_time", "")),
-                }
-            except Exception:
-                self._reset_context()
+                return self._quote_locked(symbol)
+            except Exception as error:
+                self._reset_context_on_connection_error(error)
                 raise
+
+    def quotes(self, raw_symbols: Any) -> Dict[str, Any]:
+        if not isinstance(raw_symbols, list):
+            raise ValueError("symbolsは配列で指定してください。")
+
+        symbols = []
+        seen = set()
+        for raw_symbol in raw_symbols[:200]:
+            try:
+                symbol = normalize_symbol(str(raw_symbol))
+            except Exception:
+                continue
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+
+        if not symbols:
+            raise ValueError("有効な銘柄が指定されていません。")
+
+        results: Dict[str, Dict[str, Any]] = {}
+        with self._lock:
+            self._snapshot_quotes_locked(symbols, results)
+
+        return {
+            "success": True,
+            "quotes": results,
+        }
 
     def kline(
         self,
@@ -376,8 +490,8 @@ class MoomooQuoteService:
                     "timeframe": timeframe,
                     "candles": candles,
                 }
-            except Exception:
-                self._reset_context()
+            except Exception as error:
+                self._reset_context_on_connection_error(error)
                 raise
 
     def close(self) -> None:
@@ -432,6 +546,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/v1/quote":
                 self._send_json(200, SERVICE.quote(str(payload.get("symbol", ""))))
+                return
+            if self.path == "/v1/quotes":
+                self._send_json(200, SERVICE.quotes(payload.get("symbols", [])))
                 return
             if self.path == "/v1/kline":
                 result = SERVICE.kline(

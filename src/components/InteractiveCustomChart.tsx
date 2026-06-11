@@ -72,6 +72,10 @@ function formatSignedPercent(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
+function compactAxisSymbol(symbol: string): string {
+  return symbol.length > 8 ? `${symbol.slice(0, 7)}..` : symbol;
+}
+
 function distanceToSegment(
   pointX: number,
   pointY: number,
@@ -472,9 +476,9 @@ export function InteractiveCustomChart({
       }),
     ].sort((first, second) => first.y - second.y);
 
-    const minCenterY = 10;
-    const maxCenterY = Math.max(minCenterY, mainHeight - 34);
-    const minGap = 16;
+    const minCenterY = 12;
+    const maxCenterY = Math.max(minCenterY, mainHeight - 36);
+    const minGap = 22;
     const adjusted = rawLabels.map((label) => ({
       ...label,
       adjustedY: Math.max(minCenterY, Math.min(maxCenterY, label.y)),
@@ -1125,15 +1129,16 @@ export function InteractiveCustomChart({
               {rightAxisLabels.length > 0 && (
                 <g className="pointer-events-none">
                   {rightAxisLabels.map((axisLabel) => {
+                    const symbolText = compactAxisSymbol(axisLabel.symbol);
                     const percentText = formatSignedPercent(axisLabel.changePct);
                     const tabWidth = Math.min(
                       rightAxisWidth,
                       Math.max(
                         32,
-                        percentText.length * 4.8 + 5,
+                        Math.max(symbolText.length * 4.8, percentText.length * 4.5) + 5,
                       ),
                     );
-                    const tabHeight = 14;
+                    const tabHeight = 20;
                     const tabX = plotWidth;
                     const tabY = axisLabel.adjustedY - tabHeight / 2;
                     const moved = Math.abs(axisLabel.adjustedY - axisLabel.y) > 2;
@@ -1164,10 +1169,21 @@ export function InteractiveCustomChart({
                         />
                         <text
                           x={tabX + tabWidth / 2}
-                          y={axisLabel.adjustedY + 3}
+                          y={axisLabel.adjustedY - 1.5}
                           textAnchor="middle"
                           fill="#ffffff"
-                          fontSize="8"
+                          fontSize="7.5"
+                          fontFamily="monospace"
+                          fontWeight="700"
+                        >
+                          {symbolText}
+                        </text>
+                        <text
+                          x={tabX + tabWidth / 2}
+                          y={axisLabel.adjustedY + 7.5}
+                          textAnchor="middle"
+                          fill="#ffffff"
+                          fontSize="7"
                           fontFamily="monospace"
                           fontWeight="700"
                         >

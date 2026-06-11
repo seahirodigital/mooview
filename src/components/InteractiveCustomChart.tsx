@@ -8,6 +8,7 @@ import {
   calculateMACD 
 } from '../indicators';
 import { Plus, Minus, RotateCcw } from 'lucide-react';
+import { getSeriesColor } from '../chartSeriesColors';
 
 interface InteractiveCustomChartProps {
   symbol: string;
@@ -56,6 +57,61 @@ function formatAxisDateLabel(candle: Candle, timeframe: Timeframe): string {
   return candle.timeStr.includes(' ') ? candle.timeStr.split(' ')[1] : candle.timeStr;
 }
 
+function getCandleAlignmentKey(candle: Candle, timeframe: Timeframe): string {
+  return timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
+    ? candle.timeStr.slice(0, 10)
+    : String(candle.time);
+}
+
+function calculateChangePct(latest: number, base: number): number {
+  const denominator = Math.abs(base) > 0.0000001 ? Math.abs(base) : 1;
+  return ((latest - base) / denominator) * 100;
+}
+
+function formatSignedPercent(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+function distanceToSegment(
+  pointX: number,
+  pointY: number,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+) {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const segmentLengthSq = dx * dx + dy * dy;
+  if (segmentLengthSq === 0) {
+    return {
+      distance: Math.hypot(pointX - startX, pointY - startY),
+      x: startX,
+      y: startY,
+    };
+  }
+
+  const rawT = ((pointX - startX) * dx + (pointY - startY) * dy) / segmentLengthSq;
+  const t = Math.max(0, Math.min(1, rawT));
+  const x = startX + t * dx;
+  const y = startY + t * dy;
+  return {
+    distance: Math.hypot(pointX - x, pointY - y),
+    x,
+    y,
+  };
+}
+
+interface ComparisonSeriesPoint {
+  x: number;
+  y: number;
+  close: number;
+  scaledPrice: number;
+  changePct: number;
+  sliceIndex: number;
+  globalIndex: number;
+}
+
 export function InteractiveCustomChart({
   symbol,
   candles,
@@ -89,6 +145,10 @@ export function InteractiveCustomChart({
     mouseX: number;
     mouseY: number;
   } | null>(null);
+  const [minimizedIndicators, setMinimizedIndicators] = useState({
+    rsi: false,
+    macd: false,
+  });
 
   // Drag state for panning
   const [isDragging, setIsDragging] = useState(false);
@@ -117,8 +177,10 @@ export function InteractiveCustomChart({
   const { width, height } = dimensions;
 
   // Amount of candles to fit in chart width
-  // Right margin is 60px for price quotes label column
-  const plotWidth = width - 60;
+  // The right-side axis column also hosts the comparison ranking tabs.
+  const priceAxisWidth = 60;
+  const plotWidth = Math.max(80, width - priceAxisWidth);
+  const rightAxisWidth = width - plotWidth;
   const maxVisibleCount = Math.floor(plotWidth / zoomFactor);
   const visibleCandleCount = Math.min(candles.length, Math.max(10, maxVisibleCount));
 
@@ -168,9 +230,18 @@ export function InteractiveCustomChart({
   // Height of sections inside the canvas (percentages of total height)
   const activeRsi = showRsi && indicators.rsi.enabled;
   const activeMacd = showMacd && indicators.macd.enabled;
+  const rsiMinimized = activeRsi && minimizedIndicators.rsi;
+  const macdMinimized = activeMacd && minimizedIndicators.macd;
+  const rsiPlotActive = activeRsi && !rsiMinimized;
+  const macdPlotActive = activeMacd && !macdMinimized;
+  const minimizedIndicatorHeight = 24;
 
-  const rsiHeight = activeRsi ? Math.max(30, (height * rsiHeightPct) / 100) : 0;
-  const macdHeight = activeMacd ? Math.max(30, (height * macdHeightPct) / 100) : 0;
+  const rsiHeight = activeRsi
+    ? rsiMinimized ? minimizedIndicatorHeight : Math.max(30, (height * rsiHeightPct) / 100)
+    : 0;
+  const macdHeight = activeMacd
+    ? macdMinimized ? minimizedIndicatorHeight : Math.max(30, (height * macdHeightPct) / 100)
+    : 0;
   const mainHeight = Math.max(100, height - rsiHeight - macdHeight);
 
   // Mouse event handlers for indicators layout dragging inside the chart
@@ -225,9 +296,7 @@ export function InteractiveCustomChart({
     comparisonSymbols.forEach((symbol) => {
       result[symbol] = new Map(
         (comparisonCandles[symbol] || []).map((candle) => [
-          timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-            ? candle.timeStr.slice(0, 10)
-            : String(candle.time),
+          getCandleAlignmentKey(candle, timeframe),
           candle,
         ])
       );
@@ -241,11 +310,7 @@ export function InteractiveCustomChart({
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
       const firstAlignedCandle = visibleCandles
-        .map((mainCandle) => candleMap?.get(
-          timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-            ? mainCandle.timeStr.slice(0, 10)
-            : String(mainCandle.time)
-        ))
+        .map((mainCandle) => candleMap?.get(getCandleAlignmentKey(mainCandle, timeframe)))
         .find((candle): candle is Candle => Boolean(candle));
       result[symbol] = firstAlignedCandle?.close || 1;
     });
@@ -293,9 +358,7 @@ export function InteractiveCustomChart({
       const candleMap = comparisonCandleMaps[symbol];
       const startPrice = compStartPrice[symbol] || 1;
       visibleCandles.forEach((mainCandle) => {
-        const alignmentKey = timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-          ? mainCandle.timeStr.slice(0, 10)
-          : String(mainCandle.time);
+        const alignmentKey = getCandleAlignmentKey(mainCandle, timeframe);
         const compCandle = candleMap?.get(alignmentKey);
         if (compCandle) {
           const ratio = compCandle.close / startPrice;
@@ -332,6 +395,193 @@ export function InteractiveCustomChart({
     const pct = (price - priceMinMax.min) / (priceMinMax.max - priceMinMax.min);
     return plotH - pct * (plotH - topMargin);
   };
+
+  const comparisonSeriesData = useMemo<Record<string, ComparisonSeriesPoint[]>>(() => {
+    const result: Record<string, ComparisonSeriesPoint[]> = {};
+
+    comparisonSymbols.forEach((compSym) => {
+      const candleMap = comparisonCandleMaps[compSym];
+      const startPrice = compStartPrice[compSym] || 1;
+      if (!candleMap || !Number.isFinite(startPrice)) {
+        result[compSym] = [];
+        return;
+      }
+
+      const points: ComparisonSeriesPoint[] = [];
+      visibleCandles.forEach((mainCandle, sliceIndex) => {
+        const compCandle = candleMap.get(getCandleAlignmentKey(mainCandle, timeframe));
+        if (!compCandle) return;
+
+        const ratio = compCandle.close / startPrice;
+        const scaledPrice = ratio * mainStartPrice;
+        if (!Number.isFinite(scaledPrice)) return;
+
+        points.push({
+          x: getX(sliceIndex),
+          y: getY(scaledPrice),
+          close: compCandle.close,
+          scaledPrice,
+          changePct: calculateChangePct(compCandle.close, startPrice),
+          sliceIndex,
+          globalIndex: startIndex + sliceIndex,
+        });
+      });
+
+      result[compSym] = points;
+    });
+
+    return result;
+  }, [
+    comparisonSymbols,
+    comparisonCandleMaps,
+    compStartPrice,
+    visibleCandles,
+    timeframe,
+    mainStartPrice,
+    priceMinMax.min,
+    priceMinMax.max,
+    mainHeight,
+    plotWidth,
+    startIndex,
+  ]);
+
+  const rightAxisLabels = useMemo(() => {
+    if (comparisonSymbols.length === 0 || visibleCandles.length === 0) return [];
+
+    const firstMainCandle = visibleCandles[0];
+    const lastMainCandle = visibleCandles[visibleCandles.length - 1];
+    const rawLabels = [
+      {
+        key: symbol,
+        symbol,
+        color: '#475569',
+        y: getY(lastMainCandle.close),
+        changePct: calculateChangePct(lastMainCandle.close, firstMainCandle.close),
+      },
+      ...comparisonSymbols.flatMap((compSym, index) => {
+        const points = comparisonSeriesData[compSym] || [];
+        const lastPoint = points[points.length - 1];
+        if (!lastPoint) return [];
+        return [{
+          key: compSym,
+          symbol: compSym,
+          color: getSeriesColor(compSym, index),
+          y: lastPoint.y,
+          changePct: lastPoint.changePct,
+        }];
+      }),
+    ].sort((first, second) => first.y - second.y);
+
+    const minCenterY = 10;
+    const maxCenterY = Math.max(minCenterY, mainHeight - 34);
+    const minGap = 16;
+    const adjusted = rawLabels.map((label) => ({
+      ...label,
+      adjustedY: Math.max(minCenterY, Math.min(maxCenterY, label.y)),
+    }));
+
+    for (let index = 1; index < adjusted.length; index += 1) {
+      adjusted[index].adjustedY = Math.max(
+        adjusted[index].adjustedY,
+        adjusted[index - 1].adjustedY + minGap,
+      );
+    }
+
+    if (adjusted.length > 0 && adjusted[adjusted.length - 1].adjustedY > maxCenterY) {
+      adjusted[adjusted.length - 1].adjustedY = maxCenterY;
+      for (let index = adjusted.length - 2; index >= 0; index -= 1) {
+        adjusted[index].adjustedY = Math.min(
+          adjusted[index].adjustedY,
+          adjusted[index + 1].adjustedY - minGap,
+        );
+      }
+    }
+
+    if (adjusted.length > 0 && adjusted[0].adjustedY < minCenterY) {
+      const availableHeight = Math.max(1, maxCenterY - minCenterY);
+      const compressedGap = adjusted.length > 1
+        ? Math.min(minGap, availableHeight / (adjusted.length - 1))
+        : 0;
+      return adjusted.map((label, index) => ({
+        ...label,
+        adjustedY: minCenterY + compressedGap * index,
+      }));
+    }
+
+    return adjusted;
+  }, [
+    comparisonSymbols,
+    comparisonSeriesData,
+    visibleCandles,
+    symbol,
+    mainHeight,
+    priceMinMax.min,
+    priceMinMax.max,
+  ]);
+
+  const hoveredComparisonSeries = useMemo(() => {
+    if (!hoverData || hoverData.mouseX >= plotWidth || hoverData.mouseY >= mainHeight) {
+      return null;
+    }
+
+    let best:
+      | {
+          symbol: string;
+          color: string;
+          x: number;
+          y: number;
+          distance: number;
+        }
+      | null = null;
+
+    comparisonSymbols.forEach((compSym, index) => {
+      const points = comparisonSeriesData[compSym] || [];
+      if (points.length === 1) {
+        const point = points[0];
+        const distance = Math.hypot(hoverData.mouseX - point.x, hoverData.mouseY - point.y);
+        if (!best || distance < best.distance) {
+          best = {
+            symbol: compSym,
+            color: getSeriesColor(compSym, index),
+            x: point.x,
+            y: point.y,
+            distance,
+          };
+        }
+        return;
+      }
+
+      for (let pointIndex = 1; pointIndex < points.length; pointIndex += 1) {
+        const previous = points[pointIndex - 1];
+        const current = points[pointIndex];
+        const hit = distanceToSegment(
+          hoverData.mouseX,
+          hoverData.mouseY,
+          previous.x,
+          previous.y,
+          current.x,
+          current.y,
+        );
+        if (!best || hit.distance < best.distance) {
+          best = {
+            symbol: compSym,
+            color: getSeriesColor(compSym, index),
+            x: hit.x,
+            y: hit.y,
+            distance: hit.distance,
+          };
+        }
+      }
+    });
+
+    return best && best.distance <= 12 ? best : null;
+  }, [
+    hoverData,
+    comparisonSymbols,
+    comparisonSeriesData,
+    plotWidth,
+    mainHeight,
+  ]);
 
   // Volume scale
   const maxVolume = useMemo(() => {
@@ -516,23 +766,16 @@ export function InteractiveCustomChart({
 
   // Map comparison lines paths
   const getComparisonPolylinePoints = (sym: string) => {
-    const pts: string[] = [];
-    const candleMap = comparisonCandleMaps[sym];
-    const startPrice = compStartPrice[sym] || 1;
-    if (!candleMap) return '';
+    return (comparisonSeriesData[sym] || [])
+      .map((point) => `${point.x},${point.y}`)
+      .join(' ');
+  };
 
-    visibleCandles.forEach((mainCandle, i) => {
-      const alignmentKey = timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-        ? mainCandle.timeStr.slice(0, 10)
-        : String(mainCandle.time);
-      const compCandle = candleMap.get(alignmentKey);
-      if (compCandle) {
-        const ratio = compCandle.close / startPrice;
-        const scaledPrice = ratio * mainStartPrice;
-        pts.push(`${getX(i)},${getY(scaledPrice)}`);
-      }
-    });
-    return pts.join(' ');
+  const toggleIndicatorMinimized = (indicator: 'rsi' | 'macd') => {
+    setMinimizedIndicators((prev) => ({
+      ...prev,
+      [indicator]: !prev[indicator],
+    }));
   };
 
   return (
@@ -554,22 +797,17 @@ export function InteractiveCustomChart({
           
           {/* Legend for comparison symbols */}
           {comparisonSymbols.map((compSym, index) => {
-            const lineColors = ['#f3a14b', '#a78bfa', '#22d3ee', '#f43f5e', '#eab308'];
-            const color = lineColors[index % lineColors.length];
+            const color = getSeriesColor(compSym, index);
             const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
             const compCandle = activeCandle
-              ? comparisonCandleMaps[compSym]?.get(
-                  timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-                    ? activeCandle.timeStr.slice(0, 10)
-                    : String(activeCandle.time)
-                )
+              ? comparisonCandleMaps[compSym]?.get(getCandleAlignmentKey(activeCandle, timeframe))
               : null;
             const startPrice = compStartPrice[compSym] || 1;
             if (!compCandle) return null;
-            const changePct = ((compCandle.close - startPrice) / startPrice) * 100;
+            const changePct = calculateChangePct(compCandle.close, startPrice);
             return (
               <span key={compSym} style={{ color }} className="font-bold border-l border-gray-800 pl-2">
-                {compSym}: {compCandle.close.toFixed(valuePrecision)} ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
+                {compSym}: {compCandle.close.toFixed(valuePrecision)} ({formatSignedPercent(changePct)})
               </span>
             );
           })}
@@ -627,7 +865,7 @@ export function InteractiveCustomChart({
               <rect
                 x={plotWidth}
                 y={0}
-                width={60}
+                width={rightAxisWidth}
                 height={mainHeight}
                 fill={priceAxisFocused ? 'rgba(59, 130, 246, 0.06)' : 'transparent'}
                 className="cursor-ns-resize"
@@ -772,8 +1010,7 @@ export function InteractiveCustomChart({
 
               {/* Render Comparison/Overlay Lines */}
               {comparisonSymbols.map((compSym, idx) => {
-                const lineColors = ['#f3a14b', '#a78bfa', '#22d3ee', '#f43f5e', '#eab308'];
-                const strokeColor = lineColors[idx % lineColors.length];
+                const strokeColor = getSeriesColor(compSym, idx);
                 const pointsStr = getComparisonPolylinePoints(compSym);
                 if (!pointsStr) return null;
                 return (
@@ -884,15 +1121,74 @@ export function InteractiveCustomChart({
                   })}
                 </g>
               )}
+
+              {rightAxisLabels.length > 0 && (
+                <g className="pointer-events-none">
+                  {rightAxisLabels.map((axisLabel) => {
+                    const percentText = formatSignedPercent(axisLabel.changePct);
+                    const tabWidth = Math.min(
+                      rightAxisWidth,
+                      Math.max(
+                        32,
+                        percentText.length * 4.8 + 5,
+                      ),
+                    );
+                    const tabHeight = 14;
+                    const tabX = plotWidth;
+                    const tabY = axisLabel.adjustedY - tabHeight / 2;
+                    const moved = Math.abs(axisLabel.adjustedY - axisLabel.y) > 2;
+
+                    return (
+                      <g key={axisLabel.key}>
+                        {moved && (
+                            <line
+                          x1={plotWidth - 3}
+                          y1={axisLabel.y}
+                          x2={tabX}
+                              y2={axisLabel.adjustedY}
+                              stroke={axisLabel.color}
+                            strokeWidth="0.8"
+                            strokeOpacity="0.55"
+                          />
+                        )}
+                        <rect
+                          x={tabX}
+                          y={tabY}
+                          width={tabWidth}
+                          height={tabHeight}
+                          rx="3"
+                          fill={axisLabel.color}
+                          fillOpacity="0.96"
+                          stroke="rgba(255,255,255,0.22)"
+                          strokeWidth="0.5"
+                        />
+                        <text
+                          x={tabX + tabWidth / 2}
+                          y={axisLabel.adjustedY + 3}
+                          textAnchor="middle"
+                          fill="#ffffff"
+                          fontSize="8"
+                          fontFamily="monospace"
+                          fontWeight="700"
+                        >
+                          {percentText}
+                        </text>
+                        <title>{axisLabel.symbol} {formatSignedPercent(axisLabel.changePct)}</title>
+                      </g>
+                    );
+                  })}
+                </g>
+              )}
             </g>
 
             {/* ================= B. RSI OSCILLATOR AREA ================= */}
             {activeRsi && (
               <g transform={`translate(0, ${mainHeight})`}>
                 <rect width={plotWidth} height={rsiHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
+                <rect x={plotWidth} y={0} width={rightAxisWidth} height={rsiHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
                 
                 {/* Rules markers */}
-                {[indicators.rsi.overbought, 50, indicators.rsi.oversold].map((level) => {
+                {rsiPlotActive && [indicators.rsi.overbought, 50, indicators.rsi.oversold].map((level) => {
                   const rsiY = rsiHeight - (level / 100) * rsiHeight;
                   const isOuter = level !== 50;
                   return (
@@ -913,22 +1209,44 @@ export function InteractiveCustomChart({
                 })}
 
                 <text x="8" y="14" fill="#8b5cf6" fontSize="8" fontWeight="bold">RSI ({indicators.rsi.period})</text>
+                <g
+                  transform={`translate(${plotWidth + rightAxisWidth - 21}, 4)`}
+                  className="cursor-pointer"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleIndicatorMinimized('rsi');
+                  }}
+                >
+                  <rect width="17" height="16" rx="3" fill="#171a2b" stroke="#2a3150" />
+                  <text x="8.5" y="11" fill="#c4b5fd" fontSize="10" fontFamily="monospace" textAnchor="middle" fontWeight="700">
+                    {rsiMinimized ? '+' : '-'}
+                  </text>
+                  <title>{rsiMinimized ? 'RSIを表示' : 'RSIを縮小'}</title>
+                </g>
+                {rsiMinimized && (
+                  <text x={plotWidth + 7} y="15" fill="#8b5cf6" fontSize="8" fontFamily="monospace" fontWeight="700">
+                    RSI
+                  </text>
+                )}
 
                 {/* RSI Line */}
-                <polyline 
-                  points={
-                    visibleCandles.map((_, i) => {
-                      const idx = startIndex + i;
-                      const rsiV = rsi[idx];
-                      const rsiY = rsiV !== null ? rsiHeight - (rsiV / 100) * rsiHeight : rsiHeight / 2;
-                      return `${getX(i)},${rsiY}`;
-                    }).join(' ')
-                  }
-                  fill="none"
-                  stroke={indicators.rsi.color}
-                  strokeWidth="1"
-                  strokeDasharray={getLineDasharray(indicators.rsi.style)}
-                />
+                {rsiPlotActive && (
+                  <polyline
+                    points={
+                      visibleCandles.map((_, i) => {
+                        const idx = startIndex + i;
+                        const rsiV = rsi[idx];
+                        const rsiY = rsiV !== null ? rsiHeight - (rsiV / 100) * rsiHeight : rsiHeight / 2;
+                        return `${getX(i)},${rsiY}`;
+                      }).join(' ')
+                    }
+                    fill="none"
+                    stroke={indicators.rsi.color}
+                    strokeWidth="1"
+                    strokeDasharray={getLineDasharray(indicators.rsi.style)}
+                  />
+                )}
               </g>
             )}
 
@@ -936,15 +1254,40 @@ export function InteractiveCustomChart({
             {activeMacd && (
               <g transform={`translate(0, ${mainHeight + rsiHeight})`}>
                 <rect width={plotWidth} height={macdHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
+                <rect x={plotWidth} y={0} width={rightAxisWidth} height={macdHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
                 
                 {/* Zero center rule */}
-                <line x1={0} y1={macdHeight / 2} x2={plotWidth} y2={macdHeight / 2} stroke="#212948" strokeWidth="1" />
-                <text x={plotWidth + 6} y={macdHeight / 2 + 3} fill="#566288" fontSize="8" fontFamily="monospace">0.0</text>
+                {macdPlotActive && (
+                  <>
+                    <line x1={0} y1={macdHeight / 2} x2={plotWidth} y2={macdHeight / 2} stroke="#212948" strokeWidth="1" />
+                    <text x={plotWidth + 6} y={macdHeight / 2 + 3} fill="#566288" fontSize="8" fontFamily="monospace">0.0</text>
+                  </>
+                )}
 
                 <text x="8" y="14" fill="#2d8cf0" fontSize="8" fontWeight="bold">MACD ({indicators.macd.fast}, {indicators.macd.slow}, {indicators.macd.signal})</text>
+                <g
+                  transform={`translate(${plotWidth + rightAxisWidth - 21}, 4)`}
+                  className="cursor-pointer"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleIndicatorMinimized('macd');
+                  }}
+                >
+                  <rect width="17" height="16" rx="3" fill="#171a2b" stroke="#2a3150" />
+                  <text x="8.5" y="11" fill="#93c5fd" fontSize="10" fontFamily="monospace" textAnchor="middle" fontWeight="700">
+                    {macdMinimized ? '+' : '-'}
+                  </text>
+                  <title>{macdMinimized ? 'MACDを表示' : 'MACDを縮小'}</title>
+                </g>
+                {macdMinimized && (
+                  <text x={plotWidth + 7} y="15" fill="#2d8cf0" fontSize="8" fontFamily="monospace" fontWeight="700">
+                    MACD
+                  </text>
+                )}
 
                 {/* Histogram Bars */}
-                {visibleCandles.map((_, i) => {
+                {macdPlotActive && visibleCandles.map((_, i) => {
                   const idx = startIndex + i;
                   const val = macd.hist[idx];
                   if (val === null || val === undefined) return null;
@@ -971,38 +1314,42 @@ export function InteractiveCustomChart({
                 })}
 
                 {/* MACD Line */}
-                <polyline 
-                  points={
-                    visibleCandles.map((_, i) => {
-                      const idx = startIndex + i;
-                      const val = macd.macd[idx];
-                      const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
-                      const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
-                      return `${getX(i)},${mY}`;
-                    }).join(' ')
-                  }
-                  fill="none"
-                  stroke={indicators.macd.colorMacd}
-                  strokeWidth="1"
-                  strokeDasharray={getLineDasharray(indicators.macd.styleMacd)}
-                />
+                {macdPlotActive && (
+                  <polyline
+                    points={
+                      visibleCandles.map((_, i) => {
+                        const idx = startIndex + i;
+                        const val = macd.macd[idx];
+                        const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
+                        const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
+                        return `${getX(i)},${mY}`;
+                      }).join(' ')
+                    }
+                    fill="none"
+                    stroke={indicators.macd.colorMacd}
+                    strokeWidth="1"
+                    strokeDasharray={getLineDasharray(indicators.macd.styleMacd)}
+                  />
+                )}
 
                 {/* Signal Line */}
-                <polyline 
-                  points={
-                    visibleCandles.map((_, i) => {
-                      const idx = startIndex + i;
-                      const val = macd.signal[idx];
-                      const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
-                      const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
-                      return `${getX(i)},${mY}`;
-                    }).join(' ')
-                  }
-                  fill="none"
-                  stroke={indicators.macd.colorSignal}
-                  strokeWidth="1"
-                  strokeDasharray={getLineDasharray(indicators.macd.styleSignal)}
-                />
+                {macdPlotActive && (
+                  <polyline
+                    points={
+                      visibleCandles.map((_, i) => {
+                        const idx = startIndex + i;
+                        const val = macd.signal[idx];
+                        const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
+                        const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
+                        return `${getX(i)},${mY}`;
+                      }).join(' ')
+                    }
+                    fill="none"
+                    stroke={indicators.macd.colorSignal}
+                    strokeWidth="1"
+                    strokeDasharray={getLineDasharray(indicators.macd.styleSignal)}
+                  />
+                )}
               </g>
             )}
 
@@ -1096,6 +1443,50 @@ export function InteractiveCustomChart({
                     </text>
                   </g>
                 )}
+              </g>
+            )}
+
+            {hoveredComparisonSeries && (
+              <g className="pointer-events-none">
+                {(() => {
+                  const labelWidth = Math.min(
+                    180,
+                    Math.max(46, hoveredComparisonSeries.symbol.length * 6.2 + 14),
+                  );
+                  const labelX = Math.min(
+                    plotWidth - labelWidth - 8,
+                    Math.max(8, hoveredComparisonSeries.x + 10),
+                  );
+                  const labelY = Math.min(
+                    mainHeight - 24,
+                    Math.max(8, hoveredComparisonSeries.y - 24),
+                  );
+
+                  return (
+                    <g transform={`translate(${labelX}, ${labelY})`}>
+                      <rect
+                        width={labelWidth}
+                        height="18"
+                        rx="4"
+                        fill={hoveredComparisonSeries.color}
+                        fillOpacity="0.96"
+                        stroke="rgba(255,255,255,0.28)"
+                        strokeWidth="0.6"
+                      />
+                      <text
+                        x={labelWidth / 2}
+                        y="12"
+                        fill="#ffffff"
+                        fontSize="9"
+                        fontFamily="monospace"
+                        fontWeight="700"
+                        textAnchor="middle"
+                      >
+                        {hoveredComparisonSeries.symbol}
+                      </text>
+                    </g>
+                  );
+                })()}
               </g>
             )}
           </svg>

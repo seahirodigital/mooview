@@ -30,6 +30,7 @@ import {
   parseSymbolExpression,
   SymbolExpression,
 } from './symbolExpression';
+import { getSeriesColor } from './chartSeriesColors';
 
 const DEFAULT_PANEL_HEIGHT = 840;
 const DEFAULT_SIDEBAR_WIDTH = 420;
@@ -2829,8 +2830,7 @@ export default function App() {
                                 {panel.comparisonSymbols && panel.comparisonSymbols.length > 0 && (
                                   <div className="flex items-center space-x-1 pl-1.5 border-l border-[#242424] shrink-0">
                                     {panel.comparisonSymbols.map((compSym, idx) => {
-                                      const lineColors = ['#f3a14b', '#a78bfa', '#22d3ee', '#f43f5e', '#eab308'];
-                                      const color = lineColors[idx % lineColors.length];
+                                      const color = getSeriesColor(compSym, idx);
                                       return (
                                         <span 
                                           key={compSym}

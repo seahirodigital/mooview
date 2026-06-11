@@ -117,8 +117,17 @@ interface WatchlistCsvCandidate {
 
 interface RegisterTickerResult {
   success: boolean;
+  symbol?: string;
   error?: string;
   gatewayFailure?: boolean;
+}
+
+interface RegisterTickerOptions {
+  reportError?: boolean;
+  selectAfterAdd?: boolean;
+  clearInput?: boolean;
+  closeSearch?: boolean;
+  allowCandidates?: boolean;
 }
 
 function readStoredValue<T>(key: string, fallback: T): T {
@@ -453,6 +462,17 @@ function resolveCandlesForSymbol(
   );
 }
 
+function splitTickerInputList(rawInput: string): string[] {
+  return Array.from(
+    new Set(
+      rawInput
+        .split(/[,\u3001]/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
 function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
   const rows = parseCsvRows(text);
   if (rows.length < 2) return [];
@@ -582,11 +602,12 @@ function normalizeWatchlistTabs(raw: unknown, tickers: TickerInfo[]): WatchlistT
 // Local default indicator generator to keep things resilient
 function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings {
   const norm = symbol.toUpperCase();
+  const isExpression = parseSymbolExpression(symbol) !== null;
   return {
     symbol: norm,
     indicators: {
       ma: { 
-        enabled: norm === 'VOO' || norm === 'AAPL', 
+        enabled: !isExpression && (norm === 'VOO' || norm === 'AAPL'),
         period1: 5, color1: '#e7c039', 
         period2: 12, color2: '#20aced', 
         period3: 20, color3: '#e152f2',
@@ -595,14 +616,14 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         style3: 'solid',
       },
       ema: { 
-        enabled: norm === 'QQQ' || norm === 'NVDA', 
+        enabled: !isExpression && (norm === 'QQQ' || norm === 'NVDA'),
         period1: 9, color1: '#f85f73', 
         period2: 26, color2: '#00e575',
         style1: 'solid',
         style2: 'solid',
       },
       boll: { 
-        enabled: true, 
+        enabled: !isExpression,
         period: 20, 
         levels: [1, 2, 3],
         color: '#6c5dd3', 
@@ -610,7 +631,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         style: 'dashed',
       },
       rsi: { 
-        enabled: true, 
+        enabled: !isExpression,
         period: 14, 
         color: '#f3a14b', 
         style: 'solid',
@@ -618,7 +639,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         oversold: 30 
       },
       macd: { 
-        enabled: true, 
+        enabled: !isExpression,
         fast: 12, 
         slow: 26, 
         signal: 9, 
@@ -781,6 +802,7 @@ export default function App() {
   );
   const [draggedTicker, setDraggedTicker] = useState<{
     symbol: string;
+    symbols: string[];
     sectionId: string;
   } | null>(null);
   const [draggedSectionId, setDraggedSectionId] = useState<string | null>(null);
@@ -1861,8 +1883,14 @@ export default function App() {
 
   const registerTickerExpression = async (
     rawExpression: string,
-    options: { reportError?: boolean } = {},
+    options: RegisterTickerOptions = {},
   ): Promise<RegisterTickerResult> => {
+    const {
+      reportError = true,
+      selectAfterAdd = true,
+      clearInput = true,
+      closeSearch = true,
+    } = options;
     const requestedExpression = normalizeSymbolExpressionForStorage(rawExpression);
     if (!requestedExpression) {
       return {
@@ -1874,13 +1902,13 @@ export default function App() {
     const requestedSymbol = formatSymbolExpression(requestedExpression);
     if (tickers.some((ticker) => ticker.symbol === requestedSymbol)) {
       addSymbolToActiveWatchlist(requestedSymbol);
-      selectTickerForPrimaryChart(requestedSymbol);
-      setTickerSearchOpen(false);
-      return { success: true };
+      if (selectAfterAdd) selectTickerForPrimaryChart(requestedSymbol);
+      if (closeSearch) setTickerSearchOpen(false);
+      return { success: true, symbol: requestedSymbol };
     }
 
     setTickerSearchLoading(true);
-    if (options.reportError !== false) {
+    if (reportError) {
       setTickerSearchError(null);
     }
 
@@ -1954,14 +1982,14 @@ export default function App() {
           || createDefaultIndicatorSettings(storedSymbol),
       }));
       addSymbolToActiveWatchlist(storedSymbol);
-      selectTickerForPrimaryChart(storedSymbol);
-      setNewSymbolInput('');
+      if (selectAfterAdd) selectTickerForPrimaryChart(storedSymbol);
+      if (clearInput) setNewSymbolInput('');
       setTickerSearchCandidates([]);
-      setTickerSearchOpen(false);
-      return { success: true };
+      if (closeSearch) setTickerSearchOpen(false);
+      return { success: true, symbol: storedSymbol };
     } catch (error) {
       const message = error instanceof Error ? error.message : '演算式を登録できませんでした。';
-      if (options.reportError !== false) {
+      if (reportError) {
         setTickerSearchError(message);
       }
       return {
@@ -1976,20 +2004,26 @@ export default function App() {
 
   const registerTickerCandidate = async (
     candidate: SymbolSearchCandidate,
-    options: { reportError?: boolean } = {},
+    options: RegisterTickerOptions = {},
   ): Promise<RegisterTickerResult> => {
+    const {
+      reportError = true,
+      selectAfterAdd = true,
+      clearInput = true,
+      closeSearch = true,
+    } = options;
     const requestedSymbol = normalizeTickerSymbolForStorage(candidate.symbol);
     const cleanName = candidate.name.replace(/^US\./i, '');
 
     if (tickers.some((ticker) => ticker.symbol === requestedSymbol)) {
       addSymbolToActiveWatchlist(requestedSymbol);
-      selectTickerForPrimaryChart(requestedSymbol);
-      setTickerSearchOpen(false);
-      return { success: true };
+      if (selectAfterAdd) selectTickerForPrimaryChart(requestedSymbol);
+      if (closeSearch) setTickerSearchOpen(false);
+      return { success: true, symbol: requestedSymbol };
     }
 
     setTickerSearchLoading(true);
-    if (options.reportError !== false) {
+    if (reportError) {
       setTickerSearchError(null);
     }
     try {
@@ -2006,9 +2040,9 @@ export default function App() {
       const storedSymbol = normalizeTickerSymbolForStorage(String(data.symbol || requestedSymbol));
       if (tickers.some((ticker) => ticker.symbol === storedSymbol)) {
         addSymbolToActiveWatchlist(storedSymbol);
-        selectTickerForPrimaryChart(storedSymbol);
-        setTickerSearchOpen(false);
-        return { success: true };
+        if (selectAfterAdd) selectTickerForPrimaryChart(storedSymbol);
+        if (closeSearch) setTickerSearchOpen(false);
+        return { success: true, symbol: storedSymbol };
       }
 
       const changePct = Number(data.changePct || 0);
@@ -2039,14 +2073,14 @@ export default function App() {
           || createDefaultIndicatorSettings(storedSymbol),
       }));
       addSymbolToActiveWatchlist(storedSymbol);
-      selectTickerForPrimaryChart(storedSymbol);
-      setNewSymbolInput('');
+      if (selectAfterAdd) selectTickerForPrimaryChart(storedSymbol);
+      if (clearInput) setNewSymbolInput('');
       setTickerSearchCandidates([]);
-      setTickerSearchOpen(false);
-      return { success: true };
+      if (closeSearch) setTickerSearchOpen(false);
+      return { success: true, symbol: storedSymbol };
     } catch (error) {
       const message = error instanceof Error ? error.message : '銘柄を登録できませんでした。';
-      if (options.reportError !== false) {
+      if (reportError) {
         setTickerSearchError(message);
       }
       return {
@@ -2059,26 +2093,40 @@ export default function App() {
     }
   };
 
-  // 銘柄名・証券コード・ティッカーから候補を検索する
-  const handleAddTicker = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const queryInput = newSymbolInput.trim();
-    if (!queryInput) return;
-
-    setTickerSearchError(null);
-    setTickerSearchCandidates([]);
+  const registerTickerInput = async (
+    queryInput: string,
+    options: RegisterTickerOptions = {},
+  ): Promise<RegisterTickerResult> => {
+    const {
+      reportError = true,
+      selectAfterAdd = true,
+      clearInput = true,
+      closeSearch = true,
+      allowCandidates = true,
+    } = options;
     const expressionInput = parseSymbolExpression(queryInput);
     let expressionError: string | undefined;
 
     if (expressionInput) {
-      const expressionResult = await registerTickerExpression(queryInput, { reportError: false });
+      const expressionResult = await registerTickerExpression(queryInput, {
+        reportError: false,
+        selectAfterAdd,
+        clearInput,
+        closeSearch,
+      });
       if (expressionResult.success) {
-        return;
+        return expressionResult;
       }
       expressionError = expressionResult.error;
       if (expressionInput.operator === '/') {
-        setTickerSearchError(expressionError || '割り算の式を登録できませんでした。');
-        return;
+        if (reportError) {
+          setTickerSearchError(expressionError || '割り算の式を登録できませんでした。');
+        }
+        return {
+          success: false,
+          error: expressionError || '割り算の式を登録できませんでした。',
+          gatewayFailure: expressionResult.gatewayFailure,
+        };
       }
     }
 
@@ -2091,17 +2139,28 @@ export default function App() {
         market: 'US',
         category: 'DIRECT',
       };
-      const directResult = await registerTickerCandidate(directCandidate, { reportError: false });
+      const directResult = await registerTickerCandidate(directCandidate, {
+        reportError: false,
+        selectAfterAdd,
+        clearInput,
+        closeSearch,
+      });
       if (directResult.success) {
-        return;
+        return directResult;
       }
       if (expressionInput) {
-        setTickerSearchError(expressionError || directResult.error || '引き算の式を登録できませんでした。');
-        return;
+        const message = expressionError || directResult.error || '引き算の式を登録できませんでした。';
+        if (reportError) setTickerSearchError(message);
+        return {
+          success: false,
+          error: message,
+          gatewayFailure: directResult.gatewayFailure,
+        };
       }
       if (directResult.gatewayFailure) {
-        setTickerSearchError(directResult.error || 'Moomooゲートウェイへ接続できません。');
-        return;
+        const message = directResult.error || 'Moomooゲートウェイへ接続できません。';
+        if (reportError) setTickerSearchError(message);
+        return { success: false, error: message, gatewayFailure: true };
       }
     }
 
@@ -2119,24 +2178,85 @@ export default function App() {
         throw new Error(data.error || '該当する銘柄が見つかりません。');
       }
 
-      // 検索候補はアプリの保存形式にそろえてから表示する
       const processedCandidates = candidates.map(c => {
         const symbol = normalizeTickerSymbolForStorage(c.symbol);
         return { ...c, symbol };
       });
 
       if (processedCandidates.length === 1) {
-        await registerTickerCandidate(processedCandidates[0]);
-      } else {
-        setTickerSearchCandidates(processedCandidates);
+        return registerTickerCandidate(processedCandidates[0], {
+          reportError,
+          selectAfterAdd,
+          clearInput,
+          closeSearch,
+        });
       }
+
+      if (!allowCandidates) {
+        throw new Error('候補選択が必要です。単独で入力して候補から選んでください。');
+      }
+
+      setTickerSearchCandidates(processedCandidates);
+      return { success: false, error: '候補から銘柄を選択してください。' };
     } catch (error) {
-      setTickerSearchError(
-        error instanceof Error ? error.message : '銘柄検索に失敗しました。'
-      );
+      const message = error instanceof Error ? error.message : '銘柄検索に失敗しました。';
+      if (reportError) setTickerSearchError(message);
+      return { success: false, error: message };
     } finally {
       setTickerSearchLoading(false);
     }
+  };
+
+  // 銘柄名・証券コード・ティッカーから候補を検索する
+  const handleAddTicker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const queryInput = newSymbolInput.trim();
+    if (!queryInput) return;
+
+    setTickerSearchError(null);
+    setTickerSearchCandidates([]);
+    const inputItems = splitTickerInputList(queryInput);
+
+    if (inputItems.length > 1) {
+      setTickerSearchLoading(true);
+      const successes: string[] = [];
+      const failures: string[] = [];
+      try {
+        for (const item of inputItems) {
+          const result = await registerTickerInput(item, {
+            reportError: false,
+            selectAfterAdd: false,
+            clearInput: false,
+            closeSearch: false,
+            allowCandidates: false,
+          });
+          if (result.success && result.symbol) {
+            successes.push(result.symbol);
+          } else {
+            failures.push(`${item}: ${result.error || '登録できませんでした。'}`);
+          }
+        }
+      } finally {
+        setTickerSearchLoading(false);
+      }
+
+      if (successes.length > 0) {
+        selectTickerForPrimaryChart(successes[0]);
+        setTickerSearchCandidates([]);
+      }
+      if (failures.length > 0) {
+        setNewSymbolInput(failures.map((failure) => failure.split(':', 1)[0]).join(', '));
+        setTickerSearchError(
+          `${successes.length}件を追加しました。失敗: ${failures.join(' / ')}`
+        );
+      } else {
+        setNewSymbolInput('');
+        setTickerSearchOpen(false);
+      }
+      return;
+    }
+
+    await registerTickerInput(queryInput);
   };
 
   const beginWatchlistImport = (mode: WatchlistImportMode) => {
@@ -2348,6 +2468,7 @@ export default function App() {
     // Pick reference sym from available tickers list
     const currentSymbols = panels.map(p => p.symbol);
     const fallbackTicker = tickers.find(t => !currentSymbols.includes(t.symbol)) || tickers[0];
+    const fallbackIsExpression = Boolean(fallbackTicker && parseSymbolExpression(fallbackTicker.symbol));
     
     const newId = `panel-${Date.now()}`;
     const newPanel: ChartPanel = {
@@ -2356,9 +2477,9 @@ export default function App() {
       timeframe: '5m',
       zoomFactor: 12,
       scrollOffsetPct: 100,
-      showRsi: true,
+      showRsi: !fallbackIsExpression,
       showMacd: false,
-      showVolume: true,
+      showVolume: !fallbackIsExpression,
       priceScale: 1,
       rsiHeightPct: 25,
       macdHeightPct: 25,
@@ -2500,6 +2621,38 @@ export default function App() {
     });
   }, [activeWatchlistTab, tickerStatsBySymbol, watchlistSort]);
 
+  const getComparableSymbolsForPanel = (
+    panel: ChartPanel,
+    symbols: string[],
+  ): string[] => {
+    const currentComparisons = new Set(panel.comparisonSymbols || []);
+    return Array.from(new Set(symbols)).filter((symbol) => {
+      if (!symbol || symbol === panel.symbol || currentComparisons.has(symbol)) return false;
+      const ticker = tickerStatsBySymbol.get(symbol);
+      return !moomooRealTimeActive || ticker?.currentPrice !== null;
+    });
+  };
+
+  const addComparisonSymbolsToPanel = (panel: ChartPanel, symbols: string[]) => {
+    const symbolsToAdd = getComparableSymbolsForPanel(panel, symbols);
+    if (symbolsToAdd.length === 0) {
+      return false;
+    }
+    handleUpdatePanel(panel.id, {
+      comparisonSymbols: [
+        ...(panel.comparisonSymbols || []),
+        ...symbolsToAdd,
+      ],
+    });
+    setActiveComparisonPopoverPanelId(null);
+    return true;
+  };
+
+  const getDraggedTickerSymbols = () => {
+    if (!draggedTicker) return [];
+    return draggedTicker.symbols.length > 0 ? draggedTicker.symbols : [draggedTicker.symbol];
+  };
+
   return (
     <div className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25">
       
@@ -2570,8 +2723,11 @@ export default function App() {
                   {col.map((panel, pIdx) => {
                     const panelExpression = normalizeSymbolExpressionForStorage(panel.symbol);
                     const pCandles = resolveCandlesForSymbol(panel.symbol, panel.timeframe, candlesCache);
-                    const pSettings = indicatorDatabase[panel.symbol.toUpperCase()] || createDefaultIndicatorSettings(panel.symbol);
+                    const pSettings = panelExpression
+                      ? createDefaultIndicatorSettings(panel.symbol)
+                      : indicatorDatabase[panel.symbol.toUpperCase()] || createDefaultIndicatorSettings(panel.symbol);
                     const isTvEmbed = Boolean(panelEngineToggle[panel.id]) && !panelExpression;
+                    const selectedComparisonCandidates = getComparableSymbolsForPanel(panel, selectedSymbols);
 
                     return (
                       <React.Fragment key={panel.id}>
@@ -2579,6 +2735,19 @@ export default function App() {
                           id={`chart-panel-container-${panel.id}`}
                           style={{
                             height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
+                          }}
+                          onDragOver={(event) => {
+                            if (draggedTicker && !isTvEmbed) {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = 'copy';
+                            }
+                          }}
+                          onDrop={(event) => {
+                            if (!draggedTicker || isTvEmbed) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            addComparisonSymbolsToPanel(panel, getDraggedTickerSymbols());
+                            setDraggedTicker(null);
                           }}
                           className="w-full flex flex-col shrink-0"
                         >
@@ -2731,22 +2900,31 @@ export default function App() {
                                 {!isTvEmbed && (
                                   <div className="hidden sm:flex items-center space-x-1.5 bg-[#171717]/70 px-2 py-0.5 rounded text-[10px]">
                                     <button
-                                      onClick={() => handleUpdatePanel(panel.id, { showVolume: !panel.showVolume })}
-                                      className={`px-1 rounded ${panel.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500'}`}
+                                      onClick={() => {
+                                        if (!panelExpression) handleUpdatePanel(panel.id, { showVolume: !panel.showVolume });
+                                      }}
+                                      disabled={Boolean(panelExpression)}
+                                      className={`px-1 rounded ${!panelExpression && panel.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500'} ${panelExpression ? 'cursor-not-allowed opacity-50' : ''}`}
                                       title="出来高を表示"
                                     >
                                       出来高
                                     </button>
                                     <button
-                                      onClick={() => handleUpdatePanel(panel.id, { showRsi: !panel.showRsi })}
-                                      className={`px-1 rounded ${panel.showRsi ? 'text-[#f3a14b] font-bold bg-[#342416]' : 'text-gray-500'}`}
+                                      onClick={() => {
+                                        if (!panelExpression) handleUpdatePanel(panel.id, { showRsi: !panel.showRsi });
+                                      }}
+                                      disabled={Boolean(panelExpression)}
+                                      className={`px-1 rounded ${!panelExpression && panel.showRsi ? 'text-[#f3a14b] font-bold bg-[#342416]' : 'text-gray-500'} ${panelExpression ? 'cursor-not-allowed opacity-50' : ''}`}
                                       title="RSIサブ画面を表示"
                                     >
                                       RSI
                                     </button>
                                     <button
-                                      onClick={() => handleUpdatePanel(panel.id, { showMacd: !panel.showMacd })}
-                                      className={`px-1 rounded ${panel.showMacd ? 'text-emerald-400 font-bold bg-[#0f2a22]' : 'text-gray-500'}`}
+                                      onClick={() => {
+                                        if (!panelExpression) handleUpdatePanel(panel.id, { showMacd: !panel.showMacd });
+                                      }}
+                                      disabled={Boolean(panelExpression)}
+                                      className={`px-1 rounded ${!panelExpression && panel.showMacd ? 'text-emerald-400 font-bold bg-[#0f2a22]' : 'text-gray-500'} ${panelExpression ? 'cursor-not-allowed opacity-50' : ''}`}
                                       title="MACDサブ画面を表示"
                                     >
                                       MACD
@@ -2757,9 +2935,17 @@ export default function App() {
                                 {/* PLUS BUTTON - OVERLAY MULTIPLE COMPARISONS */}
                                 {!isTvEmbed && (
                                   <button
-                                    onClick={() => setActiveComparisonPopoverPanelId(activeComparisonPopoverPanelId === panel.id ? null : panel.id)}
+                                    onClick={() => {
+                                      if (selectedComparisonCandidates.length > 0) {
+                                        addComparisonSymbolsToPanel(panel, selectedSymbols);
+                                        return;
+                                      }
+                                      setActiveComparisonPopoverPanelId(activeComparisonPopoverPanelId === panel.id ? null : panel.id);
+                                    }}
                                     className={`p-1.5 hover:bg-[#202020] rounded text-gray-400 hover:text-white transition cursor-pointer flex items-center justify-center ${activeComparisonPopoverPanelId === panel.id ? 'text-emerald-400 bg-[#171717] border border-emerald-500/30' : ''}`}
-                                    title="このチャート内に他銘柄を比較追加する (+)"
+                                    title={selectedComparisonCandidates.length > 0
+                                      ? `選択中の${selectedComparisonCandidates.length}銘柄を比較追加`
+                                      : 'このチャート内に他銘柄を比較追加する (+)'}
                                   >
                                     <Plus className="w-3.5 h-3.5 stroke-[2.8]" />
                                   </button>
@@ -2798,9 +2984,9 @@ export default function App() {
                                   setZoomFactor={(zf) => handleUpdatePanel(panel.id, { zoomFactor: zf })}
                                   scrollOffsetPct={panel.scrollOffsetPct}
                                   setScrollOffsetPct={(offset) => handleUpdatePanel(panel.id, { scrollOffsetPct: offset })}
-                                  showVolume={panel.showVolume}
-                                  showRsi={panel.showRsi}
-                                  showMacd={panel.showMacd}
+                                  showVolume={!panelExpression && panel.showVolume}
+                                  showRsi={!panelExpression && panel.showRsi}
+                                  showMacd={!panelExpression && panel.showMacd}
                                   comparisonSymbols={panel.comparisonSymbols || []}
                                   comparisonCandles={
                                     (panel.comparisonSymbols || []).reduce((acc, compSym) => {
@@ -3276,7 +3462,7 @@ export default function App() {
                     <Search className="absolute left-2 top-2 w-3 h-3 text-gray-500" />
                     <input
                       type="text"
-                      placeholder="AAPL、CRM/SPY、US10Y.BD-JP10Y.BD"
+                      placeholder="AAPL,MSFT,CRM/SPY"
                       value={newSymbolInput}
                       onChange={(e) => setNewSymbolInput(e.target.value)}
                       className="h-7 bg-[#121212] border border-[#303030] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-emerald-500 placeholder-gray-600"
@@ -3293,7 +3479,7 @@ export default function App() {
                   </button>
                 </form>
                 <div className="mt-1 text-[9px] text-gray-600">
-                  銘柄検索のほか、割り算は「CRM/SPY」、引き算は「左辺-右辺」で追加できます。
+                  カンマ区切りで複数追加できます。割り算は「CRM/SPY」、引き算は「左辺-右辺」。
                 </div>
 
                 {tickerSearchError && (
@@ -3453,10 +3639,16 @@ export default function App() {
                         <div
                           key={`${section.id}-${ticker.symbol}`}
                           draggable
-                          onDragStart={() => {
+                          onDragStart={(event) => {
+                            const dragSymbols =
+                              selectedSymbols.includes(ticker.symbol) && selectedSymbols.length > 1
+                                ? selectedSymbols
+                                : [ticker.symbol];
+                            event.dataTransfer.effectAllowed = 'copyMove';
+                            event.dataTransfer.setData('text/plain', dragSymbols.join(','));
                             setWatchlistSort({ column: null, direction: null });
                             setDraggedSectionId(null);
-                            setDraggedTicker({ symbol: ticker.symbol, sectionId: section.id });
+                            setDraggedTicker({ symbol: ticker.symbol, symbols: dragSymbols, sectionId: section.id });
                           }}
                           onDragEnd={() => setDraggedTicker(null)}
                           onDragOver={(event) => event.preventDefault()}
@@ -3472,7 +3664,7 @@ export default function App() {
                               : isSelectedPrimary
                               ? 'bg-emerald-950/20 ring-1 ring-inset ring-gray-700'
                               : 'hover:bg-[#171717]'
-                          } ${draggedTicker?.symbol === ticker.symbol ? 'opacity-45' : ''}`}
+                          } ${draggedTicker?.symbols.includes(ticker.symbol) ? 'opacity-45' : ''}`}
                           style={{ gridTemplateColumns: watchlistGridTemplate }}
                         >
                           <div

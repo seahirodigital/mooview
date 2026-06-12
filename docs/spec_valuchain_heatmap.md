@@ -2,6 +2,10 @@
 
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
+| 今回追加修正 | 保存済みシンボルとキャンドルキャッシュの表記ゆれを正規化し、AVGO/QCOMのような一部銘柄だけチャートが空になる問題を解消する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回検証 | `npm.cmd run lint`、`npm.cmd run build`、`python -m py_compile moomoo_gateway.py` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | ヘッダー銘柄の変動率が0%固定にならないよう、Moomooスナップショットの変動率/変動額/前日終値フィールドを補完してchangePctを算出する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\moomoo_gateway.py` |
+| 今回検証 | `python -m py_compile moomoo_gateway.py`、`npm.cmd run lint`、`npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | Gridの空セルの罫線を削除し、主要境界だけを暗い線で残し、銘柄カードの余白・角丸・文字階層を調整する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する。buildはサンドボックス内でディレクトリ参照制限に当たったため外側権限で再実行し成功 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回未確認 | ユーザーのブラウザ上でビジュアル確認し、push可否を判断する | 未完了 | `C:\Users\mahha\OneDrive\開発\mooview` |

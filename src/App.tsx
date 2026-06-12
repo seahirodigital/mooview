@@ -152,6 +152,10 @@ function normalizeStoredCandlesCache(raw: unknown): Record<string, Candle[]> {
   const next: Record<string, Candle[]> = {};
   Object.entries(raw as Record<string, unknown>).forEach(([key, value]) => {
     if (!Array.isArray(value)) return;
+    const dashIndex = key.indexOf('-');
+    const symbolPart = dashIndex >= 0 ? key.slice(0, dashIndex) : key;
+    const timeframePart = dashIndex >= 0 ? key.slice(dashIndex) : '';
+    const normalizedKey = `${normalizeStoredSymbolValue(symbolPart)}${timeframePart}`;
     const candles = value.filter((item): item is Candle => {
       if (!item || typeof item !== 'object') return false;
       const candle = item as Partial<Candle>;
@@ -163,7 +167,11 @@ function normalizeStoredCandlesCache(raw: unknown): Record<string, Candle[]> {
         && Number.isFinite(Number(candle.volume));
     });
     if (candles.length > 0) {
-      next[key] = candles.slice(-CANDLES_CACHE_MAX_LENGTH);
+      const nextCandles = candles.slice(-CANDLES_CACHE_MAX_LENGTH);
+      const existing = next[normalizedKey];
+      next[normalizedKey] = existing && existing.length > nextCandles.length
+        ? existing
+        : nextCandles;
     }
   });
   return next;
@@ -182,12 +190,19 @@ function normalizeTimestampMap(raw: unknown): Record<string, number> {
 }
 
 function compactCandlesCache(cache: Record<string, Candle[]>): Record<string, Candle[]> {
-  return Object.fromEntries(
-    Object.entries(cache).map(([key, candles]) => [
-      key,
-      candles.slice(-CANDLES_CACHE_MAX_LENGTH),
-    ]),
-  );
+  const next: Record<string, Candle[]> = {};
+  Object.entries(cache).forEach(([key, candles]) => {
+    const dashIndex = key.indexOf('-');
+    const symbolPart = dashIndex >= 0 ? key.slice(0, dashIndex) : key;
+    const timeframePart = dashIndex >= 0 ? key.slice(dashIndex) : '';
+    const normalizedKey = `${normalizeStoredSymbolValue(symbolPart)}${timeframePart}`;
+    const nextCandles = candles.slice(-CANDLES_CACHE_MAX_LENGTH);
+    const existing = next[normalizedKey];
+    next[normalizedKey] = existing && existing.length > nextCandles.length
+      ? existing
+      : nextCandles;
+  });
+  return next;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -209,8 +224,15 @@ async function mapWithConcurrency<T, R>(
 }
 
 function normalizePanel(panel: ChartPanel): ChartPanel {
+  const normalizedComparisonSymbols = Array.from(new Set(
+    (panel.comparisonSymbols || [])
+      .map((symbol) => normalizeStoredSymbolValue(symbol))
+      .filter(Boolean),
+  ));
   return {
     ...panel,
+    symbol: normalizeStoredSymbolValue(panel.symbol),
+    comparisonSymbols: normalizedComparisonSymbols.length > 0 ? normalizedComparisonSymbols : panel.comparisonSymbols,
     timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
     priceScale: panel.priceScale ?? 1,
     priceOffsetPct: panel.priceOffsetPct ?? 0,
@@ -439,6 +461,14 @@ function normalizeTickerSymbolForStorage(rawSymbol: string): string {
   return upper;
 }
 
+function normalizeStoredSymbolValue(rawSymbol: string): string {
+  const expression = normalizeSymbolExpressionForStorage(rawSymbol);
+  if (expression) {
+    return formatSymbolExpression(expression);
+  }
+  return normalizeTickerSymbolForStorage(rawSymbol);
+}
+
 function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpression | null {
   const expression = parseSymbolExpression(rawExpression);
   if (!expression) return null;
@@ -454,7 +484,7 @@ function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpre
 
 function getStoredSymbolOperands(symbol: string): string[] {
   const expression = normalizeSymbolExpressionForStorage(symbol);
-  return expression ? [expression.left, expression.right] : [symbol];
+  return expression ? [expression.left, expression.right] : [normalizeStoredSymbolValue(symbol)];
 }
 
 function resolveCandlesForSymbol(
@@ -464,7 +494,8 @@ function resolveCandlesForSymbol(
 ): Candle[] {
   const expression = normalizeSymbolExpressionForStorage(symbol);
   if (!expression) {
-    return cache[`${symbol}-${timeframe}`] || [];
+    const canonicalSymbol = normalizeStoredSymbolValue(symbol);
+    return cache[`${canonicalSymbol}-${timeframe}`] || cache[`${symbol}-${timeframe}`] || [];
   }
   return combineExpressionCandles(
     expression,
@@ -802,7 +833,12 @@ export default function App() {
     const saved = localStorage.getItem('tv_dashboard_tickers');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved) as TickerInfo[];
+        return parsed.map((ticker) => ({
+          ...ticker,
+          symbol: normalizeStoredSymbolValue(ticker.symbol),
+          name: ticker.name || normalizeStoredSymbolValue(ticker.symbol),
+        }));
       } catch (e) {
         console.error("Failed to parse tickers, resetting", e);
       }

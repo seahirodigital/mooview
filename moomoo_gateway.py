@@ -112,6 +112,22 @@ def as_float(value: Any, default: float = 0.0) -> float:
     return result if math.isfinite(result) else default
 
 
+def as_optional_float(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def first_optional_float(row: Any, field_names: List[str]) -> Optional[float]:
+    for field_name in field_names:
+        value = as_optional_float(row.get(field_name))
+        if value is not None:
+            return value
+    return None
+
+
 def market_timestamp(symbol: str, time_key: str) -> int:
     market = symbol.split(".", 1)[0]
     timezone = pytz.timezone(MARKET_TIMEZONES.get(market, "UTC"))
@@ -177,11 +193,43 @@ class MoomooQuoteService:
     def _quote_from_row(self, row: Any) -> Dict[str, Any]:
         symbol = str(row.get("code", ""))
         last_price = as_float(row.get("last_price"))
-        previous_close = as_float(row.get("prev_close_price"))
-        change_pct = (
+        previous_close = first_optional_float(
+            row,
+            [
+                "prev_close_price",
+                "previous_close",
+                "previous_close_price",
+                "pre_close",
+                "pre_close_price",
+            ],
+        )
+        net_change = first_optional_float(
+            row,
+            ["net_change", "price_change", "change", "change_value"],
+        )
+        if (previous_close is None or previous_close == 0.0) and net_change is not None:
+            previous_close = last_price - net_change
+
+        direct_change_pct = first_optional_float(
+            row,
+            [
+                "change_rate",
+                "change_ratio",
+                "change_pct",
+                "changePct",
+                "pct_chg",
+                "percent_change",
+            ],
+        )
+        calculated_change_pct = (
             ((last_price - previous_close) / previous_close) * 100
             if previous_close
-            else 0.0
+            else None
+        )
+        change_pct = (
+            calculated_change_pct
+            if calculated_change_pct is not None and (direct_change_pct is None or direct_change_pct == 0.0)
+            else direct_change_pct
         )
         return {
             "success": True,
@@ -191,9 +239,9 @@ class MoomooQuoteService:
             "open": as_float(row.get("open_price")),
             "high": as_float(row.get("high_price")),
             "low": as_float(row.get("low_price")),
-            "previousClose": previous_close,
+            "previousClose": previous_close or 0.0,
             "volume": int(as_float(row.get("volume"))),
-            "changePct": change_pct,
+            "changePct": change_pct or 0.0,
             "dataDate": str(row.get("update_time", "")).split(" ", 1)[0],
             "dataTime": (
                 str(row.get("update_time", "")).split(" ", 1)[1]

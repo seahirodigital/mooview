@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Plus, 
+  Minus,
   Settings, 
   Trash2, 
   Database,
@@ -53,6 +54,8 @@ const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
 const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
+const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
+const DEFAULT_HEADER_TICKER_SYMBOLS = DEFAULT_TICKERS.slice(0, 6).map((ticker) => ticker.symbol);
 
 interface WatchlistSection {
   id: string;
@@ -210,6 +213,7 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
     ...panel,
     timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
     priceScale: panel.priceScale ?? 1,
+    priceOffsetPct: panel.priceOffsetPct ?? 0,
     rsiHeightPct: panel.rsiHeightPct ?? 25,
     macdHeightPct: panel.macdHeightPct ?? 25,
   };
@@ -670,6 +674,23 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
   };
 }
 
+function createValueChainDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings {
+  const defaults = createDefaultIndicatorSettings(symbol);
+  const isExpression = parseSymbolExpression(symbol) !== null;
+  return {
+    ...defaults,
+    indicators: {
+      ...defaults.indicators,
+      ma: { ...defaults.indicators.ma, enabled: false },
+      ema: { ...defaults.indicators.ema, enabled: false },
+      boll: { ...defaults.indicators.boll, enabled: false },
+      rsi: { ...defaults.indicators.rsi, enabled: !isExpression },
+      macd: { ...defaults.indicators.macd, enabled: !isExpression },
+      vrvp: { ...defaults.indicators.vrvp, enabled: !isExpression },
+    },
+  };
+}
+
 function normalizeIndicatorSettings(
   symbol: string,
   raw?: Partial<SymbolIndicatorSettings>,
@@ -788,6 +809,20 @@ export default function App() {
     }
     return DEFAULT_TICKERS;
   });
+  const [headerTickerSymbols, setHeaderTickerSymbols] = useState<string[]>(() => {
+    const savedSymbols = readStoredValue<string[]>(HEADER_TICKER_SYMBOLS_STORAGE_KEY, DEFAULT_HEADER_TICKER_SYMBOLS);
+    const normalized = Array.from(new Set(
+      savedSymbols.map((symbol) => normalizeTickerSymbolForStorage(symbol)).filter(Boolean),
+    ));
+    return normalized.length > 0 ? normalized : DEFAULT_HEADER_TICKER_SYMBOLS;
+  });
+  const [headerTickerMenu, setHeaderTickerMenu] = useState<'add' | 'remove' | null>(null);
+  const headerTickerViewportRef = useRef<HTMLDivElement | null>(null);
+  const headerTickerTrackRef = useRef<HTMLDivElement | null>(null);
+  const [headerTickerOverflow, setHeaderTickerOverflow] = useState(false);
+  const previousHeaderTickerValuesRef = useRef<Record<string, number | null>>({});
+  const headerTickerFlashTimeoutRef = useRef<number | null>(null);
+  const [headerTickerFlash, setHeaderTickerFlash] = useState<Record<string, 'up' | 'down'>>({});
 
   const [newSymbolInput, setNewSymbolInput] = useState('');
   const [tickerSearchOpen, setTickerSearchOpen] = useState(false);
@@ -878,6 +913,7 @@ export default function App() {
         showMacd: false,
         showVolume: true,
         priceScale: 1,
+        priceOffsetPct: 0,
         rsiHeightPct: 25,
         macdHeightPct: 25,
       },
@@ -891,6 +927,7 @@ export default function App() {
         showMacd: true,
         showVolume: true,
         priceScale: 1,
+        priceOffsetPct: 0,
         rsiHeightPct: 25,
         macdHeightPct: 25,
       }
@@ -900,13 +937,14 @@ export default function App() {
     normalizePanel({
       id: 'value-chain-side-chart',
       symbol: 'NVDA',
-      timeframe: '5m',
+      timeframe: '1d',
       zoomFactor: 8,
-      scrollOffsetPct: 0,
-      showRsi: false,
-      showMacd: false,
+      scrollOffsetPct: 100,
+      showRsi: true,
+      showMacd: true,
       showVolume: true,
       priceScale: 1,
+      priceOffsetPct: 0,
       rsiHeightPct: 25,
       macdHeightPct: 25,
     })
@@ -1011,6 +1049,27 @@ export default function App() {
   }, [tickers]);
 
   useEffect(() => {
+    setHeaderTickerSymbols((current) => {
+      const knownSymbols = new Set(tickers.map((ticker) => ticker.symbol));
+      const filtered = current.filter((symbol) => knownSymbols.has(symbol));
+      const fallback = tickers.slice(0, 6).map((ticker) => ticker.symbol);
+      const next = filtered.length > 0 ? filtered : fallback;
+      return next.join('|') === current.join('|') ? current : next;
+    });
+  }, [tickers]);
+
+  useEffect(() => {
+    localStorage.setItem(HEADER_TICKER_SYMBOLS_STORAGE_KEY, JSON.stringify(headerTickerSymbols));
+  }, [headerTickerSymbols]);
+
+  useEffect(() => {
+    if (!headerTickerMenu) return;
+    const closeMenu = () => setHeaderTickerMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [headerTickerMenu]);
+
+  useEffect(() => {
     localStorage.setItem('mooview_active_view', JSON.stringify(appView));
   }, [appView]);
 
@@ -1041,6 +1100,26 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tv_dashboard_indicators', JSON.stringify(indicatorDatabase));
   }, [indicatorDatabase]);
+
+  useEffect(() => {
+    setIndicatorDatabase((current) => {
+      let changed = false;
+      const next = { ...current };
+      valueChainChartSymbols.forEach((symbol) => {
+        const symbolKey = symbol.toUpperCase();
+        const currentSettings = current[symbolKey];
+        const genericDefault = createDefaultIndicatorSettings(symbolKey);
+        if (
+          !currentSettings
+          || JSON.stringify(currentSettings) === JSON.stringify(genericDefault)
+        ) {
+          next[symbolKey] = createValueChainDefaultIndicatorSettings(symbolKey);
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [valueChainChartSymbols]);
 
   useEffect(() => {
     localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
@@ -2545,6 +2624,7 @@ export default function App() {
       showMacd: false,
       showVolume: !fallbackIsExpression,
       priceScale: 1,
+      priceOffsetPct: 0,
       rsiHeightPct: 25,
       macdHeightPct: 25,
     };
@@ -2627,6 +2707,67 @@ export default function App() {
   const tickerStatsBySymbol = useMemo(() => {
     return new Map(liveTickerStats.map((ticker) => [ticker.symbol, ticker]));
   }, [liveTickerStats]);
+
+  const headerTickerStats = useMemo(() => (
+    headerTickerSymbols
+      .map((symbol) => tickerStatsBySymbol.get(symbol))
+      .filter((ticker): ticker is TickerInfo & { currentPrice: number | null; computedChange: number | null } => Boolean(ticker))
+  ), [headerTickerSymbols, tickerStatsBySymbol]);
+
+  const headerTickerAddOptions = useMemo(() => {
+    const shownSymbols = new Set(headerTickerSymbols);
+    return tickers.filter((ticker) => !shownSymbols.has(ticker.symbol));
+  }, [headerTickerSymbols, tickers]);
+
+  useEffect(() => {
+    const viewport = headerTickerViewportRef.current;
+    const track = headerTickerTrackRef.current;
+    if (!viewport || !track) return;
+
+    const measure = () => {
+      const contentWidth = headerTickerOverflow ? track.scrollWidth / 2 : track.scrollWidth;
+      setHeaderTickerOverflow(contentWidth > viewport.clientWidth + 2);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    observer.observe(track);
+    return () => observer.disconnect();
+  }, [headerTickerOverflow, headerTickerStats.length, headerTickerSymbols.join('|')]);
+
+  useEffect(() => {
+    if (!moomooRealTimeActive) {
+      previousHeaderTickerValuesRef.current = {};
+      setHeaderTickerFlash({});
+      return;
+    }
+
+    const nextFlash: Record<string, 'up' | 'down'> = {};
+    const nextValues: Record<string, number | null> = {};
+    headerTickerStats.forEach((ticker) => {
+      nextValues[ticker.symbol] = ticker.currentPrice;
+      const previousPrice = previousHeaderTickerValuesRef.current[ticker.symbol];
+      if (
+        previousPrice !== undefined
+        && previousPrice !== null
+        && ticker.currentPrice !== null
+        && ticker.currentPrice !== previousPrice
+      ) {
+        nextFlash[ticker.symbol] = ticker.currentPrice > previousPrice ? 'up' : 'down';
+      }
+    });
+    previousHeaderTickerValuesRef.current = nextValues;
+
+    if (Object.keys(nextFlash).length === 0) return;
+    setHeaderTickerFlash((current) => ({ ...current, ...nextFlash }));
+    if (headerTickerFlashTimeoutRef.current !== null) {
+      window.clearTimeout(headerTickerFlashTimeoutRef.current);
+    }
+    headerTickerFlashTimeoutRef.current = window.setTimeout(() => {
+      setHeaderTickerFlash({});
+      headerTickerFlashTimeoutRef.current = null;
+    }, 900);
+  }, [headerTickerStats, moomooRealTimeActive]);
 
   const activeWatchlistTab = useMemo(() => {
     return watchlistTabs.find((tab) => tab.id === activeWatchlistTabId) ?? watchlistTabs[0];
@@ -2740,7 +2881,7 @@ export default function App() {
       : generateCandles(symbol, valueChainChartState.timeframe, 220);
     const chartSettings = panelExpression
       ? createDefaultIndicatorSettings(symbol)
-      : indicatorDatabase[symbol.toUpperCase()] || createDefaultIndicatorSettings(symbol);
+      : indicatorDatabase[symbol.toUpperCase()] || createValueChainDefaultIndicatorSettings(symbol);
     const comparableSymbols = Array.from(new Set(comparisonSymbols))
       .filter((comparisonSymbol) => comparisonSymbol && comparisonSymbol !== symbol);
 
@@ -2784,6 +2925,10 @@ export default function App() {
         setPriceScale={(priceScale) =>
           setValueChainChartState((current) => ({ ...current, priceScale }))
         }
+        priceOffsetPct={valueChainChartState.priceOffsetPct ?? 0}
+        setPriceOffsetPct={(priceOffsetPct) =>
+          setValueChainChartState((current) => ({ ...current, priceOffsetPct }))
+        }
         rsiHeightPct={valueChainChartState.rsiHeightPct ?? 25}
         setRsiHeightPct={(rsiHeightPct) =>
           setValueChainChartState((current) => ({ ...current, rsiHeightPct }))
@@ -2792,7 +2937,7 @@ export default function App() {
         setMacdHeightPct={(macdHeightPct) =>
           setValueChainChartState((current) => ({ ...current, macdHeightPct }))
         }
-        onOpenIndicatorSettings={onOpenIndicatorSettings ?? (() => openIndicatorSettingsForSymbol(symbol))}
+        onOpenIndicatorSettings={onOpenIndicatorSettings}
         allowNegativeValues={Boolean(panelExpression)}
         valuePrecision={panelExpression ? 4 : 2}
       />
@@ -2801,23 +2946,48 @@ export default function App() {
 
   const renderValueChainIndicatorSettings = (symbol: string) => {
     const symbolKey = symbol.toUpperCase();
-    const settings = indicatorDatabase[symbolKey] || createDefaultIndicatorSettings(symbolKey);
+    const settings = indicatorDatabase[symbolKey] || createValueChainDefaultIndicatorSettings(symbolKey);
     return (
       <IndicatorSettingsPanel
         settings={settings}
         onChange={handleUpdateIndicators}
-        onReset={() => handleResetIndicators(symbolKey)}
+        onReset={() => setIndicatorDatabase((current) => ({
+          ...current,
+          [symbolKey]: createValueChainDefaultIndicatorSettings(symbolKey),
+        }))}
       />
     );
   };
 
+  const addHeaderTickerSymbol = (symbol: string) => {
+    setHeaderTickerSymbols((current) => (
+      current.includes(symbol) ? current : [...current, symbol]
+    ));
+    setHeaderTickerMenu(null);
+  };
+
+  const removeHeaderTickerSymbol = (symbol: string) => {
+    setHeaderTickerSymbols((current) => {
+      if (current.length <= 1) return current;
+      return current.filter((item) => item !== symbol);
+    });
+    setHeaderTickerMenu(null);
+  };
+
   return (
     <div className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25">
+      <style>
+        {`
+          @keyframes mooview-header-marquee {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+          }
+        `}
+      </style>
       
       {/* Dynamic Upper Banner with real-time quote ticks */}
-      <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none flex items-center justify-between text-xs">
-        <div className="flex items-center space-x-6 min-w-0">
-          <div className="flex items-center space-x-2 shrink-0">
+      <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-hidden whitespace-nowrap flex items-center gap-4 text-xs">
+        <div className="flex items-center space-x-2 shrink-0">
             <button
               type="button"
               onClick={() => setWorkspaceMenuOpen((open) => !open)}
@@ -2829,34 +2999,96 @@ export default function App() {
             </button>
             <span className="font-bold tracking-tight text-white uppercase text-xs">MooView</span>
           </div>
-          <div className="h-4 w-px bg-[#2a2a2a]" />
-          <div className="flex items-center space-x-5">
-            {liveTickerStats.slice(0, 6).map((ticker) => {
-              const hasRealQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
-              const pos = hasRealQuote && ticker.computedChange >= 0;
-              return (
-                <div 
-                  key={ticker.symbol} 
-                  className="inline-flex flex-col cursor-pointer hover:bg-[#181818] px-2 py-0.5 rounded transition-colors"
-                  onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
-                  title="左側のチャートに表示する"
-                >
-                  <div className="flex items-center space-x-1.5">
-                    <span className="font-bold text-gray-200 text-xs">{ticker.symbol}</span>
-                    <span className={`text-[10px] font-mono font-bold ${
-                      !hasRealQuote ? 'text-gray-500' : pos ? 'text-[#26a69a]' : 'text-[#ef5350]'
-                    }`}>
-                      {hasRealQuote
-                        ? `${pos ? '▲' : '▼'} ${Math.abs(ticker.computedChange).toFixed(2)}%`
-                        : 'N/A'}
+        <div className="h-4 w-px bg-[#2a2a2a] shrink-0" />
+        <div className="min-w-0 flex-1 flex items-center gap-1">
+          <div ref={headerTickerViewportRef} className="min-w-0 flex-1 overflow-hidden">
+            <div
+              ref={headerTickerTrackRef}
+              className="flex items-center gap-3 min-w-max"
+              style={{
+                animation: headerTickerOverflow && headerTickerStats.length > 1
+                  ? 'mooview-header-marquee 42s linear infinite'
+                  : 'none',
+              }}
+            >
+              {(headerTickerOverflow ? [...headerTickerStats, ...headerTickerStats] : headerTickerStats).map((ticker, index) => {
+                const hasRealQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
+                const pos = hasRealQuote && ticker.computedChange >= 0;
+                const flash = headerTickerFlash[ticker.symbol];
+                return (
+                  <button
+                    type="button"
+                    key={`${ticker.symbol}-${index}`}
+                    className="inline-flex flex-col cursor-pointer hover:bg-[#181818] px-2 py-0.5 rounded transition-colors border border-transparent"
+                    onClick={() => selectTickerForPrimaryChart(ticker.symbol)}
+                    title="左側のチャートに表示する"
+                    style={{
+                      backgroundColor: flash === 'up'
+                        ? 'rgba(16, 185, 129, 0.18)'
+                        : flash === 'down'
+                          ? 'rgba(239, 83, 80, 0.18)'
+                          : undefined,
+                      boxShadow: flash ? `inset 0 0 0 1px ${flash === 'up' ? 'rgba(16, 185, 129, 0.30)' : 'rgba(239, 83, 80, 0.30)'}` : undefined,
+                    }}
+                  >
+                    <div className="flex items-center space-x-1.5">
+                      <span className="font-bold text-gray-200 text-xs">{ticker.symbol}</span>
+                      <span className={`text-[10px] font-mono font-bold ${
+                        !hasRealQuote ? 'text-gray-500' : pos ? 'text-[#26a69a]' : 'text-[#ef5350]'
+                      }`}>
+                        {hasRealQuote
+                          ? `${pos ? '▲' : '▼'} ${Math.abs(ticker.computedChange).toFixed(2)}%`
+                          : 'N/A'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-gray-400 font-mono mt-0.5 text-left">
+                      {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
                     </span>
-                  </div>
-                  <span className="text-[10px] text-gray-400 font-mono mt-0.5">
-                    {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
-                  </span>
-                </div>
-              );
-            })}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="relative flex flex-col gap-0.5 shrink-0" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setHeaderTickerMenu((menu) => menu === 'add' ? null : 'add')}
+              className="w-5 h-4 border border-[#2a2a2a] bg-[#101010] text-gray-300 hover:text-white hover:bg-[#181818] flex items-center justify-center"
+              aria-label="ヘッダー表示銘柄を追加"
+              title="ヘッダー表示銘柄を追加"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setHeaderTickerMenu((menu) => menu === 'remove' ? null : 'remove')}
+              className="w-5 h-4 border border-[#2a2a2a] bg-[#101010] text-gray-300 hover:text-white hover:bg-[#181818] flex items-center justify-center"
+              aria-label="ヘッダー表示銘柄を削除"
+              title="ヘッダー表示銘柄を削除"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            {headerTickerMenu && (
+              <div className="absolute left-6 top-0 z-50 w-48 max-h-72 overflow-y-auto bg-[#080808] border border-[#303030] shadow-2xl py-1 text-[10px]">
+                {(headerTickerMenu === 'add' ? headerTickerAddOptions : headerTickerStats).length === 0 ? (
+                  <div className="px-2.5 py-2 text-gray-500">対象なし</div>
+                ) : (
+                  (headerTickerMenu === 'add' ? headerTickerAddOptions : headerTickerStats).map((ticker) => (
+                    <button
+                      key={ticker.symbol}
+                      type="button"
+                      onClick={() => headerTickerMenu === 'add'
+                        ? addHeaderTickerSymbol(ticker.symbol)
+                        : removeHeaderTickerSymbol(ticker.symbol)}
+                      className="w-full px-2.5 py-1.5 flex items-center justify-between gap-2 text-left hover:bg-[#171717]"
+                    >
+                      <span className="font-mono font-bold text-gray-100">{ticker.symbol}</span>
+                      <span className="min-w-0 truncate text-gray-500">{ticker.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         </div>
         
@@ -3226,6 +3458,8 @@ export default function App() {
                                   emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
                                   priceScale={panel.priceScale ?? 1}
                                   setPriceScale={(scale) => handleUpdatePanel(panel.id, { priceScale: scale })}
+                                  priceOffsetPct={panel.priceOffsetPct ?? 0}
+                                  setPriceOffsetPct={(offset) => handleUpdatePanel(panel.id, { priceOffsetPct: offset })}
                                   rsiHeightPct={panel.rsiHeightPct ?? 25}
                                   setRsiHeightPct={(pct) => handleUpdatePanel(panel.id, { rsiHeightPct: pct })}
                                   macdHeightPct={panel.macdHeightPct ?? 25}

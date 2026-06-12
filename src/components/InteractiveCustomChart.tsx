@@ -27,6 +27,8 @@ interface InteractiveCustomChartProps {
   emptyMessage?: string;
   priceScale: number;
   setPriceScale: (scale: number) => void;
+  priceOffsetPct: number;
+  setPriceOffsetPct: (offset: number) => void;
   rsiHeightPct: number;
   setRsiHeightPct: (pct: number) => void;
   macdHeightPct: number;
@@ -133,6 +135,8 @@ export function InteractiveCustomChart({
   emptyMessage = 'データを取得中...',
   priceScale,
   setPriceScale,
+  priceOffsetPct,
+  setPriceOffsetPct,
   rsiHeightPct,
   setRsiHeightPct,
   macdHeightPct,
@@ -157,7 +161,9 @@ export function InteractiveCustomChart({
   // Drag state for panning
   const [isDragging, setIsDragging] = useState(false);
   const [dragStartX, setDragStartX] = useState(0);
+  const [dragStartY, setDragStartY] = useState(0);
   const [dragStartOffsetPct, setDragStartOffsetPct] = useState(0);
+  const [dragStartPriceOffsetPct, setDragStartPriceOffsetPct] = useState(0);
   const [isScalingPrice, setIsScalingPrice] = useState(false);
   const [priceScaleStartY, setPriceScaleStartY] = useState(0);
   const [priceScaleStartValue, setPriceScaleStartValue] = useState(1);
@@ -377,14 +383,15 @@ export function InteractiveCustomChart({
     const pad = delta * 0.05 || 2.0;
     const rawMin = allowNegativeValues ? lowest - pad : Math.max(0.01, lowest - pad);
     const rawMax = highest + pad;
-    const center = (rawMin + rawMax) / 2;
+    const baseRange = Math.max(0.000001, rawMax - rawMin);
+    const center = (rawMin + rawMax) / 2 + baseRange * priceOffsetPct;
     const halfRange = (rawMax - rawMin) / 2 / Math.max(0.25, priceScale);
 
     return {
       min: allowNegativeValues ? center - halfRange : Math.max(0.01, center - halfRange),
       max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, timeframe, allowNegativeValues]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, priceOffsetPct, timeframe, allowNegativeValues]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -674,7 +681,9 @@ export function InteractiveCustomChart({
     setPriceAxisFocused(false);
     setIsDragging(true);
     setDragStartX(e.clientX);
+    setDragStartY(e.clientY);
     setDragStartOffsetPct(scrollOffsetPct);
+    setDragStartPriceOffsetPct(priceOffsetPct);
   };
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement, MouseEvent>) => {
@@ -694,6 +703,7 @@ export function InteractiveCustomChart({
     // Track dragging for pan scroll
     if (isDragging) {
       const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
       // Calculate how many candles shifted
       const shiftedCandlesCount = -dx / zoomFactor;
       if (maxScrollIndex > 0) {
@@ -702,6 +712,8 @@ export function InteractiveCustomChart({
         nextPct = Math.max(0, Math.min(100, nextPct));
         setScrollOffsetPct(parseFloat(nextPct.toFixed(2)));
       }
+      const verticalShift = dy / Math.max(80, mainHeight);
+      setPriceOffsetPct(parseFloat(Math.max(-4, Math.min(4, dragStartPriceOffsetPct + verticalShift)).toFixed(4)));
       return;
     }
 

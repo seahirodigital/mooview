@@ -3,6 +3,11 @@
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
 | 仕様管理 | この表を仕様トップへ常設し、実装済みと未完了を明示しながら進める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\docs\spec_valuchain_heatmap.md` |
+| 今回追加修正 | 右固定サイドパネルのチャート/歯車アイコンでチャート表示と設定表示を切り替え、余分なチャート見出し行を削除する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | バリューチェーン上部の参照日行を削除し、銘柄数/複数選択/フォント/ズーム/リセット/日付操作を1行へ再配置する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | ヘッダー銘柄リストの追加/削除、横巡回表示、リアルタイム変化時の薄色点灯を追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回追加修正 | チャートの初期表示をVRVP/VOL/RSI/MACD中心にし、チャート掴み移動を上下左右へ拡張する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\InteractiveCustomChart.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\types.ts` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | Ctrl+クリックで個別銘柄を複数選択できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回追加修正 | 複数選択後の「比較パネルで表示」で、右サイドパネルの1つのチャート内に複数銘柄比較を表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回追加修正 | 複数選択した銘柄を右サイドパネルへドラッグドロップし、同一チャート内比較へ追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |

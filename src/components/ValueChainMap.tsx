@@ -826,6 +826,8 @@ export function ValueChainMap({
   const dateInputRef = useRef<HTMLInputElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const panMovedRef = useRef(false);
+  const previousTickerPricesRef = useRef<Record<string, number | null>>({});
+  const tickerFlashTimeoutRef = useRef<number | null>(null);
   const [chain, setChain] = useState<ValueChainData>(() => {
     const history = readStoredChainHistory();
     const activeHistoryId = readStoredActiveHistoryId();
@@ -872,6 +874,7 @@ export function ValueChainMap({
     const saved = Number(localStorage.getItem(STOCK_FONT_SIZE_STORAGE_KEY));
     return Number.isFinite(saved) ? clamp(saved, 8, 16) : 10;
   });
+  const [tickerFlash, setTickerFlash] = useState<Record<string, 'up' | 'down'>>({});
   const [importBackup, setImportBackup] = useState<ValueChainData | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -982,10 +985,45 @@ export function ValueChainMap({
 
   const displayDate = previousBusinessDate(selectedDate);
   const isToday = selectedDate === todayString();
-  const referenceLabel = displayDate === selectedDate ? selectedDate : `${selectedDate} -> ${displayDate}`;
   const tickerStats = useMemo(() => {
     return new Map(tickers.map((ticker) => [ticker.symbol.toUpperCase(), ticker]));
   }, [tickers]);
+
+  useEffect(() => {
+    if (!isToday) {
+      previousTickerPricesRef.current = {};
+      setTickerFlash({});
+      return;
+    }
+
+    const nextValues: Record<string, number | null> = {};
+    const nextFlash: Record<string, 'up' | 'down'> = {};
+    tickers.forEach((ticker) => {
+      const symbol = ticker.symbol.toUpperCase();
+      nextValues[symbol] = ticker.currentPrice;
+      const previousPrice = previousTickerPricesRef.current[symbol];
+      if (
+        previousPrice !== undefined
+        && previousPrice !== null
+        && ticker.currentPrice !== null
+        && ticker.currentPrice !== previousPrice
+      ) {
+        nextFlash[symbol] = ticker.currentPrice > previousPrice ? 'up' : 'down';
+      }
+    });
+    previousTickerPricesRef.current = nextValues;
+
+    if (Object.keys(nextFlash).length === 0) return;
+    setTickerFlash((current) => ({ ...current, ...nextFlash }));
+    if (tickerFlashTimeoutRef.current !== null) {
+      window.clearTimeout(tickerFlashTimeoutRef.current);
+    }
+    tickerFlashTimeoutRef.current = window.setTimeout(() => {
+      setTickerFlash({});
+      tickerFlashTimeoutRef.current = null;
+    }, 900);
+  }, [isToday, tickers]);
+
   const segments = useMemo(() => chain.stages.flatMap((stage) => stage.segments), [chain.stages]);
   const groupsByCell = useMemo(() => {
     const map = new Map<string, ValueGroup[]>();
@@ -1502,6 +1540,7 @@ export function ValueChainMap({
 
   const selectHistoryEntry = (entry: ValueChainHistoryEntry) => {
     setActiveHistoryId(entry.id);
+    localStorage.setItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY, entry.id);
     setChain(entry.chain);
     setChainMenuOpen(false);
   };
@@ -1510,6 +1549,7 @@ export function ValueChainMap({
     setChainHistory((current) => current.filter((entry) => entry.id !== entryId));
     if (activeHistoryId === entryId) {
       setActiveHistoryId(null);
+      localStorage.removeItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY);
     }
   };
 
@@ -1708,6 +1748,7 @@ export function ValueChainMap({
   const renderStockCard = (stock: ChainStock, group: ValueGroup) => {
     const change = resolveChange(stock);
     const selected = selectedSet.has(normalizeSymbol(stock.symbol));
+    const flash = tickerFlash[normalizeSymbol(stock.symbol)];
     const category = chain.categories.find((item) => item.id === group.categoryId);
     const lane = category?.lanes.find((item) => item.id === group.laneId);
     const segment = findSegment(chain, group.segmentId);
@@ -1727,7 +1768,13 @@ export function ValueChainMap({
         key={`${group.id}-${stock.symbol}`}
         type="button"
         className={`min-h-[34px] border px-1 py-0.5 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
-        style={{ ...getHeatStyle(change), fontSize: `${stockFontSize}px` }}
+        style={{
+          ...getHeatStyle(change),
+          fontSize: `${stockFontSize}px`,
+          boxShadow: flash
+            ? `inset 0 0 0 999px ${flash === 'up' ? 'rgba(16, 185, 129, 0.16)' : 'rgba(239, 83, 80, 0.16)'}`
+            : undefined,
+        }}
         title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
         draggable
         onDragStart={(event) => {
@@ -1998,10 +2045,40 @@ export function ValueChainMap({
             >
               時価総額順
             </button>
+            <span className="ml-2 text-[10px] text-[#848e9c] truncate">
+              銘柄数: <b className="text-gray-200">{chain.groups.reduce((sum, group) => sum + group.stocks.length, 0)}</b>
+            </span>
+            {multiSelectMode && (
+              <span className="text-[10px] text-emerald-300 truncate">
+                複数選択: {selectedSymbols.length}件
+              </span>
+            )}
           </div>
         </div>
 
         <div className="flex items-center gap-2 shrink-0" data-no-pan="true">
+          {importBackup && (
+            <button
+              type="button"
+              onClick={() => {
+                setChain(importBackup);
+                setImportBackup(null);
+              }}
+              className="h-7 px-2 border border-amber-700/60 bg-amber-950/30 text-[10px] text-amber-200 hover:bg-amber-900/40"
+            >
+              インポートを戻す
+            </button>
+          )}
+          <div className="flex items-center gap-1 bg-[#101010] border border-[#242424] h-8 px-1">
+            <button type="button" onClick={() => setStockFontSize((value) => clamp(value + 1, 8, 16))} className="h-6 px-1.5 text-[10px] border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを大きく">A+</button>
+            <button type="button" onClick={() => setStockFontSize((value) => clamp(value - 1, 8, 16))} className="h-6 px-1.5 text-[10px] border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを小さく">A-</button>
+            <button type="button" onClick={() => setZoom((value) => clamp(value - 0.1, 0.55, 1.6))} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="縮小">-</button>
+            <span className="font-mono text-gray-300 w-10 text-center text-[10px]">{Math.round(zoom * 100)}%</span>
+            <button type="button" onClick={() => setZoom((value) => clamp(value + 0.1, 0.55, 1.6))} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="拡大">+</button>
+            <button type="button" onClick={resetView} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818] inline-flex items-center justify-center" aria-label="リセット">
+              <RotateCcw className="w-3 h-3" />
+            </button>
+          </div>
           <div className="flex items-center gap-1 bg-[#101010] border border-[#242424] h-8 px-1.5">
             <button type="button" onClick={() => moveDate(-1)} className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-white" title="前へ" aria-label="前へ">
               <ChevronLeft className="w-4 h-4" />
@@ -2044,37 +2121,6 @@ export function ValueChainMap({
               週ごと
             </button>
           </div>
-        </div>
-      </div>
-
-      <div className="h-8 border-b border-[#181818] bg-[#060606] pl-3 pr-[56px] shrink-0 flex items-center justify-between text-[10px] text-[#848e9c]">
-        <div className="flex items-center gap-4 min-w-0">
-          <span className="truncate">参照日: <b className="text-gray-200 font-mono">{referenceLabel}</b></span>
-          <span className="truncate">銘柄数: <b className="text-gray-200">{chain.groups.reduce((sum, group) => sum + group.stocks.length, 0)}</b></span>
-          {multiSelectMode && <span className="text-emerald-300">複数選択: {selectedSymbols.length}件</span>}
-        </div>
-        <div className="flex items-center gap-2 shrink-0" data-no-pan="true">
-          {importBackup && (
-            <button
-              type="button"
-              onClick={() => {
-                setChain(importBackup);
-                setImportBackup(null);
-              }}
-              className="h-6 px-2 border border-amber-700/60 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40"
-            >
-              インポートを戻す
-            </button>
-          )}
-          <button type="button" onClick={() => setStockFontSize((value) => clamp(value + 1, 8, 16))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを大きく">A+</button>
-          <button type="button" onClick={() => setStockFontSize((value) => clamp(value - 1, 8, 16))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを小さく">A-</button>
-          <button type="button" onClick={() => setZoom((value) => clamp(value - 0.1, 0.55, 1.6))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="縮小">-</button>
-          <span className="font-mono text-gray-300 w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <button type="button" onClick={() => setZoom((value) => clamp(value + 0.1, 0.55, 1.6))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="拡大">+</button>
-          <button type="button" onClick={resetView} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818] flex items-center gap-1">
-            <RotateCcw className="w-3 h-3" />
-            リセット
-          </button>
         </div>
       </div>
 
@@ -3039,22 +3085,6 @@ export function ValueChainMap({
           className={`min-w-0 flex flex-col overflow-hidden transition-[width] duration-150 ease-out ${chartSidebarOpen ? '' : 'pointer-events-none'}`}
           style={{ width: chartSidebarOpen ? `${chartSidebarWidth}px` : '0px' }}
         >
-          <div className="h-11 shrink-0 border-b border-[#242424] px-3 flex items-center justify-between bg-[#080808]">
-            <div className="min-w-0">
-              <div className="text-xs font-bold text-white truncate">チャート</div>
-              <div className="text-[10px] text-gray-500 truncate">時間足・比較・指標</div>
-            </div>
-            <button
-              type="button"
-              onClick={closeChartSidebar}
-              className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white"
-              aria-label="チャートサイドパネルを閉じる"
-              title="閉じる"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
           <div className="shrink-0 border-b border-[#242424] bg-[#0b0b0b] px-3 py-2 space-y-2">
             <div className="flex items-center gap-2 min-w-0">
               <select
@@ -3140,27 +3170,11 @@ export function ValueChainMap({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    if (!sidePanelPrimarySymbol) return;
-                    setSidePanelMode('indicators');
-                  }}
-                  disabled={!sidePanelPrimarySymbol}
-                  className={`w-6 h-6 flex items-center justify-center ${
-                    sidePanelMode === 'indicators'
-                      ? 'bg-emerald-900/45 text-emerald-200'
-                      : 'text-gray-500 hover:text-white hover:bg-[#202020]'
-                  } disabled:opacity-30 disabled:cursor-not-allowed`}
-                  title="チャート設定"
-                  aria-label="チャート設定"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
                   onClick={() => updateChartState({
                     zoomFactor: 8,
                     scrollOffsetPct: 100,
                     priceScale: 1,
+                    priceOffsetPct: 0,
                     rsiHeightPct: 25,
                     macdHeightPct: 25,
                   })}
@@ -3192,32 +3206,13 @@ export function ValueChainMap({
             }}
           >
             {sidePanelMode === 'indicators' && sidePanelPrimarySymbol ? (
-              <div className="h-full min-h-0 flex flex-col bg-[#080808]">
-                <div className="h-10 shrink-0 border-b border-[#242424] px-3 flex items-center justify-between">
-                  <div className="min-w-0 flex items-center gap-2">
-                    <Settings className="w-4 h-4 text-emerald-300" />
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold text-white truncate">チャート設定</div>
-                      <div className="text-[10px] text-gray-500 font-mono truncate">{sidePanelPrimarySymbol}</div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setSidePanelMode('chart')}
-                    className="h-7 px-2 border border-[#2a2a2a] bg-[#141414] text-[10px] font-bold text-gray-300 hover:text-white hover:bg-[#202020]"
-                  >
-                    チャート
-                  </button>
-                </div>
-                <div className="flex-1 min-h-0 overflow-y-auto p-2">
-                  {renderIndicatorSettings(sidePanelPrimarySymbol)}
-                </div>
+              <div className="h-full min-h-0 overflow-y-auto bg-[#080808] p-2">
+                {renderIndicatorSettings(sidePanelPrimarySymbol)}
               </div>
             ) : sidePanelPrimarySymbol ? (
               renderTickerChart({
                 symbol: sidePanelPrimarySymbol,
                 comparisonSymbols: sidePanelComparisonSymbols,
-                onOpenIndicatorSettings: () => setSidePanelMode('indicators'),
               })
             ) : (
               <div className="h-full flex items-center justify-center text-xs text-gray-500">
@@ -3246,15 +3241,16 @@ export function ValueChainMap({
           <button
             type="button"
             onClick={() => {
-              if (chartSidebarOpen) {
+              if (chartSidebarOpen && sidePanelMode === 'chart') {
                 setChartSidebarOpen(false);
                 setSidePanelMode('chart');
               } else {
                 openChartSidebar();
+                setSidePanelMode('chart');
               }
             }}
             className={`w-9 h-10 flex items-center justify-center border transition ${
-              chartSidebarOpen
+              chartSidebarOpen && sidePanelMode === 'chart'
                 ? 'bg-[#202020] border-[#4a4a4a] text-white'
                 : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
             }`}
@@ -3262,6 +3258,24 @@ export function ValueChainMap({
             aria-label="バリューチェーンのチャートパネルを表示"
           >
             <ChartNoAxesCombined className="w-5 h-5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (!chartSidebarOpen) {
+                openChartSidebar();
+              }
+              setSidePanelMode('indicators');
+            }}
+            className={`w-9 h-9 flex items-center justify-center border transition ${
+              chartSidebarOpen && sidePanelMode === 'indicators'
+                ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
+            }`}
+            title="チャート設定"
+            aria-label="チャート設定を表示"
+          >
+            <Settings className="w-4 h-4" />
           </button>
           <div className="my-1 h-px w-7 bg-[#242424]" />
           <button

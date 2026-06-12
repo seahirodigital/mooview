@@ -50,6 +50,7 @@ export interface ChartPanel {
   showVolume: boolean;
   comparisonSymbols?: string[];
   priceScale?: number;
+  priceOffsetPct?: number;
   rsiHeightPct?: number;
   macdHeightPct?: number;
 }

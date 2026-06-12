@@ -15,6 +15,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Menu,
   Upload
 } from 'lucide-react';
 
@@ -23,6 +24,7 @@ import { DEFAULT_TICKERS, generateCandles, simulateTick } from './mockData';
 import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
+import { ValueChainMap } from './components/ValueChainMap';
 import {
   calculateExpressionQuote,
   combineExpressionCandles,
@@ -44,6 +46,7 @@ type SidebarView = 'watchlist' | 'indicators' | 'settings';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
+type AppView = 'charts' | 'value-chain';
 
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
@@ -762,6 +765,10 @@ export default function App() {
   const candleFetchInFlightRef = useRef(false);
   const quoteFetchInFlightRef = useRef(false);
   const moomooRealTimeActiveRef = useRef(true);
+  const [appView, setAppView] = useState<AppView>(() =>
+    readStoredValue('mooview_active_view', 'charts')
+  );
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const candleFetchTimestampsRef = useRef<Record<string, number>>(
     normalizeTimestampMap(readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}))
   );
@@ -981,6 +988,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tv_dashboard_tickers', JSON.stringify(tickers));
   }, [tickers]);
+
+  useEffect(() => {
+    localStorage.setItem('mooview_active_view', JSON.stringify(appView));
+  }, [appView]);
 
   useEffect(() => {
     localStorage.setItem('tv_dashboard_watchlist_tabs', JSON.stringify(watchlistTabs));
@@ -2654,6 +2665,34 @@ export default function App() {
     return draggedTicker.symbols.length > 0 ? draggedTicker.symbols : [draggedTicker.symbol];
   };
 
+  const openValueChainTickerInChart = (symbol: string) => {
+    addSymbolToActiveWatchlist(symbol);
+    selectTickerForPrimaryChart(symbol);
+    setSelectedSymbols([symbol]);
+    setLastClickedSymbol(symbol);
+    setSidebarView('watchlist');
+    setSidebarOpen(true);
+    setAppView('charts');
+  };
+
+  const compareValueChainSymbols = (symbols: string[]) => {
+    const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
+    if (uniqueSymbols.length === 0) return;
+    addSymbolsToActiveWatchlist(uniqueSymbols);
+    setSelectedSymbols(uniqueSymbols);
+    setLastClickedSymbol(uniqueSymbols.at(-1) ?? null);
+    setSidebarView('watchlist');
+    setSidebarOpen(true);
+    const primaryPanel = panels[0];
+    if (!primaryPanel) return;
+    handleUpdatePanel(primaryPanel.id, {
+      comparisonSymbols: Array.from(new Set([
+        ...(primaryPanel.comparisonSymbols || []),
+        ...uniqueSymbols.filter((symbol) => symbol !== primaryPanel.symbol),
+      ])),
+    });
+  };
+
   return (
     <div className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25">
       
@@ -2661,7 +2700,15 @@ export default function App() {
       <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none flex items-center justify-between text-xs">
         <div className="flex items-center space-x-6 min-w-0">
           <div className="flex items-center space-x-2 shrink-0">
-            <span className="inline-flex w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+            <button
+              type="button"
+              onClick={() => setWorkspaceMenuOpen((open) => !open)}
+              className="w-7 h-7 flex items-center justify-center border border-[#242424] bg-[#101010] text-gray-300 hover:text-white hover:bg-[#181818] transition"
+              title="画面切替メニュー"
+              aria-label="画面切替メニューを開く"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
             <span className="font-bold tracking-tight text-white uppercase text-xs">MooView</span>
           </div>
           <div className="h-4 w-px bg-[#2a2a2a]" />
@@ -2703,7 +2750,59 @@ export default function App() {
         </div>
       </div>
 
+      {workspaceMenuOpen && (
+        <div className="fixed inset-0 z-50" onClick={() => setWorkspaceMenuOpen(false)}>
+          <div
+            className="absolute left-4 top-11 w-64 bg-[#080808] border border-[#303030] shadow-2xl py-2 text-xs"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-3 pb-2 border-b border-[#242424]">
+              <div className="font-bold text-white">MooView メニュー</div>
+              <div className="text-[10px] text-gray-500 mt-0.5">分析画面を切り替えます</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setAppView('charts');
+                setWorkspaceMenuOpen(false);
+              }}
+              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'charts' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
+            >
+              <span>既存のチャート画面</span>
+              {appView === 'charts' && <span className="text-[9px]">表示中</span>}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAppView('value-chain');
+                setWorkspaceMenuOpen(false);
+              }}
+              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'value-chain' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
+            >
+              <span>バリューチェーンマップ</span>
+              {appView === 'value-chain' && <span className="text-[9px]">表示中</span>}
+            </button>
+            <button
+              type="button"
+              className="w-full px-3 py-2.5 text-left flex items-center justify-between text-gray-600 cursor-not-allowed"
+              disabled
+            >
+              <span>今後の予定</span>
+              <span className="text-[9px]">準備中</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Multi-Chart Workspace Container and Indicator Sidebar Controls split */}
+      {appView === 'value-chain' ? (
+        <ValueChainMap
+          tickers={liveTickerStats}
+          onOpenTickerInChart={openValueChainTickerInChart}
+          onAddSymbolsToWatchlist={addSymbolsToActiveWatchlist}
+          onCompareSymbols={compareValueChainSymbols}
+        />
+      ) : (
       <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
         
         {/* Workspace Panels container */}
@@ -3917,6 +4016,7 @@ export default function App() {
         </div>
 
       </div>
+      )}
 
       {/* Footer information panel */}
       <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">

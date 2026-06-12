@@ -3,6 +3,11 @@
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
 | 仕様管理 | この表を仕様トップへ常設し、実装済みと未完了を明示しながら進める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\docs\spec_valuchain_heatmap.md` |
+| 今回追加修正 | Ctrl+クリックで個別銘柄を複数選択できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 複数選択後の「比較パネルで表示」で、右サイドパネルの1つのチャート内に複数銘柄比較を表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 複数選択した銘柄を右サイドパネルへドラッグドロップし、同一チャート内比較へ追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 右サイドパネルのチャートで既存チャートビュー同様の設定パネルを開き、MA/Bollinger等の表示・線・色を変更できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint`、`npm.cmd run build`、HTTP確認を実施する | 完了（Browserプラグインの実行ツール未提供のため、HTTP 200で代替確認） | `C:\Users\mahha\OneDrive\開発\mooview` |
 | Step 1 | MooViewヘッダー左の丸印をハンバーガーメニューへ変更し、画面切替オーバーレイを実装する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
 | Step 1 | バリューチェーンマップ画面のベースレイアウト、横軸工程、縦軸カテゴリ、空セル維持のマトリクスを実装する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | Step 1 | キャンバスのドラッグ移動とホイール拡大縮小を実装する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |

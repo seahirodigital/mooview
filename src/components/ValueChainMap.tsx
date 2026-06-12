@@ -14,6 +14,7 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  Settings,
   Trash2,
   Upload,
   X,
@@ -97,7 +98,9 @@ interface ValueChainMapProps {
   renderTickerChart: (options: {
     symbol: string;
     comparisonSymbols?: string[];
+    onOpenIndicatorSettings?: () => void;
   }) => React.ReactNode;
+  renderIndicatorSettings: (symbol: string) => React.ReactNode;
   onOpenTickerInChart: (symbol: string) => void;
   onAddSymbolsToWatchlist: (symbols: string[]) => void;
   onChartSymbolsChange: (symbols: string[]) => void;
@@ -814,6 +817,7 @@ export function ValueChainMap({
   chartState,
   onChartStateChange,
   renderTickerChart,
+  renderIndicatorSettings,
   onOpenTickerInChart,
   onAddSymbolsToWatchlist,
   onChartSymbolsChange,
@@ -857,6 +861,7 @@ export function ValueChainMap({
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
   const [chartSidebarOpen, setChartSidebarOpen] = useState(false);
+  const [sidePanelMode, setSidePanelMode] = useState<'chart' | 'indicators'>('chart');
   const [chartSidebarWidth, setChartSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem(CHART_PANEL_WIDTH_STORAGE_KEY));
     return Number.isFinite(saved)
@@ -954,6 +959,7 @@ export function ValueChainMap({
         setDetailSymbol(null);
         setComparisonPanelOpen(false);
         setChartSidebarOpen(false);
+        setSidePanelMode('chart');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -1625,14 +1631,16 @@ export function ValueChainMap({
     setSelectedSymbols([symbol]);
     setDetailSymbol(symbol);
     setChartSidebarOpen(true);
+    setSidePanelMode('chart');
     updateChartState({ symbol });
   };
 
   const toggleSelectSymbol = (symbol: string) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
     setSelectedSymbols((current) => (
-      current.includes(symbol)
-        ? current.filter((item) => item !== symbol)
-        : [...current, symbol]
+      current.includes(normalizedSymbol)
+        ? current.filter((item) => item !== normalizedSymbol)
+        : [...current, normalizedSymbol]
     ));
   };
 
@@ -1644,14 +1652,52 @@ export function ValueChainMap({
   };
 
   const compareSymbols = (symbols: string[]) => {
-    const uniqueSymbols = Array.from(new Set(symbols)).filter(Boolean);
+    const uniqueSymbols = Array.from(new Set(symbols.map((symbol) => normalizeSymbol(symbol)))).filter(Boolean);
     if (uniqueSymbols.length === 0) return;
     setSelectedSymbols(uniqueSymbols);
     setComparisonPanelOpen(true);
     setDetailSymbol(null);
     setChartSidebarOpen(true);
+    setSidePanelMode('chart');
     updateChartState({ symbol: uniqueSymbols[0] });
     onAddSymbolsToWatchlist(uniqueSymbols);
+  };
+
+  const getComparisonActionSymbols = (symbol: string) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    return Array.from(new Set(
+      selectedSymbols.length > 0
+        ? [normalizedSymbol, ...selectedSymbols]
+        : [normalizedSymbol],
+    )).filter(Boolean);
+  };
+
+  const getDragSymbolsForStock = (symbol: string) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    if (selectedSet.has(normalizedSymbol) && selectedSymbols.length > 0) {
+      return selectedSymbols;
+    }
+    return [normalizedSymbol];
+  };
+
+  const readDroppedSymbols = (event: React.DragEvent<HTMLElement>) => {
+    const customPayload = event.dataTransfer.getData('application/x-mooview-symbols');
+    if (customPayload) {
+      try {
+        const parsed = JSON.parse(customPayload);
+        if (Array.isArray(parsed)) {
+          return parsed.map((symbol) => normalizeSymbol(String(symbol))).filter(Boolean);
+        }
+      } catch {
+        // text/plain の既存ドラッグ形式へフォールバックする。
+      }
+    }
+
+    return event.dataTransfer
+      .getData('text/plain')
+      .split(/[\s,]+/)
+      .map((symbol) => normalizeSymbol(symbol))
+      .filter(Boolean);
   };
 
   const resetView = () => {
@@ -1661,7 +1707,7 @@ export function ValueChainMap({
 
   const renderStockCard = (stock: ChainStock, group: ValueGroup) => {
     const change = resolveChange(stock);
-    const selected = selectedSet.has(stock.symbol);
+    const selected = selectedSet.has(normalizeSymbol(stock.symbol));
     const category = chain.categories.find((item) => item.id === group.categoryId);
     const lane = category?.lanes.find((item) => item.id === group.laneId);
     const segment = findSegment(chain, group.segmentId);
@@ -1683,9 +1729,17 @@ export function ValueChainMap({
         className={`min-h-[34px] border px-1 py-0.5 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
         style={{ ...getHeatStyle(change), fontSize: `${stockFontSize}px` }}
         title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
-        onClick={() => {
+        draggable
+        onDragStart={(event) => {
+          const dragSymbols = getDragSymbolsForStock(stock.symbol);
+          event.dataTransfer.effectAllowed = 'copy';
+          event.dataTransfer.setData('text/plain', dragSymbols.join(','));
+          event.dataTransfer.setData('application/x-mooview-symbols', JSON.stringify(dragSymbols));
+        }}
+        onClick={(event) => {
           if (panMovedRef.current) return;
-          if (multiSelectMode) {
+          if (event.ctrlKey || event.metaKey || multiSelectMode) {
+            setMultiSelectMode(true);
             toggleSelectSymbol(stock.symbol);
           }
         }}
@@ -1732,6 +1786,16 @@ export function ValueChainMap({
   const sidePanelComparisonSymbols = comparisonPanelOpen && sidePanelPrimarySymbol
     ? selectedSymbols.filter((symbol) => symbol !== sidePanelPrimarySymbol)
     : [];
+  const addSymbolsToSidePanelComparison = (symbols: string[]) => {
+    const droppedSymbols = symbols.map((symbol) => normalizeSymbol(symbol)).filter(Boolean);
+    if (droppedSymbols.length === 0) return;
+    const nextSymbols = Array.from(new Set([
+      sidePanelPrimarySymbol,
+      ...sidePanelComparisonSymbols,
+      ...droppedSymbols,
+    ].filter((symbol): symbol is string => Boolean(symbol))));
+    compareSymbols(nextSymbols);
+  };
   const sidePanelChartSymbols = useMemo(() => (
     Array.from(new Set([
       sidePanelPrimarySymbol,
@@ -1767,6 +1831,7 @@ export function ValueChainMap({
   }, [onChartSymbolsChange, sidePanelChartSymbols]);
 
   const openChartSidebar = () => {
+    setSidePanelMode('chart');
     if (!detailSymbol && !comparisonPanelOpen) {
       const symbolToOpen = selectedSymbols[0] ?? firstStock?.symbol;
       if (symbolToOpen) {
@@ -1784,6 +1849,7 @@ export function ValueChainMap({
     setChartSidebarOpen(false);
     setComparisonPanelOpen(false);
     setDetailSymbol(null);
+    setSidePanelMode('chart');
   };
 
   const handleChartSidebarResizeMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -2306,7 +2372,7 @@ export function ValueChainMap({
                 <ExternalLink className="w-3.5 h-3.5" />
                 チャートビューで表示
               </button>
-              <button type="button" onClick={() => { compareSymbols(selectedSymbols.length > 0 ? selectedSymbols : [contextMenu.target.symbol]); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
+              <button type="button" onClick={() => { compareSymbols(getComparisonActionSymbols(contextMenu.target.symbol)); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <PanelRightOpen className="w-3.5 h-3.5" />
                 比較パネルで表示
               </button>
@@ -2366,6 +2432,20 @@ export function ValueChainMap({
                   >
                     <CheckSquare className="w-3.5 h-3.5" />
                     複数選択
+                  </button>
+                  <button
+                    type="button"
+                    disabled={getSelectedSymbolsInGroup(contextMenu.target.id).length === 0}
+                    onClick={() => {
+                      const symbols = getSelectedSymbolsInGroup(contextMenu.target.id);
+                      if (symbols.length === 0) return;
+                      compareSymbols(symbols);
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  >
+                    <PanelRightOpen className="w-3.5 h-3.5" />
+                    比較パネルで表示
                   </button>
                   <button
                     type="button"
@@ -3060,6 +3140,23 @@ export function ValueChainMap({
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    if (!sidePanelPrimarySymbol) return;
+                    setSidePanelMode('indicators');
+                  }}
+                  disabled={!sidePanelPrimarySymbol}
+                  className={`w-6 h-6 flex items-center justify-center ${
+                    sidePanelMode === 'indicators'
+                      ? 'bg-emerald-900/45 text-emerald-200'
+                      : 'text-gray-500 hover:text-white hover:bg-[#202020]'
+                  } disabled:opacity-30 disabled:cursor-not-allowed`}
+                  title="チャート設定"
+                  aria-label="チャート設定"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
                   onClick={() => updateChartState({
                     zoomFactor: 8,
                     scrollOffsetPct: 100,
@@ -3077,11 +3174,50 @@ export function ValueChainMap({
             </div>
           </div>
 
-          <div className="flex-1 min-h-0 bg-[#090909]">
-            {sidePanelPrimarySymbol ? (
+          <div
+            className="flex-1 min-h-0 bg-[#090909]"
+            onDragOver={(event) => {
+              const hasSymbolPayload = event.dataTransfer.types.includes('text/plain')
+                || event.dataTransfer.types.includes('application/x-mooview-symbols');
+              if (!hasSymbolPayload) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+            }}
+            onDrop={(event) => {
+              const symbols = readDroppedSymbols(event);
+              if (symbols.length === 0) return;
+              event.preventDefault();
+              event.stopPropagation();
+              addSymbolsToSidePanelComparison(symbols);
+            }}
+          >
+            {sidePanelMode === 'indicators' && sidePanelPrimarySymbol ? (
+              <div className="h-full min-h-0 flex flex-col bg-[#080808]">
+                <div className="h-10 shrink-0 border-b border-[#242424] px-3 flex items-center justify-between">
+                  <div className="min-w-0 flex items-center gap-2">
+                    <Settings className="w-4 h-4 text-emerald-300" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">チャート設定</div>
+                      <div className="text-[10px] text-gray-500 font-mono truncate">{sidePanelPrimarySymbol}</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSidePanelMode('chart')}
+                    className="h-7 px-2 border border-[#2a2a2a] bg-[#141414] text-[10px] font-bold text-gray-300 hover:text-white hover:bg-[#202020]"
+                  >
+                    チャート
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-2">
+                  {renderIndicatorSettings(sidePanelPrimarySymbol)}
+                </div>
+              </div>
+            ) : sidePanelPrimarySymbol ? (
               renderTickerChart({
                 symbol: sidePanelPrimarySymbol,
                 comparisonSymbols: sidePanelComparisonSymbols,
+                onOpenIndicatorSettings: () => setSidePanelMode('indicators'),
               })
             ) : (
               <div className="h-full flex items-center justify-center text-xs text-gray-500">
@@ -3112,6 +3248,7 @@ export function ValueChainMap({
             onClick={() => {
               if (chartSidebarOpen) {
                 setChartSidebarOpen(false);
+                setSidePanelMode('chart');
               } else {
                 openChartSidebar();
               }

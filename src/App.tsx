@@ -1917,7 +1917,13 @@ export default function App() {
   };
 
   const openIndicatorSettingsForSymbol = (symbol: string) => {
-    setFocusedSymbolIndex(symbol);
+    const symbolKey = symbol.toUpperCase();
+    setIndicatorDatabase((current) => (
+      current[symbolKey]
+        ? current
+        : { ...current, [symbolKey]: createDefaultIndicatorSettings(symbolKey) }
+    ));
+    setFocusedSymbolIndex(symbolKey);
     setSidebarView('indicators');
     setSidebarOpen(true);
   };
@@ -2719,9 +2725,11 @@ export default function App() {
   const renderValueChainTickerChart = ({
     symbol,
     comparisonSymbols = [],
+    onOpenIndicatorSettings,
   }: {
     symbol: string;
     comparisonSymbols?: string[];
+    onOpenIndicatorSettings?: () => void;
   }) => {
     const panelExpression = normalizeSymbolExpressionForStorage(symbol);
     const resolvedChartCandles = resolveCandlesForSymbol(symbol, valueChainChartState.timeframe, candlesCache);
@@ -2784,8 +2792,21 @@ export default function App() {
         setMacdHeightPct={(macdHeightPct) =>
           setValueChainChartState((current) => ({ ...current, macdHeightPct }))
         }
+        onOpenIndicatorSettings={onOpenIndicatorSettings ?? (() => openIndicatorSettingsForSymbol(symbol))}
         allowNegativeValues={Boolean(panelExpression)}
         valuePrecision={panelExpression ? 4 : 2}
+      />
+    );
+  };
+
+  const renderValueChainIndicatorSettings = (symbol: string) => {
+    const symbolKey = symbol.toUpperCase();
+    const settings = indicatorDatabase[symbolKey] || createDefaultIndicatorSettings(symbolKey);
+    return (
+      <IndicatorSettingsPanel
+        settings={settings}
+        onChange={handleUpdateIndicators}
+        onReset={() => handleResetIndicators(symbolKey)}
       />
     );
   };
@@ -2899,6 +2920,7 @@ export default function App() {
           chartState={valueChainChartState}
           onChartStateChange={setValueChainChartState}
           renderTickerChart={renderValueChainTickerChart}
+          renderIndicatorSettings={renderValueChainIndicatorSettings}
           onOpenTickerInChart={openValueChainTickerInChart}
           onAddSymbolsToWatchlist={addSymbolsToActiveWatchlist}
           onChartSymbolsChange={setValueChainChartSymbols}

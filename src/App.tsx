@@ -2975,7 +2975,10 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25">
+    <div
+      className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25"
+      style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}
+    >
       <style>
         {`
           @keyframes mooview-header-marquee {
@@ -3069,7 +3072,7 @@ export default function App() {
               <Minus className="w-3 h-3" />
             </button>
             {headerTickerMenu && (
-              <div className="absolute left-6 top-0 z-50 w-48 max-h-72 overflow-y-auto bg-[#080808] border border-[#303030] shadow-2xl py-1 text-[10px]">
+              <div className="absolute right-6 top-0 z-50 w-48 max-h-72 overflow-y-auto bg-[#080808] border border-[#303030] shadow-2xl py-1 text-[10px]">
                 {(headerTickerMenu === 'add' ? headerTickerAddOptions : headerTickerStats).length === 0 ? (
                   <div className="px-2.5 py-2 text-gray-500">対象なし</div>
                 ) : (

@@ -38,6 +38,8 @@ interface InteractiveCustomChartProps {
   valuePrecision?: number;
 }
 
+const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
+
 function getLineDasharray(style: IndicatorLineStyle): string | undefined {
   switch (style) {
     case 'dashed':
@@ -802,14 +804,14 @@ export function InteractiveCustomChart({
       
       {/* 1. FLOATING CROSSHAIR INFO BANNER */}
       {currentCandle && (
-        <div className="absolute top-2 left-3 bg-[#0d101a]/95 border border-[#232b45] px-2.5 py-1 rounded text-[10px] font-mono text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
+        <div className="absolute top-2 left-3 bg-[#050505]/95 border border-[#2a2a2a] px-2.5 py-1 rounded text-[10px] text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
           <span className="text-white font-bold">{symbol}</span>
-          <span>日付: <b className="text-[#a5b4fc]">{currentCandle.timeStr}</b></span>
+          <span>日付: <b className="text-gray-100">{currentCandle.timeStr}</b></span>
           <span>始: <b className="text-white">{currentCandle.open.toFixed(valuePrecision)}</b></span>
           <span>高: <b className="text-[#26a69a]">{currentCandle.high.toFixed(valuePrecision)}</b></span>
           <span>安: <b className="text-[#ef5350]">{currentCandle.low.toFixed(valuePrecision)}</b></span>
           <span>終: <b className="text-white">{currentCandle.close.toFixed(valuePrecision)}</b></span>
-          <span className="hidden sm:inline">出来高: <b className="text-[#8e98bd]">{currentCandle.volume.toLocaleString()}</b></span>
+          <span className="hidden sm:inline">出来高: <b className="text-gray-300">{currentCandle.volume.toLocaleString()}</b></span>
           
           {/* Legend for comparison symbols */}
           {comparisonSymbols.map((compSym, index) => {
@@ -852,7 +854,7 @@ export function InteractiveCustomChart({
                 onOpenIndicatorSettings?.();
               }
             }}
-            className={`w-full h-full bg-[#111320] ${
+            className={`w-full h-full bg-[#050505] ${
               isScalingPrice
                 ? 'cursor-ns-resize'
                 : isDragging
@@ -900,15 +902,15 @@ export function InteractiveCustomChart({
                       y1={currY} 
                       x2={plotWidth} 
                       y2={currY} 
-                      stroke="#1a1e33" 
+                      stroke="#202020"
                       strokeDasharray="2" 
                     />
                     <text 
                       x={plotWidth + 6} 
                       y={currY + 3.5} 
-                      fill="#7a87a7" 
+                      fill="#9ca3af"
                       fontSize="9" 
-                      fontFamily="monospace"
+                      fontFamily={CHART_FONT_FAMILY}
                     >
                       {val.toFixed(valuePrecision)}
                     </text>
@@ -1096,7 +1098,7 @@ export function InteractiveCustomChart({
                       y={mainHeight - 8}
                       fill="#576383"
                       fontSize="8"
-                      fontFamily="monospace"
+                      fontFamily={CHART_FONT_FAMILY}
                       textAnchor="middle"
                     >
                       {formatAxisDateLabel(c, timeframe)}
@@ -1185,7 +1187,7 @@ export function InteractiveCustomChart({
                           textAnchor="middle"
                           fill="#ffffff"
                           fontSize="7.5"
-                          fontFamily="monospace"
+                          fontFamily={CHART_FONT_FAMILY}
                           fontWeight="700"
                         >
                           {symbolText}
@@ -1196,7 +1198,7 @@ export function InteractiveCustomChart({
                           textAnchor="middle"
                           fill="#ffffff"
                           fontSize="7"
-                          fontFamily="monospace"
+                          fontFamily={CHART_FONT_FAMILY}
                           fontWeight="700"
                         >
                           {percentText}
@@ -1226,17 +1228,17 @@ export function InteractiveCustomChart({
                         y1={rsiY} 
                         x2={plotWidth} 
                         y2={rsiY} 
-                        stroke="#1a1e33" 
+                        stroke="#202020"
                         strokeDasharray="2"
                       />
-                      <text x={plotWidth + 6} y={rsiY + 3} fill="#4e5a7b" fontSize="8" fontFamily="monospace">
+                      <text x={plotWidth + 6} y={rsiY + 3} fill="#9ca3af" fontSize="8" fontFamily={CHART_FONT_FAMILY}>
                         {level}
                       </text>
                     </g>
                   );
                 })}
 
-                <text x="8" y="14" fill="#8b5cf6" fontSize="8" fontWeight="bold">RSI ({indicators.rsi.period})</text>
+                <text x="8" y="14" fill="#d1d5db" fontSize="8" fontWeight="bold">RSI ({indicators.rsi.period})</text>
                 <g
                   transform={`translate(${plotWidth + rightAxisWidth - 21}, 4)`}
                   className="cursor-pointer"
@@ -1246,14 +1248,14 @@ export function InteractiveCustomChart({
                     toggleIndicatorMinimized('rsi');
                   }}
                 >
-                  <rect width="17" height="16" rx="3" fill="#171a2b" stroke="#2a3150" />
-                  <text x="8.5" y="11" fill="#c4b5fd" fontSize="10" fontFamily="monospace" textAnchor="middle" fontWeight="700">
+                  <rect width="17" height="16" rx="3" fill="#0b0b0b" stroke="#303030" />
+                  <text x="8.5" y="11" fill="#d1d5db" fontSize="10" fontFamily={CHART_FONT_FAMILY} textAnchor="middle" fontWeight="700">
                     {rsiMinimized ? '+' : '-'}
                   </text>
                   <title>{rsiMinimized ? 'RSIを表示' : 'RSIを縮小'}</title>
                 </g>
                 {rsiMinimized && (
-                  <text x={plotWidth + 7} y="15" fill="#8b5cf6" fontSize="8" fontFamily="monospace" fontWeight="700">
+                  <text x={plotWidth + 7} y="15" fill="#d1d5db" fontSize="8" fontFamily={CHART_FONT_FAMILY} fontWeight="700">
                     RSI
                   </text>
                 )}
@@ -1288,11 +1290,11 @@ export function InteractiveCustomChart({
                 {macdPlotActive && (
                   <>
                     <line x1={0} y1={macdHeight / 2} x2={plotWidth} y2={macdHeight / 2} stroke="#212948" strokeWidth="1" />
-                    <text x={plotWidth + 6} y={macdHeight / 2 + 3} fill="#566288" fontSize="8" fontFamily="monospace">0.0</text>
+                    <text x={plotWidth + 6} y={macdHeight / 2 + 3} fill="#9ca3af" fontSize="8" fontFamily={CHART_FONT_FAMILY}>0.0</text>
                   </>
                 )}
 
-                <text x="8" y="14" fill="#2d8cf0" fontSize="8" fontWeight="bold">MACD ({indicators.macd.fast}, {indicators.macd.slow}, {indicators.macd.signal})</text>
+                <text x="8" y="14" fill="#d1d5db" fontSize="8" fontWeight="bold">MACD ({indicators.macd.fast}, {indicators.macd.slow}, {indicators.macd.signal})</text>
                 <g
                   transform={`translate(${plotWidth + rightAxisWidth - 21}, 4)`}
                   className="cursor-pointer"
@@ -1302,14 +1304,14 @@ export function InteractiveCustomChart({
                     toggleIndicatorMinimized('macd');
                   }}
                 >
-                  <rect width="17" height="16" rx="3" fill="#171a2b" stroke="#2a3150" />
-                  <text x="8.5" y="11" fill="#93c5fd" fontSize="10" fontFamily="monospace" textAnchor="middle" fontWeight="700">
+                  <rect width="17" height="16" rx="3" fill="#0b0b0b" stroke="#303030" />
+                  <text x="8.5" y="11" fill="#d1d5db" fontSize="10" fontFamily={CHART_FONT_FAMILY} textAnchor="middle" fontWeight="700">
                     {macdMinimized ? '+' : '-'}
                   </text>
                   <title>{macdMinimized ? 'MACDを表示' : 'MACDを縮小'}</title>
                 </g>
                 {macdMinimized && (
-                  <text x={plotWidth + 7} y="15" fill="#2d8cf0" fontSize="8" fontFamily="monospace" fontWeight="700">
+                  <text x={plotWidth + 7} y="15" fill="#d1d5db" fontSize="8" fontFamily={CHART_FONT_FAMILY} fontWeight="700">
                     MACD
                   </text>
                 )}
@@ -1389,7 +1391,7 @@ export function InteractiveCustomChart({
                   y1={mainHeight}
                   x2={plotWidth}
                   y2={mainHeight}
-                  stroke="#1a1e33"
+                  stroke="#202020"
                   strokeWidth="1"
                   strokeDasharray="2"
                   className="pointer-events-none"
@@ -1414,7 +1416,7 @@ export function InteractiveCustomChart({
                   y1={mainHeight + rsiHeight}
                   x2={plotWidth}
                   y2={mainHeight + rsiHeight}
-                  stroke="#1a1e33"
+                  stroke="#202020"
                   strokeWidth="1"
                   strokeDasharray="2"
                   className="pointer-events-none"
@@ -1459,7 +1461,7 @@ export function InteractiveCustomChart({
                 {hoverData.mouseY < mainHeight && (
                   <g transform={`translate(${plotWidth + 1}, ${hoverData.mouseY - 7})`}>
                     <rect width="55" height="15" fill="#2d3748" rx="2" />
-                    <text x="27" y="10.5" fill="white" fontSize="8" fontFamily="monospace" textAnchor="middle">
+                    <text x="27" y="10.5" fill="white" fontSize="8" fontFamily={CHART_FONT_FAMILY} textAnchor="middle">
                       {(() => {
                         const bottomLabelPadding = 25;
                         const plotH = mainHeight - bottomLabelPadding;
@@ -1506,7 +1508,7 @@ export function InteractiveCustomChart({
                         y="12"
                         fill="#ffffff"
                         fontSize="9"
-                        fontFamily="monospace"
+                        fontFamily={CHART_FONT_FAMILY}
                         fontWeight="700"
                         textAnchor="middle"
                       >
@@ -1521,11 +1523,11 @@ export function InteractiveCustomChart({
         )}
 
         {/* Floating Zoom overlay controllers */}
-        <div className="absolute bottom-4 right-16 flex items-center space-x-1.5 z-10 bg-[#0d101a]/70 p-1 rounded-lg border border-[#212740] backdrop-blur-sm opacity-50 hover:opacity-100 transition-opacity">
+        <div className="absolute bottom-4 right-16 flex items-center space-x-1.5 z-10 bg-[#050505]/80 p-1 rounded-lg border border-[#2a2a2a] backdrop-blur-sm opacity-50 hover:opacity-100 transition-opacity">
           <button 
             type="button"
             onClick={() => adjustZoom(true)}
-            className="w-6 h-6 bg-[#171a2b] border border-gray-800 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-gray-800 rounded transition"
+            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#171717] rounded transition"
             title="拡大"
           >
             <Plus size={11} className="stroke-[2.5]" />
@@ -1534,7 +1536,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={() => adjustZoom(false)}
-            className="w-6 h-6 bg-[#171a2b] border border-gray-800 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-gray-800 rounded transition"
+            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#171717] rounded transition"
             title="縮小"
           >
             <Minus size={11} className="stroke-[2.5]" />
@@ -1543,7 +1545,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={snapToPresent}
-            className="w-6 h-6 bg-[#171a2b] border border-gray-800 text-gray-300 hover:text-white flex items-center justify-center hover:bg-gray-800 rounded text-[9px] font-mono transition"
+            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-white flex items-center justify-center hover:bg-[#171717] rounded text-[9px] transition"
             title="最新データまで移動"
           >
             <RotateCcw size={10} />

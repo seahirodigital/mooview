@@ -1,1 +1,11 @@
 @import "tailwindcss";
+
+:root,
+body {
+  background: #050505;
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+}
+
+.font-mono {
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif !important;
+}

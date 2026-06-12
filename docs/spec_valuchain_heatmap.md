@@ -3,6 +3,13 @@
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
 | 仕様管理 | この表を仕様トップへ常設し、実装済みと未完了を明示しながら進める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\docs\spec_valuchain_heatmap.md` |
+| 今回追加修正 | 日付スライダー操作中は銘柄配置を固定し、変動率/色だけをその場で更新する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | ヘッダーの＋/−ポップアップを左側・グリッド上に重なる位置へ変更する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回追加修正 | 日付UIを黒基調スライダー化し、カレンダーアイコンから従来のカレンダーUIでも日付選択できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 銘柄マウスオーバーを自前黒ポップアップにし、変動率を緑/赤で統一する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 大工程/大分類を濃く、内側を薄くし、チャート背景とフォントを黒基調へ統一する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\InteractiveCustomChart.tsx` |
+| 今回検証 | `npm.cmd run lint`、`npm.cmd run build`、HTTP 200確認を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | 右固定サイドパネルのチャート/歯車アイコンでチャート表示と設定表示を切り替え、余分なチャート見出し行を削除する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回追加修正 | バリューチェーン上部の参照日行を削除し、銘柄数/複数選択/フォント/ズーム/リセット/日付操作を1行へ再配置する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回追加修正 | ヘッダー銘柄リストの追加/削除、横巡回表示、リアルタイム変化時の薄色点灯を追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |

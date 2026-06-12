@@ -824,6 +824,7 @@ export function ValueChainMap({
 }: ValueChainMapProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const dateInputRef = useRef<HTMLInputElement | null>(null);
+  const dateSliderRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const panMovedRef = useRef(false);
   const previousTickerPricesRef = useRef<Record<string, number | null>>({});
@@ -850,6 +851,10 @@ export function ValueChainMap({
   const [sortMode, setSortMode] = useState<SortMode>('change');
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
+  const [dateSliderDragging, setDateSliderDragging] = useState(false);
+  const [dateSliderAtLeftEdge, setDateSliderAtLeftEdge] = useState(false);
+  const [dateSliderMonthsBack, setDateSliderMonthsBack] = useState(12);
+  const [dateSliderFrozenOrders, setDateSliderFrozenOrders] = useState<Record<string, string[]> | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [chainMenuOpen, setChainMenuOpen] = useState(false);
@@ -875,6 +880,14 @@ export function ValueChainMap({
     return Number.isFinite(saved) ? clamp(saved, 8, 16) : 10;
   });
   const [tickerFlash, setTickerFlash] = useState<Record<string, 'up' | 'down'>>({});
+  const [stockTooltip, setStockTooltip] = useState<{
+    x: number;
+    y: number;
+    classification: string;
+    name: string;
+    symbol: string;
+    change: number;
+  } | null>(null);
   const [importBackup, setImportBackup] = useState<ValueChainData | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1055,11 +1068,38 @@ export function ValueChainMap({
     return clamp(stock.baseChangePct + drift, -9.99, 9.99);
   };
 
-  const sortedStocks = (stocks: ChainStock[]) => {
+  const sortStocksByActiveMode = (stocks: ChainStock[]) => {
     return [...stocks].sort((first, second) => {
       if (sortMode === 'marketCap') return second.marketCap - first.marketCap;
       return resolveChange(second) - resolveChange(first);
     });
+  };
+
+  const sortedStocks = (stocks: ChainStock[], groupId?: string) => {
+    const frozenOrder = groupId && dateSliderDragging ? dateSliderFrozenOrders?.[groupId] : null;
+    if (!frozenOrder) return sortStocksByActiveMode(stocks);
+
+    const frozenRank = new Map<string, number>(
+      frozenOrder.map((symbol, index): [string, number] => [symbol, index]),
+    );
+    return [...stocks].sort((first, second) => {
+      const firstRank = frozenRank.get(normalizeSymbol(first.symbol));
+      const secondRank = frozenRank.get(normalizeSymbol(second.symbol));
+      if (firstRank !== undefined && secondRank !== undefined) return firstRank - secondRank;
+      if (firstRank !== undefined) return -1;
+      if (secondRank !== undefined) return 1;
+      return 0;
+    });
+  };
+
+  const freezeDateSliderStockOrders = () => {
+    const orders = Object.fromEntries(
+      chain.groups.map((group) => [
+        group.id,
+        sortStocksByActiveMode(group.stocks).map((stock) => normalizeSymbol(stock.symbol)),
+      ]),
+    );
+    setDateSliderFrozenOrders(orders);
   };
 
   const updateGroupName = (groupId: string) => {
@@ -1661,6 +1701,57 @@ export function ValueChainMap({
     setSelectedDate(date.toISOString().slice(0, 10));
   };
 
+  const setSelectedDateFromDaysBack = (daysBack: number) => {
+    const date = new Date(`${todayString()}T12:00:00`);
+    date.setDate(date.getDate() - Math.max(0, Math.round(daysBack)));
+    setSelectedDate(date.toISOString().slice(0, 10));
+  };
+
+  const updateDateFromSliderClientX = (clientX: number) => {
+    const slider = dateSliderRef.current;
+    if (!slider) return;
+    const rect = slider.getBoundingClientRect();
+    const rawRatio = rect.width > 0 ? (clientX - rect.left) / rect.width : 1;
+    const ratio = clamp(rawRatio, 0, 1);
+    const rangeDays = Math.max(365, dateSliderMonthsBack * 31);
+    const stepDays = periodMode === 'week' ? 7 : 1;
+    const daysBack = Math.round(((1 - ratio) * rangeDays) / stepDays) * stepDays;
+    setDateSliderAtLeftEdge(rawRatio <= 0.02);
+    setSelectedDateFromDaysBack(daysBack);
+  };
+
+  useEffect(() => {
+    if (!dateSliderDragging) return;
+    const handlePointerMove = (event: PointerEvent) => updateDateFromSliderClientX(event.clientX);
+    const handlePointerUp = () => {
+      setDateSliderDragging(false);
+      setDateSliderAtLeftEdge(false);
+      setDateSliderFrozenOrders(null);
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+    };
+  }, [dateSliderDragging, dateSliderMonthsBack, periodMode]);
+
+  useEffect(() => {
+    if (!dateSliderDragging || !dateSliderAtLeftEdge) return;
+    const interval = window.setInterval(() => {
+      const stepDays = periodMode === 'week' ? 7 : 1;
+      setDateSliderMonthsBack((current) => {
+        const next = current + 1;
+        const daysBack = Math.round((next * 31) / stepDays) * stepDays;
+        setSelectedDateFromDaysBack(daysBack);
+        return next;
+      });
+    }, 450);
+    return () => window.clearInterval(interval);
+  }, [dateSliderAtLeftEdge, dateSliderDragging, periodMode]);
+
   const updateChartState = (updates: Partial<ChartPanel>) => {
     onChartStateChange((current) => ({ ...current, ...updates }));
   };
@@ -1775,7 +1866,17 @@ export function ValueChainMap({
             ? `inset 0 0 0 999px ${flash === 'up' ? 'rgba(16, 185, 129, 0.16)' : 'rgba(239, 83, 80, 0.16)'}`
             : undefined,
         }}
-        title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
+        onMouseMove={(event) => {
+          setStockTooltip({
+            x: event.clientX + 14,
+            y: event.clientY + 14,
+            classification: stockClassification,
+            name: stock.name,
+            symbol: stock.symbol,
+            change,
+          });
+        }}
+        onMouseLeave={() => setStockTooltip(null)}
         draggable
         onDragStart={(event) => {
           const dragSymbols = getDragSymbolsForStock(stock.symbol);
@@ -1924,6 +2025,22 @@ export function ValueChainMap({
 
   const gridTemplateColumns = '132px 64px ' + segments.map(() => '142px').join(' ');
   const canvasWidth = 196 + segments.length * 142;
+  const todayForSlider = new Date(`${todayString()}T12:00:00`);
+  const selectedDateForSlider = new Date(`${selectedDate}T12:00:00`);
+  const selectedDateDaysBack = Math.max(
+    0,
+    Math.round((todayForSlider.getTime() - selectedDateForSlider.getTime()) / 86_400_000),
+  );
+  const dateSliderRangeDays = Math.max(365, dateSliderMonthsBack * 31, selectedDateDaysBack);
+  const dateSliderStepDays = periodMode === 'week' ? 7 : 1;
+  const dateSliderPct = clamp(
+    100 - (selectedDateDaysBack / dateSliderRangeDays) * 100,
+    0,
+    100,
+  );
+  const dateSliderLabel = periodMode === 'week'
+    ? `${selectedDate} 週`
+    : selectedDate;
   const contextStageIndex = contextMenu?.target.type === 'stage'
     ? chain.stages.findIndex((stage) => stage.id === contextMenu.target.id)
     : -1;
@@ -1962,7 +2079,10 @@ export function ValueChainMap({
     : '';
 
   return (
-    <div className="flex-1 min-h-0 bg-[#050505] text-[#d1d4dc] flex flex-col overflow-hidden">
+    <div
+      className="flex-1 min-h-0 bg-[#050505] text-[#d1d4dc] flex flex-col overflow-hidden"
+      style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}
+    >
       <div className="h-12 border-b border-[#202020] bg-[#080808] pl-3 pr-[56px] shrink-0 flex items-center justify-between gap-3">
         <div className="min-w-0 flex items-center gap-3">
           <div className="flex items-center gap-2 min-w-0">
@@ -2079,29 +2199,65 @@ export function ValueChainMap({
               <RotateCcw className="w-3 h-3" />
             </button>
           </div>
-          <div className="flex items-center gap-1 bg-[#101010] border border-[#242424] h-8 px-1.5">
-            <button type="button" onClick={() => moveDate(-1)} className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-white" title="前へ" aria-label="前へ">
+          <div className="flex items-center gap-2 bg-[#101010] border border-[#242424] h-10 px-2">
+            <button type="button" onClick={() => moveDate(-1)} className="w-6 h-7 flex items-center justify-center text-gray-400 hover:text-white" title="前へ" aria-label="前へ">
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <button
-              type="button"
-              onClick={openDatePicker}
-              className="w-5 h-6 flex items-center justify-center text-emerald-300 hover:text-emerald-200"
-              title="日付を選択"
-              aria-label="日付を選択"
-            >
-              <CalendarDays className="w-3.5 h-3.5" />
-            </button>
-            <input
-              ref={dateInputRef}
-              type="date"
-              value={selectedDate}
-              onClick={openDatePicker}
-              onChange={(event) => setSelectedDate(event.target.value)}
-              className="bg-transparent text-[10px] text-gray-200 outline-none w-[116px] cursor-pointer"
-              aria-label="表示日を選択"
-            />
-            <button type="button" onClick={() => moveDate(1)} className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-white" title="次へ" aria-label="次へ">
+            <div className="relative w-5 h-7 shrink-0">
+              <button
+                type="button"
+                onClick={openDatePicker}
+                className="absolute inset-0 flex items-center justify-center text-emerald-300 hover:text-emerald-200"
+                title="カレンダーで日付を選択"
+                aria-label="カレンダーで日付を選択"
+              >
+                <CalendarDays className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <input
+                ref={dateInputRef}
+                type="date"
+                value={selectedDate}
+                onClick={openDatePicker}
+                onChange={(event) => setSelectedDate(event.target.value)}
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                aria-label="表示日を選択"
+              />
+            </div>
+            <div className="relative w-52 h-8 flex items-end pb-1">
+              <div
+                className="absolute -top-1 left-1/2 -translate-x-1/2 px-2 py-0.5 bg-[#050505] border border-[#242424] text-[10px] font-mono text-gray-100 shadow"
+                title={`表示日: ${dateSliderLabel}`}
+              >
+                {dateSliderLabel}
+              </div>
+              <div
+                ref={dateSliderRef}
+                role="slider"
+                tabIndex={0}
+                aria-label="表示日スライダー"
+                aria-valuemin={0}
+                aria-valuemax={dateSliderRangeDays}
+                aria-valuenow={selectedDateDaysBack}
+                title={`右端が直近、左端が過去です。${dateSliderStepDays}日単位で移動します。`}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  freezeDateSliderStockOrders();
+                  setDateSliderDragging(true);
+                  updateDateFromSliderClientX(event.clientX);
+                }}
+                className="relative w-full h-2 rounded-sm bg-[#050505] border border-[#2a2a2a] cursor-ew-resize"
+              >
+                <div
+                  className="absolute inset-y-0 right-0 bg-emerald-500/20"
+                  style={{ left: `${dateSliderPct}%` }}
+                />
+                <div
+                  className="absolute top-1/2 h-4 w-3 -translate-x-1/2 -translate-y-1/2 border border-emerald-400 bg-[#050505] shadow-[0_0_10px_rgba(16,185,129,0.35)]"
+                  style={{ left: `${dateSliderPct}%` }}
+                />
+              </div>
+            </div>
+            <button type="button" onClick={() => moveDate(1)} className="w-6 h-7 flex items-center justify-center text-gray-400 hover:text-white" title="次へ" aria-label="次へ">
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
@@ -2189,7 +2345,7 @@ export function ValueChainMap({
             style={{ gridTemplateColumns }}
           >
             <div
-              className="bg-[#101010] border-r border-b border-[#252525] p-1 overflow-hidden"
+              className="bg-[#080808] border-r border-b border-[#303030] p-1 overflow-hidden"
               style={{ gridColumn: 'span 2', gridRow: 'span 2', height: `${totalHeaderHeight}px` }}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -2208,7 +2364,7 @@ export function ValueChainMap({
                 {indexGroup.name}
               </button>
               <div className="grid grid-cols-3 gap-0.5">
-                {sortedStocks(indexGroup.stocks).map((stock) => renderStockCard(stock, indexGroup))}
+                {sortedStocks(indexGroup.stocks, indexGroup.id).map((stock) => renderStockCard(stock, indexGroup))}
               </div>
             </div>
             {chain.stages.map((stage) => {
@@ -2218,7 +2374,7 @@ export function ValueChainMap({
                   key={stage.id}
                   type="button"
                   data-no-pan="true"
-                  className="bg-[#1d1d1f] border-r border-b border-[#353535] flex items-center justify-center text-gray-200 font-bold hover:bg-[#27272a] transition px-2"
+                  className="bg-[#08090a] border-r border-b border-[#333333] flex items-center justify-center text-white font-bold hover:bg-[#111214] transition px-2"
                   style={{
                     gridColumn: `span ${stage.segments.length}`,
                     gridRow: merged ? 'span 2' : undefined,
@@ -2247,7 +2403,7 @@ export function ValueChainMap({
                     event.preventDefault();
                     setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'segment', id: segment.id, label: segment.name } });
                   }}
-                  className="bg-[#202022] border-r border-b border-[#353535] px-2 text-center hover:bg-[#29292b] transition"
+                  className="bg-[#151618] border-r border-b border-[#303030] px-2 text-center hover:bg-[#1d1e20] transition"
                   style={{ height: `${segmentHeaderHeight}px` }}
                   title={`${stage?.name ?? ''} / ${segment.name.replace(/\n/g, ' ')}`}
                 >
@@ -2309,7 +2465,7 @@ export function ValueChainMap({
                               {group.name}
                             </button>
                             <div className="grid grid-cols-2 gap-0.5">
-                              {sortedStocks(group.stocks).map((stock) => renderStockCard(stock, group))}
+                              {sortedStocks(group.stocks, group.id).map((stock) => renderStockCard(stock, group))}
                             </div>
                           </div>
                         ))}
@@ -2325,7 +2481,7 @@ export function ValueChainMap({
                     key={`${category.id}-category`}
                     type="button"
                     data-no-pan="true"
-                    className="bg-[#1c1d1f] border-r border-b border-[#303030] flex items-center justify-center px-2 text-center font-bold text-gray-200 hover:bg-[#232427]"
+                    className="bg-[#08090a] border-r border-b border-[#333333] flex items-center justify-center px-2 text-center font-bold text-white hover:bg-[#111214]"
                     style={{ gridRow: `span ${category.lanes.length}` }}
                     onContextMenu={(event) => {
                       event.preventDefault();
@@ -2339,7 +2495,7 @@ export function ValueChainMap({
                   key={`${category.id}-${lane.id}-lane`}
                   type="button"
                   data-no-pan="true"
-                  className="bg-[#151618] border-r border-b border-[#2a2a2a] flex items-center justify-center px-1 text-gray-300 font-bold hover:bg-[#202124]"
+                  className="bg-[#151618] border-r border-b border-[#2a2a2a] flex items-center justify-center px-1 text-gray-300 font-bold hover:bg-[#1d1e20]"
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setContextMenu({
@@ -2714,6 +2870,25 @@ export function ValueChainMap({
               )}
             </>
           )}
+        </div>
+      )}
+
+      {stockTooltip && (
+        <div
+          className="fixed z-[70] pointer-events-none min-w-52 max-w-72 border border-[#303030] bg-[#030303] px-3 py-2 text-[11px] text-white shadow-2xl"
+          style={{ left: stockTooltip.x, top: stockTooltip.y }}
+        >
+          <div className="text-[9px] text-gray-400 truncate">{stockTooltip.classification}</div>
+          <div className="mt-1 flex items-center justify-between gap-3">
+            <span className="font-bold truncate">{stockTooltip.name}</span>
+            <span className="font-mono text-gray-300">{stockTooltip.symbol}</span>
+          </div>
+          <div className="mt-1 flex items-center justify-between gap-3">
+            <span className="text-gray-400">変動率</span>
+            <span className={`font-mono font-bold ${stockTooltip.change >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+              {formatPct(stockTooltip.change)}
+            </span>
+          </div>
         </div>
       )}
 

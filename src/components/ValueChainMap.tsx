@@ -5,6 +5,7 @@ import {
   ChartNoAxesCombined,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   ExternalLink,
   FileDown,
   FileJson,
@@ -67,6 +68,12 @@ interface ValueChainData {
   stages: Stage[];
   categories: Category[];
   groups: ValueGroup[];
+}
+
+interface ValueChainHistoryEntry {
+  id: string;
+  importedAt: string;
+  chain: ValueChainData;
 }
 
 interface TickerStat extends TickerInfo {
@@ -132,11 +139,18 @@ type StockEditModalState = {
 
 type ConfirmModalState =
   | { type: 'stock'; groupId: string; symbol: string; label: string }
+  | { type: 'selected-stocks'; groupId: string; symbols: string[]; label: string }
   | { type: 'group'; groupId: string; label: string }
   | { type: 'stage'; stageId: string; label: string }
   | { type: 'segment'; segmentId: string; label: string }
   | { type: 'category'; categoryId: string; label: string }
   | { type: 'lane'; categoryId: string; laneId: string; label: string };
+
+type ImportDecisionModalState = {
+  chain: ValueChainData;
+  importedAt: string;
+  sourceName: string;
+};
 
 const DEFAULT_VALUE_CHAIN: ValueChainData = {
   name: '半導体バリューチェーン',
@@ -342,12 +356,62 @@ const DEFAULT_VALUE_CHAIN: ValueChainData = {
 };
 
 const STORAGE_KEY = 'mooview_value_chain_map_v1';
+const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
+const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
 const CHART_PANEL_WIDTH_STORAGE_KEY = 'mooview_value_chain_chart_panel_width';
+const STOCK_FONT_SIZE_STORAGE_KEY = 'mooview_value_chain_stock_font_size';
+const INDEX_GROUP_ID = 'g-index';
+const INDEX_CATEGORY_ID = '__index-category';
+const INDEX_LANE_ID = '__index-lane';
+const INDEX_SEGMENT_ID = '__index-segment';
+const HEADER_STAGE_ROW_HEIGHT = 52;
+const HEADER_SEGMENT_ROW_HEIGHT = 40;
 const DETAIL_PANEL_NAV_WIDTH = 44;
 const DETAIL_PANEL_MIN_WIDTH = 360;
 const DETAIL_PANEL_MAX_WIDTH = 860;
 const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
 const todayString = () => new Date().toISOString().slice(0, 10);
+
+function createDefaultIndexGroup(): ValueGroup {
+  return {
+    id: INDEX_GROUP_ID,
+    categoryId: INDEX_CATEGORY_ID,
+    laneId: INDEX_LANE_ID,
+    segmentId: INDEX_SEGMENT_ID,
+    name: '指数',
+    stocks: [
+      { symbol: 'QQQ', name: 'QQQ', market: 'US', marketCap: 0, baseChangePct: 0 },
+      { symbol: 'SPY', name: 'SPY', market: 'US', marketCap: 0, baseChangePct: 0 },
+      { symbol: 'SOX', name: 'SOX', market: 'US', marketCap: 0, baseChangePct: 0 },
+      { symbol: 'JP.1321', name: '日経225', market: 'JP', marketCap: 0, baseChangePct: 0 },
+      { symbol: 'JP.200A', name: '200A', market: 'JP', marketCap: 0, baseChangePct: 0 },
+      { symbol: 'JP.213A', name: '213A', market: 'JP', marketCap: 0, baseChangePct: 0 },
+    ],
+  };
+}
+
+function ensureIndexGroup(chain: ValueChainData): ValueChainData {
+  const defaults = createDefaultIndexGroup();
+  const groups = chain.groups.map((group) => {
+    if (group.id !== INDEX_GROUP_ID) return group;
+    return {
+      ...defaults,
+      ...group,
+      categoryId: INDEX_CATEGORY_ID,
+      laneId: INDEX_LANE_ID,
+      segmentId: INDEX_SEGMENT_ID,
+      name: group.name?.trim() || defaults.name,
+      stocks: Array.isArray(group.stocks) ? group.stocks : defaults.stocks,
+    };
+  });
+  if (groups.some((group) => group.id === INDEX_GROUP_ID)) {
+    return { ...chain, groups };
+  }
+  return {
+    ...chain,
+    groups: [defaults, ...groups],
+  };
+}
 
 function formatTimeframeLabel(timeframe: Timeframe): string {
   if (timeframe === '1mo') return '1月';
@@ -517,11 +581,11 @@ function createCsv(chain: ValueChainData): string {
       chain.name,
       stage?.id ?? '',
       stage?.name ?? '',
-      segment?.id ?? '',
-      segment?.name.replace(/\n/g, ' / ') ?? '',
-      category?.id ?? '',
-      category?.name ?? '',
-      lane?.id ?? '',
+      segment?.id ?? group.segmentId,
+      segment?.name.replace(/\n/g, ' / ') ?? (group.id === INDEX_GROUP_ID ? group.name : ''),
+      category?.id ?? group.categoryId,
+      category?.name ?? (group.id === INDEX_GROUP_ID ? group.name : ''),
+      lane?.id ?? group.laneId,
       lane?.name ?? '',
       group.id,
       group.name,
@@ -575,18 +639,148 @@ async function searchMoomooCandidate(query: string): Promise<SymbolSearchCandida
   }
 }
 
+function importString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function parseImportedNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function validateChainData(value: unknown): ValueChainData | null {
   if (!value || typeof value !== 'object') return null;
   const source = value as Partial<ValueChainData>;
   if (!Array.isArray(source.stages) || !Array.isArray(source.categories) || !Array.isArray(source.groups)) {
     return null;
   }
-  return {
+  const stages: Stage[] = source.stages.map((stageValue, stageIndex) => {
+    const stageSource = stageValue as Partial<Stage>;
+    const stageId = importString(stageSource.id, `stage-${stageIndex + 1}`);
+    const stageName = importString(stageSource.name, stageId);
+    const rawSegments = Array.isArray(stageSource.segments) ? stageSource.segments : [];
+    const segments = rawSegments.map((segmentValue, segmentIndex) => {
+      const segmentSource = segmentValue as Partial<Segment>;
+      return {
+        id: importString(segmentSource.id, `${stageId}-segment-${segmentIndex + 1}`),
+        name: importString(segmentSource.name, stageName),
+        parentId: importString(segmentSource.parentId, stageId),
+      };
+    });
+    return {
+      id: stageId,
+      name: stageName,
+      segments: segments.length > 0
+        ? segments
+        : [{ id: `${stageId}-segment-1`, name: stageName, parentId: stageId }],
+    };
+  });
+  const categories: Category[] = source.categories.map((categoryValue, categoryIndex) => {
+    const categorySource = categoryValue as Partial<Category>;
+    const categoryId = importString(categorySource.id, `category-${categoryIndex + 1}`);
+    const categoryName = importString(categorySource.name, categoryId);
+    const rawLanes = Array.isArray(categorySource.lanes) ? categorySource.lanes : [];
+    const lanes = rawLanes.map((laneValue, laneIndex) => {
+      const laneSource = laneValue as Partial<Lane>;
+      return {
+        id: importString(laneSource.id, `${categoryId}-lane-${laneIndex + 1}`),
+        name: importString(laneSource.name, `${categoryName}-${laneIndex + 1}`),
+      };
+    });
+    return {
+      id: categoryId,
+      name: categoryName,
+      lanes: lanes.length > 0 ? lanes : [{ id: `${categoryId}-lane-1`, name: categoryName }],
+    };
+  });
+  const groups: ValueGroup[] = source.groups.map((groupValue, groupIndex) => {
+    const groupSource = groupValue as Partial<ValueGroup>;
+    const groupId = importString(groupSource.id, `group-${groupIndex + 1}`);
+    const rawStocks = Array.isArray(groupSource.stocks) ? groupSource.stocks : [];
+    return {
+      id: groupId,
+      categoryId: importString(groupSource.categoryId, ''),
+      laneId: importString(groupSource.laneId, ''),
+      segmentId: importString(groupSource.segmentId, ''),
+      name: importString(groupSource.name, groupId),
+      stocks: rawStocks.map((stockValue, stockIndex) => {
+        const stockSource = stockValue as Partial<ChainStock>;
+        const symbol = importString(stockSource.symbol, `UNKNOWN-${stockIndex + 1}`);
+        return {
+          symbol: normalizeSymbol(symbol),
+          name: importString(stockSource.name, symbol),
+          market: importString(stockSource.market, symbol.startsWith('JP.') ? 'JP' : 'US'),
+          marketCap: parseImportedNumber(stockSource.marketCap, 0),
+          baseChangePct: parseImportedNumber(stockSource.baseChangePct, 0),
+        };
+      }).filter((stock) => stock.symbol && !stock.symbol.startsWith('UNKNOWN-')),
+    };
+  });
+  return ensureIndexGroup({
     name: typeof source.name === 'string' && source.name.trim() ? source.name : 'インポート済みバリューチェーン',
-    stages: source.stages,
-    categories: source.categories,
-    groups: source.groups,
+    stages,
+    categories,
+    groups,
+  });
+}
+
+function parseValueChainJson(text: string): ValueChainData | null {
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+  try {
+    return validateChainData(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+function validateChainHistory(value: unknown): ValueChainHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entryValue, index) => {
+    if (!entryValue || typeof entryValue !== 'object') return [];
+    const source = entryValue as Partial<ValueChainHistoryEntry>;
+    const chain = validateChainData(source.chain);
+    if (!chain) return [];
+    return [{
+      id: importString(source.id, `history-${index + 1}`),
+      importedAt: importString(source.importedAt, new Date().toISOString()),
+      chain,
+    }];
+  });
+}
+
+function readStoredChainHistory(): ValueChainHistoryEntry[] {
+  try {
+    return validateChainHistory(JSON.parse(localStorage.getItem(CHAIN_HISTORY_STORAGE_KEY) ?? '[]'));
+  } catch {
+    return [];
+  }
+}
+
+function readStoredActiveHistoryId(): string | null {
+  const value = localStorage.getItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY);
+  return value && value.trim() ? value : null;
+}
+
+function createHistoryEntry(chain: ValueChainData, importedAt: string): ValueChainHistoryEntry {
+  return {
+    id: createValueChainId('chain-history'),
+    importedAt,
+    chain,
   };
+}
+
+function formatImportTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
 }
 
 function createTemplateSpec(chain: ValueChainData): string {
@@ -629,23 +823,35 @@ export function ValueChainMap({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const panMovedRef = useRef(false);
   const [chain, setChain] = useState<ValueChainData>(() => {
+    const history = readStoredChainHistory();
+    const activeHistoryId = readStoredActiveHistoryId();
+    const activeEntry = history.find((entry) => entry.id === activeHistoryId);
+    if (activeEntry) return activeEntry.chain;
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return DEFAULT_VALUE_CHAIN;
+    if (!saved) return ensureIndexGroup(DEFAULT_VALUE_CHAIN);
     try {
-      return validateChainData(JSON.parse(saved)) ?? DEFAULT_VALUE_CHAIN;
+      return validateChainData(JSON.parse(saved)) ?? ensureIndexGroup(DEFAULT_VALUE_CHAIN);
     } catch {
-      return DEFAULT_VALUE_CHAIN;
+      return ensureIndexGroup(DEFAULT_VALUE_CHAIN);
     }
+  });
+  const [chainHistory, setChainHistory] = useState<ValueChainHistoryEntry[]>(() => readStoredChainHistory());
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(() => {
+    const savedActiveHistoryId = readStoredActiveHistoryId();
+    const history = readStoredChainHistory();
+    return history.some((entry) => entry.id === savedActiveHistoryId) ? savedActiveHistoryId : null;
   });
   const [sortMode, setSortMode] = useState<SortMode>('change');
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [chainMenuOpen, setChainMenuOpen] = useState(false);
   const [nameEditModal, setNameEditModal] = useState<NameEditModalState | null>(null);
   const [structureEditModal, setStructureEditModal] = useState<StructureEditModalState | null>(null);
   const [stockEditModal, setStockEditModal] = useState<StockEditModalState | null>(null);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+  const [importDecisionModal, setImportDecisionModal] = useState<ImportDecisionModalState | null>(null);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null);
@@ -657,6 +863,11 @@ export function ValueChainMap({
       ? clamp(saved, DETAIL_PANEL_MIN_WIDTH, DETAIL_PANEL_MAX_WIDTH)
       : 460;
   });
+  const [stockFontSize, setStockFontSize] = useState(() => {
+    const saved = Number(localStorage.getItem(STOCK_FONT_SIZE_STORAGE_KEY));
+    return Number.isFinite(saved) ? clamp(saved, 8, 16) : 10;
+  });
+  const [importBackup, setImportBackup] = useState<ValueChainData | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -664,11 +875,42 @@ export function ValueChainMap({
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(chain));
-  }, [chain]);
+    if (activeHistoryId) {
+      setChainHistory((current) => current.map((entry) => (
+        entry.id === activeHistoryId ? { ...entry, chain } : entry
+      )));
+    }
+  }, [activeHistoryId, chain]);
+
+  useEffect(() => {
+    localStorage.setItem(CHAIN_HISTORY_STORAGE_KEY, JSON.stringify(chainHistory));
+  }, [chainHistory]);
+
+  useEffect(() => {
+    if (activeHistoryId) {
+      localStorage.setItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY, activeHistoryId);
+    } else {
+      localStorage.removeItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY);
+    }
+  }, [activeHistoryId]);
 
   useEffect(() => {
     localStorage.setItem(CHART_PANEL_WIDTH_STORAGE_KEY, String(chartSidebarWidth));
   }, [chartSidebarWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(STOCK_FONT_SIZE_STORAGE_KEY, String(stockFontSize));
+  }, [stockFontSize]);
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+    const preventBrowserZoom = (event: WheelEvent) => {
+      if (event.ctrlKey) event.preventDefault();
+    };
+    element.addEventListener('wheel', preventBrowserZoom, { passive: false });
+    return () => element.removeEventListener('wheel', preventBrowserZoom);
+  }, []);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -685,17 +927,25 @@ export function ValueChainMap({
   }, [exportMenuOpen]);
 
   useEffect(() => {
-    if (!nameEditModal && !structureEditModal && !stockEditModal && !confirmModal) return;
+    if (!chainMenuOpen) return;
+    const close = () => setChainMenuOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [chainMenuOpen]);
+
+  useEffect(() => {
+    if (!nameEditModal && !structureEditModal && !stockEditModal && !confirmModal && !importDecisionModal) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setNameEditModal(null);
       setStructureEditModal(null);
       setStockEditModal(null);
       setConfirmModal(null);
+      setImportDecisionModal(null);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [confirmModal, nameEditModal, stockEditModal, structureEditModal]);
+  }, [confirmModal, importDecisionModal, nameEditModal, stockEditModal, structureEditModal]);
 
   useEffect(() => {
     if (!chartSidebarOpen && !detailSymbol && !comparisonPanelOpen) return;
@@ -741,7 +991,15 @@ export function ValueChainMap({
     });
     return map;
   }, [chain.groups]);
+  const indexGroup = useMemo(() => (
+    chain.groups.find((group) => group.id === INDEX_GROUP_ID) ?? createDefaultIndexGroup()
+  ), [chain.groups]);
   const selectedSet = useMemo(() => new Set(selectedSymbols), [selectedSymbols]);
+  const indexStockRowCount = Math.max(2, Math.ceil(indexGroup.stocks.length / 3));
+  const indexStockRowHeight = Math.max(35, stockFontSize * 2 + 16);
+  const stageHeaderHeight = HEADER_STAGE_ROW_HEIGHT;
+  const segmentHeaderHeight = HEADER_SEGMENT_ROW_HEIGHT + Math.max(0, indexStockRowCount - 2) * indexStockRowHeight;
+  const totalHeaderHeight = stageHeaderHeight + segmentHeaderHeight;
 
   const resolveChange = (stock: ChainStock): number => {
     const live = tickerStats.get(stock.symbol.toUpperCase());
@@ -990,7 +1248,22 @@ export function ValueChainMap({
     setSelectedSymbols((current) => current.filter((item) => item !== symbol));
   };
 
+  const removeStocksFromGroup = (groupId: string, symbols: string[]) => {
+    const symbolSet = new Set(symbols);
+    if (symbolSet.size === 0) return;
+    setChain((current) => ({
+      ...current,
+      groups: current.groups.map((group) => (
+        group.id === groupId
+          ? { ...group, stocks: group.stocks.filter((stock) => !symbolSet.has(stock.symbol)) }
+          : group
+      )),
+    }));
+    setSelectedSymbols((current) => current.filter((symbol) => !symbolSet.has(symbol)));
+  };
+
   const removeGroup = (groupId: string) => {
+    if (groupId === INDEX_GROUP_ID) return;
     const removedSymbols = chain.groups.find((group) => group.id === groupId)?.stocks.map((stock) => stock.symbol) ?? [];
     setChain((current) => ({
       ...current,
@@ -1170,6 +1443,7 @@ export function ValueChainMap({
   const executeConfirmedDelete = () => {
     if (!confirmModal) return;
     if (confirmModal.type === 'stock') removeStockFromGroup(confirmModal.groupId, confirmModal.symbol);
+    if (confirmModal.type === 'selected-stocks') removeStocksFromGroup(confirmModal.groupId, confirmModal.symbols);
     if (confirmModal.type === 'group') removeGroup(confirmModal.groupId);
     if (confirmModal.type === 'stage') removeStage(confirmModal.stageId);
     if (confirmModal.type === 'segment') removeSegment(confirmModal.segmentId);
@@ -1190,19 +1464,102 @@ export function ValueChainMap({
     downloadText('mooview-value-chain-template-spec.md', 'text/markdown;charset=utf-8', createTemplateSpec(chain));
   };
 
+  const queueImportDecision = (importedChain: ValueChainData, sourceName: string) => {
+    setImportDecisionModal({
+      chain: ensureIndexGroup(importedChain),
+      importedAt: new Date().toISOString(),
+      sourceName,
+    });
+  };
+
+  const applyImportDecision = (mode: 'replace-current' | 'new-history') => {
+    if (!importDecisionModal) return;
+    const importedChain = ensureIndexGroup(importDecisionModal.chain);
+    setImportBackup(chain);
+    if (mode === 'new-history') {
+      const entry = createHistoryEntry(importedChain, importDecisionModal.importedAt);
+      setChainHistory((current) => [entry, ...current]);
+      setActiveHistoryId(entry.id);
+      setChain(importedChain);
+    } else {
+      if (activeHistoryId) {
+        setChainHistory((current) => current.map((entry) => (
+          entry.id === activeHistoryId
+            ? { ...entry, importedAt: importDecisionModal.importedAt, chain: importedChain }
+            : entry
+        )));
+      }
+      setChain(importedChain);
+    }
+    setImportDecisionModal(null);
+  };
+
+  const selectHistoryEntry = (entry: ValueChainHistoryEntry) => {
+    setActiveHistoryId(entry.id);
+    setChain(entry.chain);
+    setChainMenuOpen(false);
+  };
+
+  const removeHistoryEntry = (entryId: string) => {
+    setChainHistory((current) => current.filter((entry) => entry.id !== entryId));
+    if (activeHistoryId === entryId) {
+      setActiveHistoryId(null);
+    }
+  };
+
   const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
     const text = await file.text();
-    if (file.name.toLowerCase().endsWith('.json')) {
-      const imported = validateChainData(JSON.parse(text));
-      if (imported) setChain(imported);
+    const importedJson = parseValueChainJson(text);
+    if (importedJson || file.name.toLowerCase().endsWith('.json')) {
+      const imported = importedJson;
+      if (imported) {
+        queueImportDecision(imported, file.name);
+      }
       return;
     }
     const rows = parseCsv(text);
     const groups = new Map<string, ValueGroup>();
+    const stageMap = new Map<string, Stage>();
+    const categoryMap = new Map<string, Category>();
     for (const row of rows) {
+      const stageId = row.stageId?.trim() ?? '';
+      const segmentId = row.segmentId?.trim() ?? '';
+      if (stageId && segmentId && segmentId !== INDEX_SEGMENT_ID) {
+        const stage = stageMap.get(stageId) ?? {
+          id: stageId,
+          name: row.stageName?.trim() || stageId,
+          segments: [],
+        };
+        if (!stage.segments.some((segment) => segment.id === segmentId)) {
+          stage.segments.push({
+            id: segmentId,
+            name: (row.segmentName?.trim() || segmentId).replace(/ \/ /g, '\n'),
+            parentId: stageId,
+          });
+        }
+        stageMap.set(stageId, stage);
+      }
+
+      const categoryId = row.categoryId?.trim() ?? '';
+      const laneId = row.laneId?.trim() ?? '';
+      if (categoryId && laneId && categoryId !== INDEX_CATEGORY_ID) {
+        const category = categoryMap.get(categoryId) ?? {
+          id: categoryId,
+          name: row.categoryName?.trim() || categoryId,
+          lanes: [],
+        };
+        if (!category.lanes.some((lane) => lane.id === laneId)) {
+          category.lanes.push({
+            id: laneId,
+            name: row.laneName?.trim() || laneId,
+          });
+        }
+        categoryMap.set(categoryId, category);
+      }
+
       const groupId = row.groupId?.trim();
       if (!groupId) continue;
       const existing = groups.get(groupId);
@@ -1232,9 +1589,9 @@ export function ValueChainMap({
       }
       const nextGroup: ValueGroup = existing ?? {
         id: groupId,
-        categoryId: row.categoryId?.trim() || '',
-        laneId: row.laneId?.trim() || '',
-        segmentId: row.segmentId?.trim() || '',
+        categoryId: groupId === INDEX_GROUP_ID ? INDEX_CATEGORY_ID : categoryId,
+        laneId: groupId === INDEX_GROUP_ID ? INDEX_LANE_ID : laneId,
+        segmentId: groupId === INDEX_GROUP_ID ? INDEX_SEGMENT_ID : segmentId,
         name: row.groupName?.trim() || groupId,
         stocks: [],
       };
@@ -1242,11 +1599,13 @@ export function ValueChainMap({
       groups.set(groupId, nextGroup);
     }
     if (groups.size > 0) {
-      setChain((current) => ({
-        ...current,
-        name: rows[0]?.chainName?.trim() || current.name,
+      queueImportDecision(ensureIndexGroup({
+        ...chain,
+        name: rows[0]?.chainName?.trim() || chain.name,
+        stages: stageMap.size > 0 ? Array.from(stageMap.values()) : chain.stages,
+        categories: categoryMap.size > 0 ? Array.from(categoryMap.values()) : chain.categories,
         groups: Array.from(groups.values()),
-      }));
+      }), file.name);
     }
   };
 
@@ -1277,6 +1636,13 @@ export function ValueChainMap({
     ));
   };
 
+  const getSelectedSymbolsInGroup = (groupId: string): string[] => {
+    const group = chain.groups.find((item) => item.id === groupId);
+    if (!group) return [];
+    const groupSymbols = new Set(group.stocks.map((stock) => stock.symbol));
+    return selectedSymbols.filter((symbol) => groupSymbols.has(symbol));
+  };
+
   const compareSymbols = (symbols: string[]) => {
     const uniqueSymbols = Array.from(new Set(symbols)).filter(Boolean);
     if (uniqueSymbols.length === 0) return;
@@ -1291,6 +1657,52 @@ export function ValueChainMap({
   const resetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
+  };
+
+  const renderStockCard = (stock: ChainStock, group: ValueGroup) => {
+    const change = resolveChange(stock);
+    const selected = selectedSet.has(stock.symbol);
+    const category = chain.categories.find((item) => item.id === group.categoryId);
+    const lane = category?.lanes.find((item) => item.id === group.laneId);
+    const segment = findSegment(chain, group.segmentId);
+    const stage = findStage(chain, group.segmentId);
+    const stockClassification = group.id === INDEX_GROUP_ID
+      ? group.name
+      : [
+          category?.name,
+          lane?.name,
+          stage?.name,
+          segment?.name.replace(/\n/g, ' '),
+          group.name,
+        ].filter(Boolean).join(' / ');
+
+    return (
+      <button
+        key={`${group.id}-${stock.symbol}`}
+        type="button"
+        className={`min-h-[34px] border px-1 py-0.5 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
+        style={{ ...getHeatStyle(change), fontSize: `${stockFontSize}px` }}
+        title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
+        onClick={() => {
+          if (panMovedRef.current) return;
+          if (multiSelectMode) {
+            toggleSelectSymbol(stock.symbol);
+          }
+        }}
+        onDoubleClick={() => {
+          if (panMovedRef.current) return;
+          openSymbolInSidebar(stock.symbol);
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stock', groupId: group.id, symbol: stock.symbol, label: stock.name } });
+        }}
+      >
+        <span className="block font-bold text-white truncate leading-tight">{stock.name}</span>
+        <span className="block font-mono text-white leading-tight">{formatPct(change)}</span>
+      </button>
+    );
   };
 
   const finishPanning = () => {
@@ -1344,6 +1756,9 @@ export function ValueChainMap({
     }
     return Array.from(options.entries()).map(([symbol, name]) => ({ symbol, name }));
   }, [chain.groups, chartState.symbol, sidePanelPrimarySymbol, tickers]);
+  const activeHistoryEntry = useMemo(() => (
+    chainHistory.find((entry) => entry.id === activeHistoryId) ?? null
+  ), [activeHistoryId, chainHistory]);
 
   useEffect(() => {
     if (sidePanelChartSymbols.length > 0) {
@@ -1405,6 +1820,8 @@ export function ValueChainMap({
   const confirmTitle = confirmModal
     ? confirmModal.type === 'stock'
       ? '銘柄を削除'
+      : confirmModal.type === 'selected-stocks'
+        ? '個別銘柄の削除'
       : confirmModal.type === 'group'
         ? 'グループを削除'
         : confirmModal.type === 'stage'
@@ -1418,6 +1835,8 @@ export function ValueChainMap({
   const confirmMessage = confirmModal
     ? confirmModal.type === 'stock'
       ? `${confirmModal.label} をこのグループから削除します。`
+      : confirmModal.type === 'selected-stocks'
+        ? `${confirmModal.label} をこのグループから削除します。`
       : confirmModal.type === 'group'
         ? `${confirmModal.label} と中の銘柄を削除します。`
         : confirmModal.type === 'stage'
@@ -1435,8 +1854,66 @@ export function ValueChainMap({
         <div className="min-w-0 flex items-center gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-1.5 h-8 bg-emerald-500 rounded-full" />
-            <div className="min-w-0">
-              <div className="text-xs font-bold text-white truncate">{chain.name}</div>
+            <div className="relative min-w-0" data-no-pan="true">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setChainMenuOpen((open) => !open);
+                }}
+                className="max-w-[280px] min-w-[190px] h-9 px-2 border border-transparent hover:border-[#303030] hover:bg-[#101010] flex items-center justify-between gap-2 text-left"
+                title="バリューチェーン履歴"
+              >
+                <span className="min-w-0">
+                  <span className="block text-xs font-bold text-white truncate">{chain.name}</span>
+                  <span className="block text-[9px] text-gray-500 truncate">
+                    {activeHistoryEntry ? formatImportTimestamp(activeHistoryEntry.importedAt) : '現在表示'}
+                  </span>
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-gray-500 transition-transform ${chainMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {chainMenuOpen && (
+                <div
+                  className="absolute left-0 top-10 z-50 w-[360px] max-h-80 overflow-y-auto bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px]"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="px-2.5 py-1.5 border-b border-[#242424] text-gray-500">
+                    インポート履歴
+                  </div>
+                  {chainHistory.length === 0 ? (
+                    <div className="px-2.5 py-3 text-gray-500">履歴はまだありません</div>
+                  ) : (
+                    chainHistory.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className={`group flex items-center gap-2 px-2 py-1.5 hover:bg-[#151515] ${entry.id === activeHistoryId ? 'bg-[#10251f]' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => selectHistoryEntry(entry)}
+                          className="min-w-0 flex-1 text-left"
+                          title={`${entry.chain.name} / ${formatImportTimestamp(entry.importedAt)}`}
+                        >
+                          <span className="block text-[11px] font-bold text-gray-100 truncate">{entry.chain.name}</span>
+                          <span className="block text-[9px] text-gray-500 truncate">{formatImportTimestamp(entry.importedAt)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeHistoryEntry(entry.id);
+                          }}
+                          className="w-7 h-7 shrink-0 flex items-center justify-center text-gray-500 hover:text-red-300 hover:bg-red-950/30"
+                          title="履歴を削除"
+                          aria-label={`${entry.chain.name} の履歴を削除`}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div className="h-7 w-px bg-[#2a2a2a]" />
@@ -1511,6 +1988,20 @@ export function ValueChainMap({
           {multiSelectMode && <span className="text-emerald-300">複数選択: {selectedSymbols.length}件</span>}
         </div>
         <div className="flex items-center gap-2 shrink-0" data-no-pan="true">
+          {importBackup && (
+            <button
+              type="button"
+              onClick={() => {
+                setChain(importBackup);
+                setImportBackup(null);
+              }}
+              className="h-6 px-2 border border-amber-700/60 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40"
+            >
+              インポートを戻す
+            </button>
+          )}
+          <button type="button" onClick={() => setStockFontSize((value) => clamp(value + 1, 8, 16))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを大きく">A+</button>
+          <button type="button" onClick={() => setStockFontSize((value) => clamp(value - 1, 8, 16))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを小さく">A-</button>
           <button type="button" onClick={() => setZoom((value) => clamp(value - 0.1, 0.55, 1.6))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="縮小">-</button>
           <span className="font-mono text-gray-300 w-12 text-center">{Math.round(zoom * 100)}%</span>
           <button type="button" onClick={() => setZoom((value) => clamp(value + 0.1, 0.55, 1.6))} className="h-6 px-2 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="拡大">+</button>
@@ -1526,6 +2017,11 @@ export function ValueChainMap({
         className={`relative flex-1 min-h-0 overflow-hidden bg-[#050505] ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`}
         onWheel={(event) => {
           event.preventDefault();
+          event.stopPropagation();
+          if (event.ctrlKey) {
+            setZoom((current) => clamp(current + (event.deltaY > 0 ? -0.06 : 0.06), 0.55, 1.6));
+            return;
+          }
           if (Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey) {
             const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
               ? event.deltaX
@@ -1536,13 +2032,18 @@ export function ValueChainMap({
             }));
             return;
           }
-          const nextZoom = clamp(zoom + (event.deltaY > 0 ? -0.06 : 0.06), 0.55, 1.6);
-          setZoom(nextZoom);
+          setPan((current) => ({
+            ...current,
+            y: current.y - event.deltaY,
+          }));
         }}
         onMouseDown={(event) => {
           if (event.button !== 0) return;
           const target = event.target as HTMLElement;
           if (target.closest('input,select,textarea,a,[data-pan-block="true"],[data-no-pan="true"]')) return;
+          if (chartSidebarOpen || detailSymbol || comparisonPanelOpen) {
+            closeChartSidebar();
+          }
           panMovedRef.current = false;
           setIsPanning(true);
           setPanStart({ mouseX: event.clientX, mouseY: event.clientY, x: pan.x, y: pan.y });
@@ -1575,8 +2076,29 @@ export function ValueChainMap({
             className="grid text-[10px] border-l border-t border-[#252525] shadow-2xl bg-[#0b0b0b]"
             style={{ gridTemplateColumns }}
           >
-            <div className="bg-[#101010] border-r border-b border-[#252525]" />
-            <div className="bg-[#101010] border-r border-b border-[#252525]" />
+            <div
+              className="bg-[#101010] border-r border-b border-[#252525] p-1 overflow-hidden"
+              style={{ gridColumn: 'span 2', gridRow: 'span 2', height: `${totalHeaderHeight}px` }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: INDEX_GROUP_ID, label: indexGroup.name } });
+              }}
+            >
+              <button
+                type="button"
+                className="w-full text-left text-[8px] font-bold text-gray-300 hover:text-white truncate mb-0.5"
+                onClick={() => {
+                  if (panMovedRef.current) return;
+                  updateGroupName(INDEX_GROUP_ID);
+                }}
+                title="指数"
+              >
+                {indexGroup.name}
+              </button>
+              <div className="grid grid-cols-3 gap-0.5">
+                {sortedStocks(indexGroup.stocks).map((stock) => renderStockCard(stock, indexGroup))}
+              </div>
+            </div>
             {chain.stages.map((stage) => {
               const merged = shouldMergeStageHeader(stage);
               return (
@@ -1584,10 +2106,11 @@ export function ValueChainMap({
                   key={stage.id}
                   type="button"
                   data-no-pan="true"
-                  className={`${merged ? 'min-h-[72px]' : 'h-8'} bg-[#1d1d1f] border-r border-b border-[#353535] flex items-center justify-center text-gray-200 font-bold hover:bg-[#27272a] transition px-2`}
+                  className="bg-[#1d1d1f] border-r border-b border-[#353535] flex items-center justify-center text-gray-200 font-bold hover:bg-[#27272a] transition px-2"
                   style={{
                     gridColumn: `span ${stage.segments.length}`,
                     gridRow: merged ? 'span 2' : undefined,
+                    height: `${merged ? totalHeaderHeight : stageHeaderHeight}px`,
                   }}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -1600,8 +2123,6 @@ export function ValueChainMap({
               );
             })}
 
-            <div className="h-10 bg-[#101010] border-r border-b border-[#252525]" />
-            <div className="h-10 bg-[#101010] border-r border-b border-[#252525]" />
             {segments.map((segment) => {
               const stage = findStage(chain, segment.id);
               if (stage && shouldMergeStageHeader(stage)) return null;
@@ -1614,7 +2135,8 @@ export function ValueChainMap({
                     event.preventDefault();
                     setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'segment', id: segment.id, label: segment.name } });
                   }}
-                  className="h-10 bg-[#202022] border-r border-b border-[#353535] px-2 text-center hover:bg-[#29292b] transition"
+                  className="bg-[#202022] border-r border-b border-[#353535] px-2 text-center hover:bg-[#29292b] transition"
+                  style={{ height: `${segmentHeaderHeight}px` }}
                   title={`${stage?.name ?? ''} / ${segment.name.replace(/\n/g, ' ')}`}
                 >
                   <span className="block text-[9px] text-gray-500 truncate">{stage?.name}</span>
@@ -1629,7 +2151,7 @@ export function ValueChainMap({
                 return (
                   <div
                     key={`${category.id}-${lane.id}-${segment.id}`}
-                    className="min-h-[132px] bg-[#111214] border-r border-b border-[#252525] p-1.5"
+                    className="min-h-[118px] bg-[#111214] border-r border-b border-[#252525] p-1"
                     onContextMenu={(event) => {
                       event.preventDefault();
                       if (groups.length === 0) {
@@ -1646,28 +2168,26 @@ export function ValueChainMap({
                         });
                       }
                     }}
-                    data-no-pan="true"
                   >
                     {groups.length === 0 ? (
                       <div
-                        className="h-full min-h-[116px] border border-dashed border-[#252525] bg-[#0d0d0e] hover:border-[#3f3f46] hover:bg-[#121214] transition"
+                        className="h-full min-h-[104px] border border-dashed border-[#252525] bg-[#0d0d0e] hover:border-[#3f3f46] hover:bg-[#121214] transition"
                         title="該当銘柄0件の空白枠。右クリックで銘柄追加"
                       />
                     ) : (
-                      <div className="space-y-1.5">
+                      <div className="space-y-1">
                         {groups.map((group) => (
                           <div
                             key={group.id}
-                            className="border border-[#2b2b2b] bg-[#0b0b0b] p-1.5"
+                            className="border border-[#2b2b2b] bg-[#0a0a0a] p-1"
                             onContextMenu={(event) => {
                               event.preventDefault();
                               setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: group.id, label: group.name } });
                             }}
-                            data-no-pan="true"
                           >
                             <button
                               type="button"
-                              className="w-full text-left text-[9px] font-bold text-gray-300 hover:text-white truncate mb-1"
+                              className="w-full text-left text-[8px] font-bold text-gray-300 hover:text-white truncate mb-0.5"
                               onClick={() => {
                                 if (panMovedRef.current) return;
                                 updateGroupName(group.id);
@@ -1676,45 +2196,8 @@ export function ValueChainMap({
                             >
                               {group.name}
                             </button>
-                            <div className="grid grid-cols-2 gap-1">
-                              {sortedStocks(group.stocks).map((stock) => {
-                                const change = resolveChange(stock);
-                                const selected = selectedSet.has(stock.symbol);
-                                const stage = findStage(chain, group.segmentId);
-                                const stockClassification = [
-                                  category.name,
-                                  lane.name,
-                                  stage?.name,
-                                  segment.name.replace(/\n/g, ' '),
-                                  group.name,
-                                ].filter(Boolean).join(' / ');
-                                return (
-                                  <button
-                                    key={`${group.id}-${stock.symbol}`}
-                                    type="button"
-                                    className={`min-h-[38px] border px-1.5 py-1 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
-                                    style={getHeatStyle(change)}
-                                    title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
-                                    onClick={() => {
-                                      if (panMovedRef.current) return;
-                                      if (multiSelectMode) {
-                                        toggleSelectSymbol(stock.symbol);
-                                      }
-                                    }}
-                                    onDoubleClick={() => {
-                                      if (panMovedRef.current) return;
-                                      openSymbolInSidebar(stock.symbol);
-                                    }}
-                                    onContextMenu={(event) => {
-                                      event.preventDefault();
-                                      setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stock', groupId: group.id, symbol: stock.symbol, label: stock.name } });
-                                    }}
-                                  >
-                                    <span className="block text-[9px] font-bold text-white truncate">{stock.name}</span>
-                                    <span className="block text-[9px] font-mono text-white">{formatPct(change)}</span>
-                                  </button>
-                                );
-                              })}
+                            <div className="grid grid-cols-2 gap-0.5">
+                              {sortedStocks(group.stocks).map((stock) => renderStockCard(stock, group))}
                             </div>
                           </div>
                         ))}
@@ -1795,24 +2278,26 @@ export function ValueChainMap({
                 className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                個別銘柄を削除
+                個別銘柄の削除
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const group = chain.groups.find((item) => item.id === contextMenu.target.groupId);
-                  setConfirmModal({
-                    type: 'group',
-                    groupId: contextMenu.target.groupId,
-                    label: group?.name ?? 'グループ',
-                  });
-                  setContextMenu(null);
-                }}
-                className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                グループごと削除
-              </button>
+              {contextMenu.target.groupId !== INDEX_GROUP_ID && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const group = chain.groups.find((item) => item.id === contextMenu.target.groupId);
+                    setConfirmModal({
+                      type: 'group',
+                      groupId: contextMenu.target.groupId,
+                      label: group?.name ?? 'グループ',
+                    });
+                    setContextMenu(null);
+                  }}
+                  className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  グループごと削除
+                </button>
+              )}
               <button type="button" onClick={() => { setMultiSelectMode(true); toggleSelectSymbol(contextMenu.target.symbol); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <CheckSquare className="w-3.5 h-3.5" />
                 複数選択
@@ -1874,14 +2359,46 @@ export function ValueChainMap({
                   <button
                     type="button"
                     onClick={() => {
-                      setConfirmModal({ type: 'group', groupId: contextMenu.target.id, label: contextMenu.target.label });
+                      setMultiSelectMode(true);
                       setContextMenu(null);
                     }}
-                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5" />
+                    複数選択
+                  </button>
+                  <button
+                    type="button"
+                    disabled={getSelectedSymbolsInGroup(contextMenu.target.id).length === 0}
+                    onClick={() => {
+                      const symbols = getSelectedSymbolsInGroup(contextMenu.target.id);
+                      if (symbols.length === 0) return;
+                      setConfirmModal({
+                        type: 'selected-stocks',
+                        groupId: contextMenu.target.id,
+                        symbols,
+                        label: `${symbols.length}件の選択中銘柄`,
+                      });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    グループ削除
+                    個別銘柄の削除
                   </button>
+                  {contextMenu.target.id !== INDEX_GROUP_ID && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmModal({ type: 'group', groupId: contextMenu.target.id, label: contextMenu.target.label });
+                        setContextMenu(null);
+                      }}
+                      className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      グループ削除
+                    </button>
+                  )}
                 </>
               )}
               {contextMenu.target.type === 'stage' && (
@@ -2071,6 +2588,72 @@ export function ValueChainMap({
               )}
             </>
           )}
+        </div>
+      )}
+
+      {importDecisionModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/55 flex items-center justify-center px-4"
+          data-no-pan="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setImportDecisionModal(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-[#080808] border border-[#343434] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
+              <div className="text-xs font-bold text-white">インポート先の確認</div>
+              <button
+                type="button"
+                onClick={() => setImportDecisionModal(null)}
+                className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white"
+                aria-label="インポート確認を閉じる"
+                title="閉じる"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 space-y-3 text-[11px] text-gray-300">
+              <div className="border border-[#242424] bg-[#101010] p-2">
+                <div className="text-[9px] text-gray-500">取り込みファイル</div>
+                <div className="mt-0.5 font-bold text-white truncate">{importDecisionModal.sourceName}</div>
+                <div className="mt-2 text-[9px] text-gray-500">取り込み名</div>
+                <div className="mt-0.5 font-bold text-white truncate">{importDecisionModal.chain.name}</div>
+                <div className="mt-2 text-[9px] text-gray-500">インポート日時</div>
+                <div className="mt-0.5 font-mono text-gray-200">{formatImportTimestamp(importDecisionModal.importedAt)}</div>
+              </div>
+              <div className="text-gray-400 leading-relaxed">
+                現在開いている「{chain.name}」へ上書きするか、履歴プルダウン内に新しいバリューチェーンとして追加するかを選択してください。
+              </div>
+            </div>
+            <div className="px-3 py-3 border-t border-[#242424] flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setImportDecisionModal(null)}
+                className="h-8 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#181818]"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => applyImportDecision('replace-current')}
+                className="h-8 px-3 border border-[#3a3a3a] bg-[#181818] text-[11px] font-bold text-white hover:bg-[#222]"
+              >
+                現在表示へ上書き
+              </button>
+              <button
+                type="button"
+                onClick={() => applyImportDecision('new-history')}
+                className="h-8 px-3 border border-emerald-700 bg-emerald-700 text-[11px] font-bold text-white hover:bg-emerald-600"
+              >
+                履歴へ新設
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

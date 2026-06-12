@@ -21,6 +21,22 @@
 | 今回追加修正 | エクスポート1アイコン化、Step 4行列追加/削除、CRUD整理、銘柄名補完、lint/build、push | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | 工程の左右追加、分類の上下追加、個別銘柄/グループ削除分離、銘柄カード表示簡略化、エクスポートメニュー表示修正、lint/build | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 検証・push | 型チェック、ビルド、HTTP疎通、コミット、push | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | 縦ホイールを上下移動、Ctrl+縦ホイールを拡大縮小に変更し、キャンバス上のブラウザ拡大縮小を抑止 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | グループ表示密度、個別銘柄フォント、A+/A-フォントサイズ操作を追加 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 左上交点を「指数」グリッドへ統合し、QQQ/SPY/SOX/日経225/200A/213Aを初期登録 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | CSV/JSONインポートで工程・分類を復元し、インポート取り消しを追加 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | lint/build検証 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | 大工程+中工程ヘッダー高さを結合ヘッダーと揃える | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | サイドパネル表示中にグリッド側クリックでサイドパネルを閉じる | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | `.txt` 等でも中身がJSONならJSONインポートとして認識し、`segments[].parentId` を補完する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | グループ右クリックメニューに「個別銘柄の削除」を追加し、選択中銘柄を削除できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | lint/build/HTTP 200確認 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | 複数選択を銘柄右クリック/グループ右クリックから確実に開始できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 「半導体バリューチェーン」表示箇所を履歴プルダウン化し、インポート日時と履歴削除を追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | インポート前に現在表示へ上書き/履歴へ新設を確認する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回追加修正 | 指数グループが6銘柄超のとき中分類ヘッダー側を拡張する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 未実装分析 | JP/US祝日カレンダー連携、押し続け日付移動、複数選択銘柄の新規ウォッチリスト欄追加は未実装/一部未実装として整理。TradingView公式/カスタム切替は不要指定のため除外 | 分析完了 | `C:\Users\mahha\OneDrive\開発\mooview\docs\spec_valuchain_heatmap.md` |
+| 今回検証 | lint/build/HTTP 200確認 | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 
 世界屈指のプロエンジニアとして、ご指摘の事項を完全に統合し、機能要件の漏れを一切許さない最終版の「プロダクト要件定義書（PRD）」を作成しました。
 開発チームが「土台（Step 1）」から順に構築できるよう、依存関係を整理した実装ステップとなっています。

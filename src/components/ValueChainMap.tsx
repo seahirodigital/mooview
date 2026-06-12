@@ -114,7 +114,9 @@ type NameEditModalState = {
 };
 
 type StructureEditModalState =
+  | { type: 'stage'; referenceStageId: string; position: 'before' | 'after'; value: string }
   | { type: 'segment'; stageId: string; afterSegmentId?: string; value: string }
+  | { type: 'category'; referenceCategoryId: string; position: 'before' | 'after'; value: string }
   | { type: 'lane'; categoryId: string; afterLaneId?: string; value: string };
 
 type StockEditModalState = {
@@ -999,6 +1001,32 @@ export function ValueChainMap({
     }
   };
 
+  const addStage = (referenceStageId: string, name: string, position: 'before' | 'after') => {
+    const stageName = name.trim();
+    if (!stageName) return;
+    setChain((current) => {
+      const nextStageId = createValueChainId('stage');
+      const nextStage: Stage = {
+        id: nextStageId,
+        name: stageName,
+        segments: [{
+          id: createValueChainId('segment'),
+          name: stageName,
+          parentId: nextStageId,
+        }],
+      };
+      const referenceIndex = current.stages.findIndex((stage) => stage.id === referenceStageId);
+      const insertIndex = referenceIndex < 0
+        ? current.stages.length
+        : position === 'before'
+          ? referenceIndex
+          : referenceIndex + 1;
+      const nextStages = [...current.stages];
+      nextStages.splice(insertIndex, 0, nextStage);
+      return { ...current, stages: nextStages };
+    });
+  };
+
   const addSegment = (stageId: string, name: string, afterSegmentId?: string) => {
     const segmentName = name.trim();
     if (!segmentName) return;
@@ -1049,6 +1077,27 @@ export function ValueChainMap({
         stages: current.stages.filter((item) => item.id !== stageId),
         groups: current.groups.filter((group) => !removedSegmentIds.has(group.segmentId)),
       };
+    });
+  };
+
+  const addCategory = (referenceCategoryId: string, name: string, position: 'before' | 'after') => {
+    const categoryName = name.trim();
+    if (!categoryName) return;
+    setChain((current) => {
+      const nextCategory: Category = {
+        id: createValueChainId('category'),
+        name: categoryName,
+        lanes: [{ id: createValueChainId('lane'), name: '未分類' }],
+      };
+      const referenceIndex = current.categories.findIndex((category) => category.id === referenceCategoryId);
+      const insertIndex = referenceIndex < 0
+        ? current.categories.length
+        : position === 'before'
+          ? referenceIndex
+          : referenceIndex + 1;
+      const nextCategories = [...current.categories];
+      nextCategories.splice(insertIndex, 0, nextCategory);
+      return { ...current, categories: nextCategories };
     });
   };
 
@@ -1106,8 +1155,12 @@ export function ValueChainMap({
       setStructureEditModal(null);
       return;
     }
-    if (structureEditModal.type === 'segment') {
+    if (structureEditModal.type === 'stage') {
+      addStage(structureEditModal.referenceStageId, name, structureEditModal.position);
+    } else if (structureEditModal.type === 'segment') {
       addSegment(structureEditModal.stageId, name, structureEditModal.afterSegmentId);
+    } else if (structureEditModal.type === 'category') {
+      addCategory(structureEditModal.referenceCategoryId, name, structureEditModal.position);
     } else {
       addLane(structureEditModal.categoryId, name, structureEditModal.afterLaneId);
     }
@@ -1343,6 +1396,12 @@ export function ValueChainMap({
 
   const gridTemplateColumns = '132px 64px ' + segments.map(() => '142px').join(' ');
   const canvasWidth = 196 + segments.length * 142;
+  const contextStageIndex = contextMenu?.target.type === 'stage'
+    ? chain.stages.findIndex((stage) => stage.id === contextMenu.target.id)
+    : -1;
+  const contextCategoryIndex = contextMenu?.target.type === 'category'
+    ? chain.categories.findIndex((category) => category.id === contextMenu.target.id)
+    : -1;
   const confirmTitle = confirmModal
     ? confirmModal.type === 'stock'
       ? '銘柄を削除'
@@ -1620,15 +1679,22 @@ export function ValueChainMap({
                             <div className="grid grid-cols-2 gap-1">
                               {sortedStocks(group.stocks).map((stock) => {
                                 const change = resolveChange(stock);
-                                const live = tickerStats.get(stock.symbol.toUpperCase());
                                 const selected = selectedSet.has(stock.symbol);
+                                const stage = findStage(chain, group.segmentId);
+                                const stockClassification = [
+                                  category.name,
+                                  lane.name,
+                                  stage?.name,
+                                  segment.name.replace(/\n/g, ' '),
+                                  group.name,
+                                ].filter(Boolean).join(' / ');
                                 return (
                                   <button
                                     key={`${group.id}-${stock.symbol}`}
                                     type="button"
                                     className={`min-h-[38px] border px-1.5 py-1 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
                                     style={getHeatStyle(change)}
-                                    title={`${findStage(chain, group.segmentId)?.name ?? ''} / ${findSegment(chain, group.segmentId)?.name.replace(/\n/g, ' ') ?? ''}\n${stock.name}\n${periodMode === 'week' ? '5日間変動率' : '前日比'} ${formatPct(change)}`}
+                                    title={`分類: ${stockClassification}\n銘柄: ${stock.name}\nコード: ${stock.symbol}\n変動率: ${formatPct(change)}`}
                                     onClick={() => {
                                       if (panMovedRef.current) return;
                                       if (multiSelectMode) {
@@ -1645,11 +1711,7 @@ export function ValueChainMap({
                                     }}
                                   >
                                     <span className="block text-[9px] font-bold text-white truncate">{stock.name}</span>
-                                    <span className="block text-[9px] font-mono text-white/85 truncate">{stock.symbol}</span>
                                     <span className="block text-[9px] font-mono text-white">{formatPct(change)}</span>
-                                    {live?.currentPrice !== null && live?.currentPrice !== undefined && (
-                                      <span className="block text-[8px] text-white/65 truncate">{live.currentPrice.toLocaleString()}</span>
-                                    )}
                                   </button>
                                 );
                               })}
@@ -1733,7 +1795,23 @@ export function ValueChainMap({
                 className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                銘柄削除
+                個別銘柄を削除
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const group = chain.groups.find((item) => item.id === contextMenu.target.groupId);
+                  setConfirmModal({
+                    type: 'group',
+                    groupId: contextMenu.target.groupId,
+                    label: group?.name ?? 'グループ',
+                  });
+                  setContextMenu(null);
+                }}
+                className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                グループごと削除
               </button>
               <button type="button" onClick={() => { setMultiSelectMode(true); toggleSelectSymbol(contextMenu.target.symbol); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <CheckSquare className="w-3.5 h-3.5" />
@@ -1819,6 +1897,40 @@ export function ValueChainMap({
                     <Plus className="w-3.5 h-3.5" />
                     この工程に列追加
                   </button>
+                  {contextStageIndex === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStructureEditModal({
+                          type: 'stage',
+                          referenceStageId: contextMenu.target.id,
+                          position: 'before',
+                          value: '新規工程',
+                        });
+                        setContextMenu(null);
+                      }}
+                      className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      工程を左に追加
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStructureEditModal({
+                        type: 'stage',
+                        referenceStageId: contextMenu.target.id,
+                        position: 'after',
+                        value: '新規工程',
+                      });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    工程を右に追加
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -1873,6 +1985,40 @@ export function ValueChainMap({
                   >
                     <Plus className="w-3.5 h-3.5" />
                     行を追加
+                  </button>
+                  {contextCategoryIndex === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStructureEditModal({
+                          type: 'category',
+                          referenceCategoryId: contextMenu.target.id,
+                          position: 'before',
+                          value: '新規分類',
+                        });
+                        setContextMenu(null);
+                      }}
+                      className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      分類を上に追加
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStructureEditModal({
+                        type: 'category',
+                        referenceCategoryId: contextMenu.target.id,
+                        position: 'after',
+                        value: '新規分類',
+                      });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    下に分類を追加
                   </button>
                   <button
                     type="button"
@@ -2012,7 +2158,13 @@ export function ValueChainMap({
           >
             <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
               <div className="text-xs font-bold text-white">
-                {structureEditModal.type === 'segment' ? '列を追加' : '行を追加'}
+                {structureEditModal.type === 'stage'
+                  ? '工程を追加'
+                  : structureEditModal.type === 'segment'
+                    ? '列を追加'
+                    : structureEditModal.type === 'category'
+                      ? '分類を追加'
+                      : '行を追加'}
               </div>
               <button
                 type="button"
@@ -2026,7 +2178,13 @@ export function ValueChainMap({
             </div>
             <div className="p-3">
               <label className="block text-[10px] text-gray-500">
-                {structureEditModal.type === 'segment' ? '列名' : '行名'}
+                {structureEditModal.type === 'stage'
+                  ? '工程名'
+                  : structureEditModal.type === 'segment'
+                    ? '列名'
+                    : structureEditModal.type === 'category'
+                      ? '分類名'
+                      : '行名'}
                 <input
                   value={structureEditModal.value}
                   onChange={(event) => setStructureEditModal((current) => current ? { ...current, value: event.target.value } : current)}
@@ -2199,7 +2357,7 @@ export function ValueChainMap({
       )}
 
       <div
-        className="fixed top-24 right-0 bottom-0 z-40 flex border-l border-[#202020] bg-[#080808] shadow-2xl overflow-hidden transition-[width] duration-150 ease-out"
+        className="fixed top-24 right-0 bottom-0 z-40 flex border-l border-[#202020] bg-[#080808] shadow-2xl overflow-visible transition-[width] duration-150 ease-out"
         style={{
           width: chartSidebarOpen
             ? `${chartSidebarWidth + DETAIL_PANEL_NAV_WIDTH}px`

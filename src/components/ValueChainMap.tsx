@@ -99,6 +99,8 @@ interface ValueChainMapProps {
     symbol: string;
     comparisonSymbols?: string[];
     onOpenIndicatorSettings?: () => void;
+    focusDate?: string;
+    focusDateActive?: boolean;
   }) => React.ReactNode;
   renderIndicatorSettings: (symbol: string) => React.ReactNode;
   onOpenTickerInChart: (symbol: string) => void;
@@ -374,6 +376,37 @@ const DETAIL_PANEL_MIN_WIDTH = 360;
 const DETAIL_PANEL_MAX_WIDTH = 860;
 const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
 const todayString = () => new Date().toISOString().slice(0, 10);
+const CALENDAR_WEEK_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+function formatDateValue(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function shiftCalendarMonth(month: string, delta: number): string {
+  const date = new Date(`${month}-01T12:00:00`);
+  date.setMonth(date.getMonth() + delta);
+  return date.toISOString().slice(0, 7);
+}
+
+function formatCalendarMonthLabel(month: string): string {
+  const [year, monthValue] = month.split('-');
+  return `${year}/${monthValue}`;
+}
+
+function buildCalendarDays(month: string): Array<{ date: string; inMonth: boolean }> {
+  const firstDay = new Date(`${month}-01T12:00:00`);
+  const start = new Date(firstDay);
+  start.setDate(firstDay.getDate() - firstDay.getDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    const dateValue = formatDateValue(date);
+    return {
+      date: dateValue,
+      inMonth: dateValue.slice(0, 7) === month,
+    };
+  });
+}
 
 function createDefaultIndexGroup(): ValueGroup {
   return {
@@ -417,9 +450,9 @@ function ensureIndexGroup(chain: ValueChainData): ValueChainData {
 }
 
 function formatTimeframeLabel(timeframe: Timeframe): string {
-  if (timeframe === '1mo') return '1月';
-  if (timeframe === '1d') return '日';
-  if (timeframe === '1w') return '週';
+  if (timeframe === '1mo') return '1M';
+  if (timeframe === '1d') return 'day';
+  if (timeframe === '1w') return 'Week';
   return timeframe;
 }
 
@@ -823,7 +856,6 @@ export function ValueChainMap({
   onChartSymbolsChange,
 }: ValueChainMapProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  const dateInputRef = useRef<HTMLInputElement | null>(null);
   const dateSliderRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const panMovedRef = useRef(false);
@@ -851,6 +883,8 @@ export function ValueChainMap({
   const [sortMode, setSortMode] = useState<SortMode>('change');
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => todayString().slice(0, 7));
   const [dateSliderDragging, setDateSliderDragging] = useState(false);
   const [dateSliderAtLeftEdge, setDateSliderAtLeftEdge] = useState(false);
   const [dateSliderMonthsBack, setDateSliderMonthsBack] = useState(12);
@@ -955,6 +989,13 @@ export function ValueChainMap({
   }, [chainMenuOpen]);
 
   useEffect(() => {
+    if (!calendarOpen) return;
+    const close = () => setCalendarOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [calendarOpen]);
+
+  useEffect(() => {
     if (!nameEditModal && !structureEditModal && !stockEditModal && !confirmModal && !importDecisionModal) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -981,20 +1022,6 @@ export function ValueChainMap({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [chartSidebarOpen, comparisonPanelOpen, detailSymbol]);
-
-  const openDatePicker = () => {
-    const input = dateInputRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
-    if (!input) return;
-    try {
-      if (typeof input.showPicker === 'function') {
-        input.showPicker();
-      } else {
-        input.focus();
-      }
-    } catch {
-      input.focus();
-    }
-  };
 
   const displayDate = previousBusinessDate(selectedDate);
   const isToday = selectedDate === todayString();
@@ -2041,6 +2068,7 @@ export function ValueChainMap({
   const dateSliderLabel = periodMode === 'week'
     ? `${selectedDate} 週`
     : selectedDate;
+  const calendarDays = useMemo(() => buildCalendarDays(calendarMonth), [calendarMonth]);
   const contextStageIndex = contextMenu?.target.type === 'stage'
     ? chain.stages.findIndex((stage) => stage.id === contextMenu.target.id)
     : -1;
@@ -2189,43 +2217,94 @@ export function ValueChainMap({
               インポートを戻す
             </button>
           )}
-          <div className="flex items-center gap-1 bg-[#101010] border border-[#242424] h-8 px-1">
-            <button type="button" onClick={() => setStockFontSize((value) => clamp(value + 1, 8, 16))} className="h-6 px-1.5 text-[10px] border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを大きく">A+</button>
-            <button type="button" onClick={() => setStockFontSize((value) => clamp(value - 1, 8, 16))} className="h-6 px-1.5 text-[10px] border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="個別銘柄フォントを小さく">A-</button>
-            <button type="button" onClick={() => setZoom((value) => clamp(value - 0.1, 0.55, 1.6))} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="縮小">-</button>
+          <div className="flex items-center gap-1 h-8 px-0">
+            <button type="button" onClick={() => setStockFontSize((value) => clamp(value + 1, 8, 16))} className="h-6 px-1.5 text-[10px] text-gray-200 hover:text-white hover:bg-[#111111]" aria-label="個別銘柄フォントを大きく">A+</button>
+            <button type="button" onClick={() => setStockFontSize((value) => clamp(value - 1, 8, 16))} className="h-6 px-1.5 text-[10px] text-gray-200 hover:text-white hover:bg-[#111111]" aria-label="個別銘柄フォントを小さく">A-</button>
+            <button type="button" onClick={() => setZoom((value) => clamp(value - 0.1, 0.55, 1.6))} className="h-6 w-6 text-gray-200 hover:text-white hover:bg-[#111111]" aria-label="縮小">-</button>
             <span className="font-mono text-gray-300 w-10 text-center text-[10px]">{Math.round(zoom * 100)}%</span>
-            <button type="button" onClick={() => setZoom((value) => clamp(value + 0.1, 0.55, 1.6))} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818]" aria-label="拡大">+</button>
-            <button type="button" onClick={resetView} className="h-6 w-6 border border-[#242424] bg-[#101010] hover:bg-[#181818] inline-flex items-center justify-center" aria-label="リセット">
+            <button type="button" onClick={() => setZoom((value) => clamp(value + 0.1, 0.55, 1.6))} className="h-6 w-6 text-gray-200 hover:text-white hover:bg-[#111111]" aria-label="拡大">+</button>
+            <button type="button" onClick={resetView} className="h-6 w-6 text-gray-300 hover:text-white hover:bg-[#111111] inline-flex items-center justify-center" aria-label="リセット">
               <RotateCcw className="w-3 h-3" />
             </button>
           </div>
-          <div className="flex items-center gap-2 bg-[#101010] border border-[#242424] h-10 px-2">
+          <div className="flex items-center gap-2 h-10 px-0">
             <button type="button" onClick={() => moveDate(-1)} className="w-6 h-7 flex items-center justify-center text-gray-400 hover:text-white" title="前へ" aria-label="前へ">
               <ChevronLeft className="w-4 h-4" />
             </button>
             <div className="relative w-5 h-7 shrink-0">
               <button
                 type="button"
-                onClick={openDatePicker}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCalendarMonth(selectedDate.slice(0, 7));
+                  setCalendarOpen((open) => !open);
+                }}
                 className="absolute inset-0 flex items-center justify-center text-emerald-300 hover:text-emerald-200"
                 title="カレンダーで日付を選択"
                 aria-label="カレンダーで日付を選択"
               >
                 <CalendarDays className="w-3.5 h-3.5" aria-hidden="true" />
               </button>
-              <input
-                ref={dateInputRef}
-                type="date"
-                value={selectedDate}
-                onClick={openDatePicker}
-                onChange={(event) => setSelectedDate(event.target.value)}
-                className="absolute inset-0 opacity-0 cursor-pointer"
-                aria-label="表示日を選択"
-              />
+              {calendarOpen && (
+                <div
+                  className="absolute left-0 top-8 z-[90] w-56 bg-[#050505] border border-[#262626] p-2 shadow-2xl"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between text-[10px] text-gray-100">
+                    <button
+                      type="button"
+                      onClick={() => setCalendarMonth((month) => shiftCalendarMonth(month, -1))}
+                      className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#111111]"
+                      aria-label="前の月"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="font-bold">{formatCalendarMonthLabel(calendarMonth)}</span>
+                    <button
+                      type="button"
+                      onClick={() => setCalendarMonth((month) => shiftCalendarMonth(month, 1))}
+                      className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#111111]"
+                      aria-label="次の月"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="mt-1 grid grid-cols-7 gap-0.5 text-center text-[9px] text-gray-500">
+                    {CALENDAR_WEEK_LABELS.map((label, index) => (
+                      <div key={`${label}-${index}`} className="py-1">{label}</div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-7 gap-0.5 text-[10px]">
+                    {calendarDays.map((day) => {
+                      const selected = day.date === selectedDate;
+                      const today = day.date === todayString();
+                      return (
+                        <button
+                          key={day.date}
+                          type="button"
+                          onClick={() => {
+                            setSelectedDate(day.date);
+                            setCalendarOpen(false);
+                          }}
+                          className={`h-7 transition ${
+                            selected
+                              ? 'bg-emerald-500 text-black font-bold'
+                              : day.inMonth
+                                ? 'text-gray-100 hover:bg-[#111111]'
+                                : 'text-gray-600 hover:text-gray-300 hover:bg-[#111111]'
+                          } ${today && !selected ? 'ring-1 ring-emerald-500/70' : ''}`}
+                        >
+                          {Number(day.date.slice(8, 10))}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="relative w-52 h-8 flex items-end pb-1">
+            <div className="relative w-36 h-8 flex items-end pb-1">
               <div
-                className="absolute -top-1 left-1/2 -translate-x-1/2 px-2 py-0.5 bg-[#050505] border border-[#242424] text-[10px] font-mono text-gray-100 shadow"
+                className="absolute -top-1 left-1/2 -translate-x-1/2 px-1 text-[10px] font-mono text-gray-100"
                 title={`表示日: ${dateSliderLabel}`}
               >
                 {dateSliderLabel}
@@ -2245,14 +2324,14 @@ export function ValueChainMap({
                   setDateSliderDragging(true);
                   updateDateFromSliderClientX(event.clientX);
                 }}
-                className="relative w-full h-2 rounded-sm bg-[#050505] border border-[#2a2a2a] cursor-ew-resize"
+                className="relative w-full h-1.5 rounded-full bg-[#1a1a1a] cursor-ew-resize"
               >
                 <div
-                  className="absolute inset-y-0 right-0 bg-emerald-500/20"
+                  className="absolute inset-y-0 right-0 rounded-full bg-emerald-500/20"
                   style={{ left: `${dateSliderPct}%` }}
                 />
                 <div
-                  className="absolute top-1/2 h-4 w-3 -translate-x-1/2 -translate-y-1/2 border border-emerald-400 bg-[#050505] shadow-[0_0_10px_rgba(16,185,129,0.35)]"
+                  className="absolute top-1/2 h-4 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-emerald-400 bg-[#050505] shadow-[0_0_10px_rgba(16,185,129,0.35)]"
                   style={{ left: `${dateSliderPct}%` }}
                 />
               </div>
@@ -2261,20 +2340,20 @@ export function ValueChainMap({
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
-          <div className="flex items-center bg-[#101010] border border-[#242424] h-8">
+          <div className="flex items-center gap-1 h-8">
             <button
               type="button"
               onClick={() => setPeriodMode('day')}
-              className={`h-full px-2 text-[10px] ${periodMode === 'day' ? 'bg-[#222] text-white' : 'text-gray-500 hover:text-gray-200'}`}
+              className={`h-7 px-3 rounded-full text-[10px] transition ${periodMode === 'day' ? 'bg-emerald-500 text-black font-bold' : 'text-gray-500 hover:text-gray-200 hover:bg-[#111111]'}`}
             >
-              日毎
+              day
             </button>
             <button
               type="button"
               onClick={() => setPeriodMode('week')}
-              className={`h-full px-2 text-[10px] ${periodMode === 'week' ? 'bg-[#222] text-white' : 'text-gray-500 hover:text-gray-200'}`}
+              className={`h-7 px-3 rounded-full text-[10px] transition ${periodMode === 'week' ? 'bg-emerald-500 text-black font-bold' : 'text-gray-500 hover:text-gray-200 hover:bg-[#111111]'}`}
             >
-              週ごと
+              Week
             </button>
           </div>
         </div>
@@ -3260,12 +3339,12 @@ export function ValueChainMap({
           className={`min-w-0 flex flex-col overflow-hidden transition-[width] duration-150 ease-out ${chartSidebarOpen ? '' : 'pointer-events-none'}`}
           style={{ width: chartSidebarOpen ? `${chartSidebarWidth}px` : '0px' }}
         >
-          <div className="shrink-0 border-b border-[#242424] bg-[#0b0b0b] px-3 py-2 space-y-2">
+          <div className="shrink-0 border-b border-[#1b1b1b] bg-transparent px-3 py-2 space-y-2">
             <div className="flex items-center gap-2 min-w-0">
               <select
                 value={sidePanelPrimarySymbol ?? chartState.symbol}
                 onChange={(event) => openSymbolInSidebar(event.target.value)}
-                className="min-w-[112px] max-w-[150px] bg-[#171717] border border-[#2a2a2a] text-white text-xs px-2 py-1 font-bold uppercase outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                className="min-w-[112px] max-w-[150px] bg-transparent text-white text-xs px-2 py-1 font-bold uppercase outline-none focus:text-emerald-300 cursor-pointer"
                 aria-label="チャート銘柄"
               >
                 {sidePanelSymbolOptions.map((option) => (
@@ -3280,7 +3359,7 @@ export function ValueChainMap({
                   {sidePanelComparisonSymbols.map((symbol) => (
                     <span
                       key={symbol}
-                      className="shrink-0 border border-[#2a2a2a] bg-[#171717]/80 px-1.5 py-0.5 text-[9px] font-mono font-bold text-emerald-300"
+                      className="shrink-0 px-1.5 py-0.5 text-[9px] font-mono font-bold text-emerald-300"
                     >
                       {symbol}
                     </span>
@@ -3292,7 +3371,7 @@ export function ValueChainMap({
                 type="button"
                 onClick={() => compareSymbols(selectedSymbols.length > 0 ? selectedSymbols : sidePanelPrimarySymbol ? [sidePanelPrimarySymbol] : [])}
                 disabled={selectedSymbols.length <= 1}
-                className="ml-auto w-7 h-7 flex items-center justify-center border border-[#2a2a2a] bg-[#171717] text-gray-400 hover:text-white hover:bg-[#202020] disabled:opacity-30 disabled:cursor-not-allowed"
+                className="ml-auto w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#111111] disabled:opacity-30 disabled:cursor-not-allowed"
                 title="選択中の銘柄を比較"
                 aria-label="選択中の銘柄を比較"
               >
@@ -3301,7 +3380,7 @@ export function ValueChainMap({
             </div>
 
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0 flex items-center bg-[#171717] border border-[#2a2a2a] p-0.5 gap-0.5 overflow-x-auto scrollbar-none">
+              <div className="min-w-0 flex items-center p-0.5 gap-0.5 overflow-x-auto scrollbar-none">
                 {CHART_TIMEFRAMES.map((timeframe) => (
                   <button
                     key={timeframe}
@@ -3309,8 +3388,8 @@ export function ValueChainMap({
                     onClick={() => updateChartState({ timeframe })}
                     className={`px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
                       chartState.timeframe === timeframe
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-gray-400 hover:text-white hover:bg-[#202020]'
+                        ? 'bg-emerald-500 text-black'
+                        : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                     }`}
                   >
                     {formatTimeframeLabel(timeframe)}
@@ -3318,11 +3397,11 @@ export function ValueChainMap({
                 ))}
               </div>
 
-              <div className="shrink-0 flex items-center gap-1 bg-[#171717]/70 px-1.5 py-0.5 text-[10px]">
+              <div className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px]">
                 <button
                   type="button"
                   onClick={() => updateChartState({ showVolume: !chartState.showVolume })}
-                  className={`px-1 ${chartState.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500 hover:text-gray-200'}`}
+                  className={`px-1 ${chartState.showVolume ? 'text-[#26a69a] font-bold' : 'text-gray-500 hover:text-gray-200'}`}
                   title="出来高を表示"
                 >
                   VOL
@@ -3330,7 +3409,7 @@ export function ValueChainMap({
                 <button
                   type="button"
                   onClick={() => updateChartState({ showRsi: !chartState.showRsi })}
-                  className={`px-1 ${chartState.showRsi ? 'text-[#f3a14b] font-bold bg-[#342416]' : 'text-gray-500 hover:text-gray-200'}`}
+                  className={`px-1 ${chartState.showRsi ? 'text-[#f3a14b] font-bold' : 'text-gray-500 hover:text-gray-200'}`}
                   title="RSIを表示"
                 >
                   RSI
@@ -3338,7 +3417,7 @@ export function ValueChainMap({
                 <button
                   type="button"
                   onClick={() => updateChartState({ showMacd: !chartState.showMacd })}
-                  className={`px-1 ${chartState.showMacd ? 'text-emerald-400 font-bold bg-[#0f2a22]' : 'text-gray-500 hover:text-gray-200'}`}
+                  className={`px-1 ${chartState.showMacd ? 'text-emerald-400 font-bold' : 'text-gray-500 hover:text-gray-200'}`}
                   title="MACDを表示"
                 >
                   MACD
@@ -3388,6 +3467,8 @@ export function ValueChainMap({
               renderTickerChart({
                 symbol: sidePanelPrimarySymbol,
                 comparisonSymbols: sidePanelComparisonSymbols,
+                focusDate: displayDate,
+                focusDateActive: dateSliderDragging,
               })
             ) : (
               <div className="h-full flex items-center justify-center text-xs text-gray-500">

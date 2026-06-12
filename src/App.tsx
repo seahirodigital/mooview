@@ -621,7 +621,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
       ma: { 
         enabled: !isExpression && (norm === 'VOO' || norm === 'AAPL'),
         period1: 5, color1: '#e7c039', 
-        period2: 12, color2: '#20aced', 
+        period2: 12, color2: '#d1d5db',
         period3: 20, color3: '#e152f2',
         style1: 'solid',
         style2: 'solid',
@@ -638,7 +638,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         enabled: !isExpression,
         period: 20, 
         levels: [1, 2, 3],
-        color: '#6c5dd3', 
+        color: '#9ca3af',
         colorFill: 'rgba(108, 93, 211, 0.04)',
         style: 'dashed',
       },
@@ -655,7 +655,7 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         fast: 12, 
         slow: 26, 
         signal: 9, 
-        colorMacd: '#2d8cf0', 
+        colorMacd: '#d1d5db',
         styleMacd: 'solid',
         colorSignal: '#ff9900', 
         styleSignal: 'dashed',
@@ -2867,10 +2867,14 @@ export default function App() {
     symbol,
     comparisonSymbols = [],
     onOpenIndicatorSettings,
+    focusDate,
+    focusDateActive,
   }: {
     symbol: string;
     comparisonSymbols?: string[];
     onOpenIndicatorSettings?: () => void;
+    focusDate?: string;
+    focusDateActive?: boolean;
   }) => {
     const panelExpression = normalizeSymbolExpressionForStorage(symbol);
     const resolvedChartCandles = resolveCandlesForSymbol(symbol, valueChainChartState.timeframe, candlesCache);
@@ -2938,6 +2942,8 @@ export default function App() {
           setValueChainChartState((current) => ({ ...current, macdHeightPct }))
         }
         onOpenIndicatorSettings={onOpenIndicatorSettings}
+        focusDate={focusDate}
+        focusDateActive={focusDateActive}
         allowNegativeValues={Boolean(panelExpression)}
         valuePrecision={panelExpression ? 4 : 2}
       />
@@ -3312,18 +3318,18 @@ export default function App() {
                                 )}
  
                                 {/* TIMEFRAME INTERVAL PICKER */}
-                                <div className="flex items-center bg-[#171717] border border-[#2a2a2a] rounded p-0.5 space-x-0.5">
+                                <div className="flex items-center p-0.5 space-x-0.5">
                                   {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
                                     <button
                                       key={tf}
                                       onClick={() => handleUpdatePanel(panel.id, { timeframe: tf })}
                                       className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors ${
                                         panel.timeframe === tf 
-                                          ? 'bg-emerald-600 text-white'
-                                          : 'text-gray-400 hover:text-white hover:bg-[#202020]'
+                                          ? 'bg-emerald-500 text-black'
+                                          : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                                       }`}
                                     >
-                                      {tf === '1mo' ? '1月' : tf === '1d' ? '日' : tf === '1w' ? '週' : tf}
+                                      {tf === '1mo' ? '1M' : tf === '1d' ? 'day' : tf === '1w' ? 'Week' : tf}
                                     </button>
                                   ))}
                                 </div>

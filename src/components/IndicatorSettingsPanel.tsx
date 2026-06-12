@@ -12,13 +12,13 @@ type IndicatorKey = keyof SymbolIndicatorSettings['indicators'];
 
 const COLOR_PALETTE = [
   '#e7c039',
-  '#20aced',
-  '#e152f2',
+  '#d1d5db',
+  '#9ca3af',
   '#f85f73',
   '#00e575',
-  '#6c5dd3',
+  '#4b5563',
   '#f3a14b',
-  '#2d8cf0',
+  '#ffffff',
   '#ff9900',
   '#26a69a',
   '#ef5350',
@@ -63,7 +63,7 @@ function ColorButton({
         title={`${label}: ${color}`}
       />
       {isOpen && (
-        <span className={`absolute right-0 z-50 grid grid-cols-6 gap-1 bg-[#0b0d16] border border-[#34394c] p-2 shadow-2xl min-w-[142px] ${
+        <span className={`absolute right-0 z-50 grid grid-cols-6 gap-1 bg-[#050505] border border-[#303030] p-2 shadow-2xl min-w-[142px] ${
           openUpward ? 'bottom-6' : 'top-6'
         }`}>
           {COLOR_PALETTE.map((paletteColor) => (
@@ -76,7 +76,7 @@ function ColorButton({
               }}
               className={`w-4 h-4 rounded-sm border ${
                 color.toLowerCase() === paletteColor.toLowerCase()
-                  ? 'border-white ring-1 ring-blue-400'
+                  ? 'border-white ring-1 ring-emerald-400'
                   : 'border-white/20'
               }`}
               style={{ backgroundColor: paletteColor }}
@@ -85,7 +85,7 @@ function ColorButton({
             />
           ))}
           <label
-            className="relative col-span-6 h-5 border border-[#34394c] cursor-pointer overflow-hidden"
+            className="relative col-span-6 h-5 border border-[#303030] cursor-pointer overflow-hidden"
             title="任意の色を選択"
           >
             <input
@@ -131,7 +131,7 @@ function LineStyleButton({
       <button
         type="button"
         onClick={() => setOpenPicker(isOpen ? null : id)}
-        className="w-6 h-4 border border-white/20 bg-[#171a27] hover:border-white/60 px-1 flex items-center transition"
+        className="w-6 h-4 border border-white/20 bg-[#101010] hover:border-white/60 px-1 flex items-center transition"
         aria-label={`${label}の線種を選択`}
         title={`${label}: ${current.label}`}
       >
@@ -141,7 +141,7 @@ function LineStyleButton({
         />
       </button>
       {isOpen && (
-        <span className={`absolute right-0 z-50 grid gap-1 bg-[#0b0d16] border border-[#34394c] p-2 shadow-2xl min-w-[116px] ${
+        <span className={`absolute right-0 z-50 grid gap-1 bg-[#050505] border border-[#303030] p-2 shadow-2xl min-w-[116px] ${
           openUpward ? 'bottom-6' : 'top-6'
         }`}>
           {LINE_STYLE_OPTIONS.map((option) => (
@@ -154,8 +154,8 @@ function LineStyleButton({
               }}
               className={`grid grid-cols-[44px_minmax(0,1fr)] items-center gap-2 h-7 px-1.5 text-[10px] text-left transition ${
                 option.value === value
-                  ? 'bg-blue-600/25 text-white'
-                  : 'text-gray-300 hover:bg-[#171b28]'
+                  ? 'bg-emerald-500/20 text-white'
+                  : 'text-gray-300 hover:bg-[#171717]'
               }`}
             >
               <svg width="38" height="8" viewBox="0 0 38 8" aria-hidden="true">
@@ -229,7 +229,7 @@ function NumberRow({ label, value, min, max, step = 1, onChange }: NumberRowProp
             event.currentTarget.blur();
           }
         }}
-        className="h-5 bg-[#171a27] border border-[#303548] text-white text-right text-[10px] font-mono px-1 outline-none focus:border-blue-500"
+        className="h-5 bg-[#101010] border border-[#303030] text-white text-right text-[10px] font-mono px-1 outline-none focus:border-emerald-500"
       />
     </label>
   );
@@ -244,7 +244,7 @@ interface IndicatorHeaderProps {
 
 function IndicatorHeader({ label, enabled, onToggle, children }: IndicatorHeaderProps) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center min-h-8 px-2 bg-[#11141f]">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center min-h-8 px-2 bg-[#080808]">
       <span className="text-[11px] font-bold text-gray-200 truncate">{label}</span>
       <span className="flex items-center gap-1.5">
         {children}
@@ -252,7 +252,7 @@ function IndicatorHeader({ label, enabled, onToggle, children }: IndicatorHeader
           type="checkbox"
           checked={enabled}
           onChange={onToggle}
-          className="w-3.5 h-3.5 rounded border-[#394057] text-blue-600 focus:ring-0 cursor-pointer"
+          className="w-3.5 h-3.5 rounded border-[#303030] text-emerald-500 focus:ring-0 cursor-pointer"
           aria-label={`${label}を表示`}
         />
       </span>
@@ -404,7 +404,7 @@ export function IndicatorSettingsPanel({
                           : [...boll.levels, level].sort((a, b) => a - b);
                         handleNestedChange('boll', 'levels', nextLevels);
                       }}
-                      className="w-3 h-3 rounded border-[#394057] text-blue-600 focus:ring-0"
+                      className="w-3 h-3 rounded border-[#303030] text-emerald-500 focus:ring-0"
                     />
                     {level}σ
                   </label>

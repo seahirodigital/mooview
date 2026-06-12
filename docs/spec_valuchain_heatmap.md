@@ -3,6 +3,8 @@
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
 | 仕様管理 | この表を仕様トップへ常設し、実装済みと未完了を明示しながら進める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\docs\spec_valuchain_heatmap.md` |
+| 今回追加修正 | カレンダーUIを黒基調の自前UIへ置換し、スライダー幅/日付チャート同期/day-Week切替/背景無しレイアウトを修正する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\InteractiveCustomChart.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\IndicatorSettingsPanel.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | 日付スライダー操作中は銘柄配置を固定し、変動率/色だけをその場で更新する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | ヘッダーの＋/−ポップアップを左側・グリッド上に重なる位置へ変更する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |

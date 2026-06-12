@@ -34,6 +34,8 @@ interface InteractiveCustomChartProps {
   macdHeightPct: number;
   setMacdHeightPct: (pct: number) => void;
   onOpenIndicatorSettings?: () => void;
+  focusDate?: string;
+  focusDateActive?: boolean;
   allowNegativeValues?: boolean;
   valuePrecision?: number;
 }
@@ -65,6 +67,13 @@ function getCandleAlignmentKey(candle: Candle, timeframe: Timeframe): string {
   return timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
     ? candle.timeStr.slice(0, 10)
     : String(candle.time);
+}
+
+function getCandleCalendarDate(candle: Candle): string {
+  if (candle.timeStr && /^\d{4}-\d{2}-\d{2}/.test(candle.timeStr)) {
+    return candle.timeStr.slice(0, 10);
+  }
+  return new Date(candle.time * 1000).toISOString().slice(0, 10);
 }
 
 function calculateChangePct(latest: number, base: number): number {
@@ -144,6 +153,8 @@ export function InteractiveCustomChart({
   macdHeightPct,
   setMacdHeightPct,
   onOpenIndicatorSettings,
+  focusDate,
+  focusDateActive = false,
   allowNegativeValues = false,
   valuePrecision = 2,
 }: InteractiveCustomChartProps) {
@@ -200,12 +211,36 @@ export function InteractiveCustomChart({
   // 100% = latest portion (rightmost/present), 0% = oldest portion (leftmost)
   const totalLength = candles.length;
   const maxScrollIndex = Math.max(0, totalLength - visibleCandleCount);
+  const focusCandleIndex = useMemo(() => {
+    if (!focusDateActive || !focusDate || candles.length === 0) return null;
+    const targetTime = new Date(`${focusDate}T12:00:00`).getTime();
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    candles.forEach((candle, index) => {
+      const exactDate = getCandleCalendarDate(candle);
+      if (exactDate === focusDate) {
+        bestIndex = index;
+        bestDistance = 0;
+        return;
+      }
+      const candleTime = new Date(`${exactDate}T12:00:00`).getTime();
+      const distance = Math.abs(candleTime - targetTime);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    return bestIndex;
+  }, [candles, focusDate, focusDateActive]);
   
   const scrollIndex = useMemo(() => {
+    if (focusCandleIndex !== null) {
+      return Math.max(0, Math.min(maxScrollIndex, focusCandleIndex - Math.floor(visibleCandleCount / 2)));
+    }
     const pct = Math.max(0, Math.min(100, scrollOffsetPct)) / 100;
     // Standard mapping: scrollPct=100 (pct=1) is present (start index is maxScrollIndex), scrollPct=0 is oldest (start index is 0)
     return Math.floor(pct * maxScrollIndex);
-  }, [scrollOffsetPct, maxScrollIndex]);
+  }, [focusCandleIndex, maxScrollIndex, scrollOffsetPct, visibleCandleCount]);
 
   const startIndex = Math.max(0, scrollIndex);
   const endIndex = Math.min(totalLength - 1, startIndex + visibleCandleCount - 1);
@@ -213,6 +248,9 @@ export function InteractiveCustomChart({
   const visibleCandles = useMemo(() => {
     return candles.slice(startIndex, endIndex + 1);
   }, [candles, startIndex, endIndex]);
+  const focusSliceIndex = focusCandleIndex !== null && focusCandleIndex >= startIndex && focusCandleIndex <= endIndex
+    ? focusCandleIndex - startIndex
+    : null;
 
   const indicators = indicatorSettings.indicators;
 
@@ -386,14 +424,16 @@ export function InteractiveCustomChart({
     const rawMin = allowNegativeValues ? lowest - pad : Math.max(0.01, lowest - pad);
     const rawMax = highest + pad;
     const baseRange = Math.max(0.000001, rawMax - rawMin);
-    const center = (rawMin + rawMax) / 2 + baseRange * priceOffsetPct;
+    const focusedCandle = focusCandleIndex !== null ? candles[focusCandleIndex] : null;
+    const baseCenter = focusDateActive && focusedCandle ? focusedCandle.close : (rawMin + rawMax) / 2;
+    const center = baseCenter + baseRange * priceOffsetPct;
     const halfRange = (rawMax - rawMin) / 2 / Math.max(0.25, priceScale);
 
     return {
       min: allowNegativeValues ? center - halfRange : Math.max(0.01, center - halfRange),
       max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, priceOffsetPct, timeframe, allowNegativeValues]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, priceOffsetPct, timeframe, allowNegativeValues, focusCandleIndex, focusDateActive, candles]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -885,7 +925,7 @@ export function InteractiveCustomChart({
                 y={0}
                 width={rightAxisWidth}
                 height={mainHeight}
-                fill={priceAxisFocused ? 'rgba(59, 130, 246, 0.06)' : 'transparent'}
+                fill={priceAxisFocused ? 'rgba(16, 185, 129, 0.08)' : 'transparent'}
                 className="cursor-ns-resize"
               />
               {/* Grid rules */}
@@ -917,6 +957,41 @@ export function InteractiveCustomChart({
                   </g>
                 );
               })}
+
+              {focusDateActive && focusSliceIndex !== null && (
+                <g className="pointer-events-none">
+                  <line
+                    x1={getX(focusSliceIndex)}
+                    y1={0}
+                    x2={getX(focusSliceIndex)}
+                    y2={height}
+                    stroke="#10b981"
+                    strokeWidth="1"
+                    strokeDasharray="4 3"
+                    strokeOpacity="0.85"
+                  />
+                  <rect
+                    x={Math.max(0, Math.min(plotWidth - 68, getX(focusSliceIndex) - 34))}
+                    y={2}
+                    width="68"
+                    height="16"
+                    fill="#050505"
+                    stroke="#10b981"
+                    strokeOpacity="0.45"
+                  />
+                  <text
+                    x={Math.max(34, Math.min(plotWidth - 34, getX(focusSliceIndex)))}
+                    y="13"
+                    fill="#ffffff"
+                    fontSize="8"
+                    fontFamily={CHART_FONT_FAMILY}
+                    textAnchor="middle"
+                    fontWeight="700"
+                  >
+                    {focusDate}
+                  </text>
+                </g>
+              )}
 
               {/* Bollinger Corridor */}
               {indicators.boll.enabled && bollResults.length > 0 && (
@@ -1092,11 +1167,11 @@ export function InteractiveCustomChart({
                 const xVal = getX(i);
                 return (
                   <g key={i}>
-                    <line x1={xVal} y1={mainHeight - 25} x2={xVal} y2={mainHeight - 20} stroke="#212640" />
+                    <line x1={xVal} y1={mainHeight - 25} x2={xVal} y2={mainHeight - 20} stroke="#303030" />
                     <text 
                       x={xVal}
                       y={mainHeight - 8}
-                      fill="#576383"
+                      fill="#8a8a8a"
                       fontSize="8"
                       fontFamily={CHART_FONT_FAMILY}
                       textAnchor="middle"
@@ -1214,8 +1289,8 @@ export function InteractiveCustomChart({
             {/* ================= B. RSI OSCILLATOR AREA ================= */}
             {activeRsi && (
               <g transform={`translate(0, ${mainHeight})`}>
-                <rect width={plotWidth} height={rsiHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
-                <rect x={plotWidth} y={0} width={rightAxisWidth} height={rsiHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
+                <rect width={plotWidth} height={rsiHeight} fill="#050505" stroke="#202020" strokeWidth="0.5" />
+                <rect x={plotWidth} y={0} width={rightAxisWidth} height={rsiHeight} fill="#050505" stroke="#202020" strokeWidth="0.5" />
                 
                 {/* Rules markers */}
                 {rsiPlotActive && [indicators.rsi.overbought, 50, indicators.rsi.oversold].map((level) => {
@@ -1283,13 +1358,13 @@ export function InteractiveCustomChart({
             {/* ================= C. MACD DIVERGENCE AREA ================= */}
             {activeMacd && (
               <g transform={`translate(0, ${mainHeight + rsiHeight})`}>
-                <rect width={plotWidth} height={macdHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
-                <rect x={plotWidth} y={0} width={rightAxisWidth} height={macdHeight} fill="#0b0d18" stroke="#1c213a" strokeWidth="0.5" />
+                <rect width={plotWidth} height={macdHeight} fill="#050505" stroke="#202020" strokeWidth="0.5" />
+                <rect x={plotWidth} y={0} width={rightAxisWidth} height={macdHeight} fill="#050505" stroke="#202020" strokeWidth="0.5" />
                 
                 {/* Zero center rule */}
                 {macdPlotActive && (
                   <>
-                    <line x1={0} y1={macdHeight / 2} x2={plotWidth} y2={macdHeight / 2} stroke="#212948" strokeWidth="1" />
+                    <line x1={0} y1={macdHeight / 2} x2={plotWidth} y2={macdHeight / 2} stroke="#202020" strokeWidth="1" />
                     <text x={plotWidth + 6} y={macdHeight / 2 + 3} fill="#9ca3af" fontSize="8" fontFamily={CHART_FONT_FAMILY}>0.0</text>
                   </>
                 )}
@@ -1442,7 +1517,7 @@ export function InteractiveCustomChart({
                   y1={0} 
                   x2={hoverData.mouseX} 
                   y2={height} 
-                  stroke="#47547a" 
+                  stroke="#8a8a8a"
                   strokeDasharray="2 2" 
                 />
 
@@ -1452,7 +1527,7 @@ export function InteractiveCustomChart({
                     y1={hoverData.mouseY} 
                     x2={plotWidth} 
                     y2={hoverData.mouseY} 
-                    stroke="#47547a" 
+                    stroke="#8a8a8a"
                     strokeDasharray="2 2" 
                   />
                 )}
@@ -1460,7 +1535,7 @@ export function InteractiveCustomChart({
                 {/* Axis Value display */}
                 {hoverData.mouseY < mainHeight && (
                   <g transform={`translate(${plotWidth + 1}, ${hoverData.mouseY - 7})`}>
-                    <rect width="55" height="15" fill="#2d3748" rx="2" />
+                    <rect width="55" height="15" fill="#101010" stroke="#303030" rx="2" />
                     <text x="27" y="10.5" fill="white" fontSize="8" fontFamily={CHART_FONT_FAMILY} textAnchor="middle">
                       {(() => {
                         const bottomLabelPadding = 25;
@@ -1523,11 +1598,11 @@ export function InteractiveCustomChart({
         )}
 
         {/* Floating Zoom overlay controllers */}
-        <div className="absolute bottom-4 right-16 flex items-center space-x-1.5 z-10 bg-[#050505]/80 p-1 rounded-lg border border-[#2a2a2a] backdrop-blur-sm opacity-50 hover:opacity-100 transition-opacity">
+        <div className="absolute bottom-4 right-16 flex items-center space-x-1.5 z-10 p-1 opacity-50 hover:opacity-100 transition-opacity">
           <button 
             type="button"
             onClick={() => adjustZoom(true)}
-            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#171717] rounded transition"
+            className="w-6 h-6 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#111111] rounded transition"
             title="拡大"
           >
             <Plus size={11} className="stroke-[2.5]" />
@@ -1536,7 +1611,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={() => adjustZoom(false)}
-            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#171717] rounded transition"
+            className="w-6 h-6 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#111111] rounded transition"
             title="縮小"
           >
             <Minus size={11} className="stroke-[2.5]" />
@@ -1545,7 +1620,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={snapToPresent}
-            className="w-6 h-6 bg-[#0b0b0b] border border-[#303030] text-gray-300 hover:text-white flex items-center justify-center hover:bg-[#171717] rounded text-[9px] transition"
+            className="w-6 h-6 text-gray-300 hover:text-white flex items-center justify-center hover:bg-[#111111] rounded text-[9px] transition"
             title="最新データまで移動"
           >
             <RotateCcw size={10} />

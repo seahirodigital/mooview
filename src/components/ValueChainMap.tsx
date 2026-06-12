@@ -528,18 +528,18 @@ function getHeatStyle(value: number): React.CSSProperties {
   if (value > 0) {
     return {
       backgroundColor: `rgba(22, 163, 74, ${0.18 + intensity * 0.72})`,
-      borderColor: `rgba(74, 222, 128, ${0.24 + intensity * 0.48})`,
+      borderColor: `rgba(74, 222, 128, ${0.14 + intensity * 0.28})`,
     };
   }
   if (value < 0) {
     return {
       backgroundColor: `rgba(220, 38, 38, ${0.18 + intensity * 0.72})`,
-      borderColor: `rgba(248, 113, 113, ${0.24 + intensity * 0.48})`,
+      borderColor: `rgba(248, 113, 113, ${0.14 + intensity * 0.28})`,
     };
   }
   return {
     backgroundColor: 'rgba(31, 31, 31, 0.92)',
-    borderColor: 'rgba(75, 85, 99, 0.52)',
+    borderColor: 'rgba(75, 85, 99, 0.22)',
   };
 }
 
@@ -1885,7 +1885,7 @@ export function ValueChainMap({
       <button
         key={`${group.id}-${stock.symbol}`}
         type="button"
-        className={`min-h-[34px] border px-1 py-0.5 text-left transition hover:ring-1 hover:ring-white/50 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
+        className={`min-h-[36px] overflow-hidden rounded-[4px] border border-[#262626] px-1.5 py-1 text-left transition hover:ring-1 hover:ring-emerald-400/25 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
         style={{
           ...getHeatStyle(change),
           fontSize: `${stockFontSize}px`,
@@ -1928,8 +1928,8 @@ export function ValueChainMap({
           setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stock', groupId: group.id, symbol: stock.symbol, label: stock.name } });
         }}
       >
-        <span className="block font-bold text-white truncate leading-tight">{stock.name}</span>
-        <span className="block font-mono text-white leading-tight">{formatPct(change)}</span>
+        <span className="block truncate font-semibold text-white leading-[1.05]">{stock.name}</span>
+        <span className="block font-mono font-bold text-white/95 leading-[1.05]">{formatPct(change)}</span>
       </button>
     );
   };
@@ -2420,11 +2420,11 @@ export function ValueChainMap({
           }}
         >
           <div
-            className="grid text-[10px] border-l border-t border-[#252525] shadow-2xl bg-[#0b0b0b]"
+            className="grid text-[10px] border-l border-t border-[#1b1b1b] shadow-2xl bg-[#0b0b0b]"
             style={{ gridTemplateColumns }}
           >
             <div
-              className="bg-[#080808] border-r border-b border-[#303030] p-1 overflow-hidden"
+              className="overflow-hidden rounded-[4px] bg-[#080808] border-r border-b border-[#202020] p-1"
               style={{ gridColumn: 'span 2', gridRow: 'span 2', height: `${totalHeaderHeight}px` }}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -2433,7 +2433,7 @@ export function ValueChainMap({
             >
               <button
                 type="button"
-                className="w-full text-left text-[8px] font-bold text-gray-300 hover:text-white truncate mb-0.5"
+                className="mb-0.5 w-full truncate text-left text-[8px] font-medium text-gray-400 hover:text-white"
                 onClick={() => {
                   if (panMovedRef.current) return;
                   updateGroupName(INDEX_GROUP_ID);
@@ -2453,7 +2453,7 @@ export function ValueChainMap({
                   key={stage.id}
                   type="button"
                   data-no-pan="true"
-                  className="bg-[#08090a] border-r border-b border-[#333333] flex items-center justify-center text-white font-bold hover:bg-[#111214] transition px-2"
+                  className="flex items-center justify-center border-r border-b border-[#202020] bg-[#090909] px-2 font-semibold text-gray-200 transition hover:bg-[#111214]"
                   style={{
                     gridColumn: `span ${stage.segments.length}`,
                     gridRow: merged ? 'span 2' : undefined,
@@ -2482,12 +2482,12 @@ export function ValueChainMap({
                     event.preventDefault();
                     setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'segment', id: segment.id, label: segment.name } });
                   }}
-                  className="bg-[#151618] border-r border-b border-[#303030] px-2 text-center hover:bg-[#1d1e20] transition"
+                  className="border-r border-b border-[#202020] bg-[#121314] px-2 text-center transition hover:bg-[#171819]"
                   style={{ height: `${segmentHeaderHeight}px` }}
                   title={`${stage?.name ?? ''} / ${segment.name.replace(/\n/g, ' ')}`}
                 >
-                  <span className="block text-[9px] text-gray-500 truncate">{stage?.name}</span>
-                  <span className="block whitespace-pre-line leading-tight text-gray-200 font-semibold">{segment.name}</span>
+                  <span className="block truncate text-[9px] text-gray-500">{stage?.name}</span>
+                  <span className="block whitespace-pre-line font-semibold leading-tight text-gray-100">{segment.name}</span>
                 </button>
               );
             })}
@@ -2498,7 +2498,7 @@ export function ValueChainMap({
                 return (
                   <div
                     key={`${category.id}-${lane.id}-${segment.id}`}
-                    className="min-h-[118px] bg-[#111214] border-r border-b border-[#252525] p-1"
+                    className="min-h-[118px] bg-[#0a0a0a] p-1"
                     onContextMenu={(event) => {
                       event.preventDefault();
                       if (groups.length === 0) {
@@ -2518,15 +2518,15 @@ export function ValueChainMap({
                   >
                     {groups.length === 0 ? (
                       <div
-                        className="h-full min-h-[104px] border border-dashed border-[#252525] bg-[#0d0d0e] hover:border-[#3f3f46] hover:bg-[#121214] transition"
+                        className="h-full min-h-[104px] rounded-[4px] bg-[#0d0e0f] transition hover:bg-[#111214]"
                         title="該当銘柄0件の空白枠。右クリックで銘柄追加"
                       />
                     ) : (
-                      <div className="space-y-1">
+                      <div className="space-y-0.5">
                         {groups.map((group) => (
                           <div
                             key={group.id}
-                            className="border border-[#2b2b2b] bg-[#0a0a0a] p-1"
+                            className="overflow-hidden rounded-[4px] border border-[#1e1e1e] bg-[#0a0a0a] p-1"
                             onContextMenu={(event) => {
                               event.preventDefault();
                               setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: group.id, label: group.name } });
@@ -2534,7 +2534,7 @@ export function ValueChainMap({
                           >
                             <button
                               type="button"
-                              className="w-full text-left text-[8px] font-bold text-gray-300 hover:text-white truncate mb-0.5"
+                              className="mb-0.5 w-full truncate text-left text-[8px] font-medium text-gray-400 hover:text-white"
                               onClick={() => {
                                 if (panMovedRef.current) return;
                                 updateGroupName(group.id);
@@ -2560,7 +2560,7 @@ export function ValueChainMap({
                     key={`${category.id}-category`}
                     type="button"
                     data-no-pan="true"
-                    className="bg-[#08090a] border-r border-b border-[#333333] flex items-center justify-center px-2 text-center font-bold text-white hover:bg-[#111214]"
+                    className="flex items-center justify-center border-r border-b border-[#202020] bg-[#090909] px-2 text-center font-semibold text-gray-200 hover:bg-[#111214]"
                     style={{ gridRow: `span ${category.lanes.length}` }}
                     onContextMenu={(event) => {
                       event.preventDefault();
@@ -2574,7 +2574,7 @@ export function ValueChainMap({
                   key={`${category.id}-${lane.id}-lane`}
                   type="button"
                   data-no-pan="true"
-                  className="bg-[#151618] border-r border-b border-[#2a2a2a] flex items-center justify-center px-1 text-gray-300 font-bold hover:bg-[#1d1e20]"
+                  className="flex items-center justify-center border-r border-b border-[#202020] bg-[#121314] px-1 font-semibold text-gray-400 hover:bg-[#171819]"
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setContextMenu({

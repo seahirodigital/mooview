@@ -13,7 +13,6 @@ import {
   Pencil,
   Plus,
   RotateCcw,
-  SlidersHorizontal,
   Trash2,
   Upload,
   X,
@@ -75,6 +74,15 @@ interface TickerStat extends TickerInfo {
   computedChange: number | null;
 }
 
+interface SymbolSearchCandidate {
+  symbol: string;
+  code: string;
+  name: string;
+  nameEn: string;
+  market: string;
+  category: string;
+}
+
 interface ValueChainMapProps {
   tickers: TickerStat[];
   chartState: ChartPanel;
@@ -92,6 +100,7 @@ type HeaderMenuTarget =
   | { type: 'stage'; id: string; label: string }
   | { type: 'segment'; id: string; label: string }
   | { type: 'category'; id: string; label: string }
+  | { type: 'lane'; id: string; categoryId: string; label: string }
   | { type: 'group'; id: string; label: string };
 
 type ContextMenu =
@@ -103,6 +112,29 @@ type NameEditModalState = {
   target: HeaderMenuTarget;
   value: string;
 };
+
+type StructureEditModalState =
+  | { type: 'segment'; stageId: string; afterSegmentId?: string; value: string }
+  | { type: 'lane'; categoryId: string; afterLaneId?: string; value: string };
+
+type StockEditModalState = {
+  mode: 'add' | 'edit';
+  groupId: string;
+  originalSymbol?: string;
+  symbol: string;
+  name: string;
+  market: string;
+  loading: boolean;
+  error: string | null;
+};
+
+type ConfirmModalState =
+  | { type: 'stock'; groupId: string; symbol: string; label: string }
+  | { type: 'group'; groupId: string; label: string }
+  | { type: 'stage'; stageId: string; label: string }
+  | { type: 'segment'; segmentId: string; label: string }
+  | { type: 'category'; categoryId: string; label: string }
+  | { type: 'lane'; categoryId: string; laneId: string; label: string };
 
 const DEFAULT_VALUE_CHAIN: ValueChainData = {
   name: '半導体バリューチェーン',
@@ -322,10 +354,29 @@ function formatTimeframeLabel(timeframe: Timeframe): string {
   return timeframe;
 }
 
+function createValueChainId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isLikelyTickerInput(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[A-Za-z]{1,6}$/.test(trimmed)
+    || /^[A-Za-z0-9._-]+\.(US|JP|HK|FX|BD)$/i.test(trimmed)
+    || /^\.[A-Za-z0-9._-]+\.(US|JP)$/i.test(trimmed)
+    || /^\d{3,5}[A-Za-z]?(\.T|\.JP)?$/i.test(trimmed);
+}
+
 function normalizeSymbol(symbol: string): string {
-  const trimmed = symbol.trim();
-  if (/^\d{3,5}$/.test(trimmed)) return `JP.${trimmed}`;
-  return trimmed.toUpperCase();
+  const cleaned = symbol.trim().replace(/^["']|["']$/g, '');
+  if (!cleaned) return '';
+  const upper = cleaned.toUpperCase();
+  if (upper.startsWith('US.')) return upper.slice(3);
+  if (upper.endsWith('.US')) return upper.slice(0, -3);
+  if (upper.startsWith('JP.')) return `JP.${upper.slice(3)}`;
+  if (upper.endsWith('.JP')) return `JP.${upper.slice(0, -3)}`;
+  if (upper.endsWith('.T')) return `JP.${upper.slice(0, -2)}`;
+  if (/^\d{3,5}[A-Z]?$/.test(upper)) return `JP.${upper}`;
+  return upper;
 }
 
 function findSegment(chain: ValueChainData, segmentId: string): Segment | null {
@@ -497,6 +548,31 @@ function downloadText(filename: string, mimeType: string, text: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+async function searchMoomooCandidate(query: string): Promise<SymbolSearchCandidate | null> {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const response = await fetch('/api/moomoo/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: trimmed, limit: 1 }),
+      signal: controller.signal,
+    });
+    const data = await response.json();
+    const candidates = Array.isArray(data.candidates)
+      ? data.candidates as SymbolSearchCandidate[]
+      : [];
+    return data.success && candidates.length > 0 ? candidates[0] : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 function validateChainData(value: unknown): ValueChainData | null {
   if (!value || typeof value !== 'object') return null;
   const source = value as Partial<ValueChainData>;
@@ -563,7 +639,11 @@ export function ValueChainMap({
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [nameEditModal, setNameEditModal] = useState<NameEditModalState | null>(null);
+  const [structureEditModal, setStructureEditModal] = useState<StructureEditModalState | null>(null);
+  const [stockEditModal, setStockEditModal] = useState<StockEditModalState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null);
@@ -596,13 +676,24 @@ export function ValueChainMap({
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!nameEditModal) return;
+    if (!exportMenuOpen) return;
+    const close = () => setExportMenuOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!nameEditModal && !structureEditModal && !stockEditModal && !confirmModal) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setNameEditModal(null);
+      if (event.key !== 'Escape') return;
+      setNameEditModal(null);
+      setStructureEditModal(null);
+      setStockEditModal(null);
+      setConfirmModal(null);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nameEditModal]);
+  }, [confirmModal, nameEditModal, stockEditModal, structureEditModal]);
 
   useEffect(() => {
     if (!chartSidebarOpen && !detailSymbol && !comparisonPanelOpen) return;
@@ -701,14 +792,27 @@ export function ValueChainMap({
           ...current,
           stages: current.stages.map((stage) => ({
             ...stage,
-            segments: stage.segments.map((segment) => segment.id === target.id ? { ...segment, name: nextName.trim() || segment.name } : segment),
+            segments: stage.segments.map((segment) => segment.id === target.id ? { ...segment, name: nextName } : segment),
           })),
         };
       }
       if (target.type === 'category') {
         return {
           ...current,
-          categories: current.categories.map((category) => category.id === target.id ? { ...category, name: nextName.trim() || category.name } : category),
+          categories: current.categories.map((category) => category.id === target.id ? { ...category, name: nextName } : category),
+        };
+      }
+      if (target.type === 'lane') {
+        return {
+          ...current,
+          categories: current.categories.map((category) => (
+            category.id === target.categoryId
+              ? {
+                  ...category,
+                  lanes: category.lanes.map((lane) => lane.id === target.id ? { ...lane, name: nextName } : lane),
+                }
+              : category
+          )),
         };
       }
       return {
@@ -719,23 +823,120 @@ export function ValueChainMap({
     setNameEditModal(null);
   };
 
-  const addStockToGroup = (groupId: string) => {
-    const rawSymbol = window.prompt('追加する銘柄コードを入力');
-    if (!rawSymbol) return;
-    const symbol = normalizeSymbol(rawSymbol);
-    const rawName = window.prompt('銘柄名を入力', symbol);
-    const live = tickerStats.get(symbol);
-    const stock: ChainStock = {
+  const openStockAddModal = (groupId: string, initialSymbol = '') => {
+    setStockEditModal({
+      mode: 'add',
+      groupId,
+      symbol: initialSymbol,
+      name: '',
+      market: initialSymbol.startsWith('JP.') ? 'JP' : 'US',
+      loading: false,
+      error: null,
+    });
+  };
+
+  const openStockEditModal = (groupId: string, symbol: string) => {
+    const group = chain.groups.find((item) => item.id === groupId);
+    const stock = group?.stocks.find((item) => item.symbol === symbol);
+    if (!stock) return;
+    setStockEditModal({
+      mode: 'edit',
+      groupId,
+      originalSymbol: stock.symbol,
+      symbol: stock.symbol,
+      name: stock.name,
+      market: stock.market || (stock.symbol.startsWith('JP.') ? 'JP' : 'US'),
+      loading: false,
+      error: null,
+    });
+  };
+
+  const resolveStockInput = async (rawSymbol: string, rawName: string, rawMarket: string): Promise<ChainStock> => {
+    const cleanSymbolInput = rawSymbol.trim();
+    const cleanNameInput = rawName.trim();
+    const symbolLooksLikeCode = isLikelyTickerInput(cleanSymbolInput);
+    let symbol = symbolLooksLikeCode ? normalizeSymbol(cleanSymbolInput) : '';
+    let name = cleanNameInput;
+    let market = rawMarket.trim();
+    let candidate: SymbolSearchCandidate | null = null;
+    const query = cleanNameInput || cleanSymbolInput;
+    const liveBeforeSearch = symbol ? tickerStats.get(symbol.toUpperCase()) : null;
+
+    if (query && (!symbol || !name || !liveBeforeSearch)) {
+      candidate = await searchMoomooCandidate(query);
+      const candidateSymbol = candidate ? normalizeSymbol(candidate.symbol || candidate.code || '') : '';
+      if (candidateSymbol && (!symbol || !liveBeforeSearch || !symbolLooksLikeCode)) {
+        symbol = candidateSymbol;
+      }
+      if (!name && candidate) {
+        name = candidate.name || candidate.nameEn || candidate.code || candidateSymbol;
+      }
+      if (!market && candidate?.market) {
+        market = candidate.market;
+      }
+    }
+
+    if (!symbol) {
+      throw new Error('銘柄コード、または検索できる銘柄名を入力してください。');
+    }
+
+    const live = tickerStats.get(symbol.toUpperCase());
+    return {
       symbol,
-      name: rawName?.trim() || live?.name || symbol,
-      market: symbol.startsWith('JP.') ? 'JP' : 'US',
+      name: name || live?.name || symbol,
+      market: market || (symbol.startsWith('JP.') ? 'JP' : 'US'),
       marketCap: 0,
       baseChangePct: live?.computedChange ?? 0,
     };
-    setChain((current) => ({
-      ...current,
-      groups: current.groups.map((group) => group.id === groupId ? { ...group, stocks: [...group.stocks, stock] } : group),
-    }));
+  };
+
+  const submitStockEdit = async () => {
+    if (!stockEditModal || stockEditModal.loading) return;
+    const modal = stockEditModal;
+    setStockEditModal({ ...modal, loading: true, error: null });
+    try {
+      const stock = await resolveStockInput(modal.symbol, modal.name, modal.market);
+      setChain((current) => ({
+        ...current,
+        groups: current.groups.map((group) => {
+          if (group.id !== modal.groupId) return group;
+          const nextStocks = modal.mode === 'edit'
+            ? group.stocks.map((item) => item.symbol === modal.originalSymbol ? stock : item)
+            : [...group.stocks.filter((item) => item.symbol !== stock.symbol), stock];
+          return { ...group, stocks: nextStocks };
+        }),
+      }));
+      setStockEditModal(null);
+    } catch (error) {
+      setStockEditModal({
+        ...modal,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const fillStockFromSearch = async () => {
+    if (!stockEditModal || stockEditModal.loading) return;
+    const modal = stockEditModal;
+    setStockEditModal({ ...modal, loading: true, error: null });
+    try {
+      const stock = await resolveStockInput(modal.symbol, modal.name, modal.market);
+      setStockEditModal({
+        ...modal,
+        symbol: stock.symbol,
+        name: stock.name,
+        market: stock.market,
+        loading: false,
+        error: null,
+      });
+    } catch (error) {
+      setStockEditModal({
+        ...modal,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   };
 
   const ensureGroupForCell = (categoryId: string, laneId: string, segmentId: string): string => {
@@ -772,7 +973,7 @@ export function ValueChainMap({
 
   const addStockToCell = (categoryId: string, laneId: string, segmentId: string) => {
     const groupId = ensureGroupForCell(categoryId, laneId, segmentId);
-    window.setTimeout(() => addStockToGroup(groupId), 0);
+    openStockAddModal(groupId);
   };
 
   const removeStockFromGroup = (groupId: string, symbol: string) => {
@@ -785,6 +986,143 @@ export function ValueChainMap({
       )),
     }));
     setSelectedSymbols((current) => current.filter((item) => item !== symbol));
+  };
+
+  const removeGroup = (groupId: string) => {
+    const removedSymbols = chain.groups.find((group) => group.id === groupId)?.stocks.map((stock) => stock.symbol) ?? [];
+    setChain((current) => ({
+      ...current,
+      groups: current.groups.filter((group) => group.id !== groupId),
+    }));
+    if (removedSymbols.length > 0) {
+      setSelectedSymbols((current) => current.filter((symbol) => !removedSymbols.includes(symbol)));
+    }
+  };
+
+  const addSegment = (stageId: string, name: string, afterSegmentId?: string) => {
+    const segmentName = name.trim();
+    if (!segmentName) return;
+    setChain((current) => ({
+      ...current,
+      stages: current.stages.map((stage) => {
+        if (stage.id !== stageId) return stage;
+        const nextSegment: Segment = {
+          id: createValueChainId('segment'),
+          name: segmentName,
+          parentId: stage.id,
+        };
+        if (!afterSegmentId) return { ...stage, segments: [...stage.segments, nextSegment] };
+        const insertIndex = stage.segments.findIndex((segment) => segment.id === afterSegmentId);
+        const nextSegments = [...stage.segments];
+        nextSegments.splice(insertIndex >= 0 ? insertIndex + 1 : nextSegments.length, 0, nextSegment);
+        return { ...stage, segments: nextSegments };
+      }),
+    }));
+  };
+
+  const removeSegment = (segmentId: string) => {
+    setChain((current) => {
+      const totalSegments = current.stages.reduce((sum, stage) => sum + stage.segments.length, 0);
+      if (totalSegments <= 1) return current;
+      return {
+        ...current,
+        stages: current.stages
+          .map((stage) => ({
+            ...stage,
+            segments: stage.segments.filter((segment) => segment.id !== segmentId),
+          }))
+          .filter((stage) => stage.segments.length > 0),
+        groups: current.groups.filter((group) => group.segmentId !== segmentId),
+      };
+    });
+  };
+
+  const removeStage = (stageId: string) => {
+    setChain((current) => {
+      const stage = current.stages.find((item) => item.id === stageId);
+      if (!stage) return current;
+      const totalSegments = current.stages.reduce((sum, item) => sum + item.segments.length, 0);
+      if (totalSegments <= stage.segments.length) return current;
+      const removedSegmentIds = new Set(stage.segments.map((segment) => segment.id));
+      return {
+        ...current,
+        stages: current.stages.filter((item) => item.id !== stageId),
+        groups: current.groups.filter((group) => !removedSegmentIds.has(group.segmentId)),
+      };
+    });
+  };
+
+  const addLane = (categoryId: string, name: string, afterLaneId?: string) => {
+    const laneName = name.trim();
+    if (!laneName) return;
+    setChain((current) => ({
+      ...current,
+      categories: current.categories.map((category) => {
+        if (category.id !== categoryId) return category;
+        const nextLane: Lane = {
+          id: createValueChainId('lane'),
+          name: laneName,
+        };
+        if (!afterLaneId) return { ...category, lanes: [...category.lanes, nextLane] };
+        const insertIndex = category.lanes.findIndex((lane) => lane.id === afterLaneId);
+        const nextLanes = [...category.lanes];
+        nextLanes.splice(insertIndex >= 0 ? insertIndex + 1 : nextLanes.length, 0, nextLane);
+        return { ...category, lanes: nextLanes };
+      }),
+    }));
+  };
+
+  const removeLane = (categoryId: string, laneId: string) => {
+    setChain((current) => {
+      const category = current.categories.find((item) => item.id === categoryId);
+      if (!category || category.lanes.length <= 1) return current;
+      return {
+        ...current,
+        categories: current.categories.map((item) => (
+          item.id === categoryId
+            ? { ...item, lanes: item.lanes.filter((lane) => lane.id !== laneId) }
+            : item
+        )),
+        groups: current.groups.filter((group) => !(group.categoryId === categoryId && group.laneId === laneId)),
+      };
+    });
+  };
+
+  const removeCategory = (categoryId: string) => {
+    setChain((current) => {
+      if (current.categories.length <= 1) return current;
+      return {
+        ...current,
+        categories: current.categories.filter((category) => category.id !== categoryId),
+        groups: current.groups.filter((group) => group.categoryId !== categoryId),
+      };
+    });
+  };
+
+  const submitStructureEdit = () => {
+    if (!structureEditModal) return;
+    const name = structureEditModal.value.trim();
+    if (!name) {
+      setStructureEditModal(null);
+      return;
+    }
+    if (structureEditModal.type === 'segment') {
+      addSegment(structureEditModal.stageId, name, structureEditModal.afterSegmentId);
+    } else {
+      addLane(structureEditModal.categoryId, name, structureEditModal.afterLaneId);
+    }
+    setStructureEditModal(null);
+  };
+
+  const executeConfirmedDelete = () => {
+    if (!confirmModal) return;
+    if (confirmModal.type === 'stock') removeStockFromGroup(confirmModal.groupId, confirmModal.symbol);
+    if (confirmModal.type === 'group') removeGroup(confirmModal.groupId);
+    if (confirmModal.type === 'stage') removeStage(confirmModal.stageId);
+    if (confirmModal.type === 'segment') removeSegment(confirmModal.segmentId);
+    if (confirmModal.type === 'category') removeCategory(confirmModal.categoryId);
+    if (confirmModal.type === 'lane') removeLane(confirmModal.categoryId, confirmModal.laneId);
+    setConfirmModal(null);
   };
 
   const handleExportJson = () => {
@@ -811,20 +1149,34 @@ export function ValueChainMap({
     }
     const rows = parseCsv(text);
     const groups = new Map<string, ValueGroup>();
-    rows.forEach((row) => {
+    for (const row of rows) {
       const groupId = row.groupId?.trim();
-      if (!groupId) return;
+      if (!groupId) continue;
       const existing = groups.get(groupId);
-      const stockSymbol = normalizeSymbol(row.symbol ?? '');
-      const stock = stockSymbol
-        ? {
-            symbol: stockSymbol,
-            name: row.name?.trim() || stockSymbol,
-            market: row.market?.trim() || (stockSymbol.startsWith('JP.') ? 'JP' : 'US'),
-            marketCap: Number(row.marketCap) || 0,
-            baseChangePct: Number(row.baseChangePct) || 0,
+      const rawSymbol = row.symbol?.trim() ?? '';
+      const rawName = row.name?.trim() ?? '';
+      let stock: ChainStock | null = null;
+      if (rawSymbol || rawName) {
+        try {
+          const resolvedStock = await resolveStockInput(rawSymbol, rawName, row.market?.trim() ?? '');
+          stock = {
+            ...resolvedStock,
+            marketCap: Number(row.marketCap) || resolvedStock.marketCap,
+            baseChangePct: Number(row.baseChangePct) || resolvedStock.baseChangePct,
+          };
+        } catch {
+          const stockSymbol = normalizeSymbol(rawSymbol);
+          if (stockSymbol) {
+            stock = {
+              symbol: stockSymbol,
+              name: rawName || stockSymbol,
+              market: row.market?.trim() || (stockSymbol.startsWith('JP.') ? 'JP' : 'US'),
+              marketCap: Number(row.marketCap) || 0,
+              baseChangePct: Number(row.baseChangePct) || 0,
+            };
           }
-        : null;
+        }
+      }
       const nextGroup: ValueGroup = existing ?? {
         id: groupId,
         categoryId: row.categoryId?.trim() || '',
@@ -835,7 +1187,7 @@ export function ValueChainMap({
       };
       if (stock) nextGroup.stocks = [...nextGroup.stocks, stock];
       groups.set(groupId, nextGroup);
-    });
+    }
     if (groups.size > 0) {
       setChain((current) => ({
         ...current,
@@ -991,6 +1343,32 @@ export function ValueChainMap({
 
   const gridTemplateColumns = '132px 64px ' + segments.map(() => '142px').join(' ');
   const canvasWidth = 196 + segments.length * 142;
+  const confirmTitle = confirmModal
+    ? confirmModal.type === 'stock'
+      ? '銘柄を削除'
+      : confirmModal.type === 'group'
+        ? 'グループを削除'
+        : confirmModal.type === 'stage'
+          ? '工程を削除'
+          : confirmModal.type === 'segment'
+            ? '列を削除'
+            : confirmModal.type === 'category'
+              ? '大分類を削除'
+              : '行を削除'
+    : '';
+  const confirmMessage = confirmModal
+    ? confirmModal.type === 'stock'
+      ? `${confirmModal.label} をこのグループから削除します。`
+      : confirmModal.type === 'group'
+        ? `${confirmModal.label} と中の銘柄を削除します。`
+        : confirmModal.type === 'stage'
+          ? `${confirmModal.label} に含まれる列と配置済みグループを削除します。`
+          : confirmModal.type === 'segment'
+            ? `${confirmModal.label.replace(/\n/g, ' ')} 列と配置済みグループを削除します。`
+            : confirmModal.type === 'category'
+              ? `${confirmModal.label} と配下の行、配置済みグループを削除します。`
+              : `${confirmModal.label} 行と配置済みグループを削除します。`
+    : '';
 
   return (
     <div className="flex-1 min-h-0 bg-[#050505] text-[#d1d4dc] flex flex-col overflow-hidden">
@@ -1300,9 +1678,22 @@ export function ValueChainMap({
                     {category.name}
                   </button>
                 ) : null,
-                <div key={`${category.id}-${lane.id}-lane`} className="bg-[#151618] border-r border-b border-[#2a2a2a] flex items-center justify-center px-1 text-gray-300 font-bold">
+                <button
+                  key={`${category.id}-${lane.id}-lane`}
+                  type="button"
+                  data-no-pan="true"
+                  className="bg-[#151618] border-r border-b border-[#2a2a2a] flex items-center justify-center px-1 text-gray-300 font-bold hover:bg-[#202124]"
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      target: { type: 'lane', id: lane.id, categoryId: category.id, label: lane.name },
+                    });
+                  }}
+                >
                   {lane.name}
-                </div>,
+                </button>,
                 ...rowCells,
               ];
             }))}
@@ -1320,11 +1711,27 @@ export function ValueChainMap({
         >
           {contextMenu.target.type === 'stock' ? (
             <>
-              <button type="button" onClick={() => { addStockToGroup(contextMenu.target.groupId); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
+              <button type="button" onClick={() => { openStockEditModal(contextMenu.target.groupId, contextMenu.target.symbol); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
+                <Pencil className="w-3.5 h-3.5" />
+                銘柄編集
+              </button>
+              <button type="button" onClick={() => { openStockAddModal(contextMenu.target.groupId); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <Plus className="w-3.5 h-3.5" />
                 銘柄追加
               </button>
-              <button type="button" onClick={() => { removeStockFromGroup(contextMenu.target.groupId, contextMenu.target.symbol); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmModal({
+                    type: 'stock',
+                    groupId: contextMenu.target.groupId,
+                    symbol: contextMenu.target.symbol,
+                    label: contextMenu.target.label,
+                  });
+                  setContextMenu(null);
+                }}
+                className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+              >
                 <Trash2 className="w-3.5 h-3.5" />
                 銘柄削除
               </button>
@@ -1334,7 +1741,7 @@ export function ValueChainMap({
               </button>
               <button type="button" onClick={() => { onOpenTickerInChart(contextMenu.target.symbol); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <ExternalLink className="w-3.5 h-3.5" />
-                既存チャートで表示
+                チャートビューで表示
               </button>
               <button type="button" onClick={() => { compareSymbols(selectedSymbols.length > 0 ? selectedSymbols : [contextMenu.target.symbol]); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
                 <PanelRightOpen className="w-3.5 h-3.5" />
@@ -1381,19 +1788,141 @@ export function ValueChainMap({
                 名前の編集
               </button>
               {contextMenu.target.type === 'group' && (
-                <button type="button" onClick={() => { addStockToGroup(contextMenu.target.id); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <Plus className="w-3.5 h-3.5" />
-                  グループへ銘柄追加
-                </button>
+                <>
+                  <button type="button" onClick={() => { openStockAddModal(contextMenu.target.id); setContextMenu(null); }} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
+                    <Plus className="w-3.5 h-3.5" />
+                    グループへ銘柄追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({ type: 'group', groupId: contextMenu.target.id, label: contextMenu.target.label });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    グループ削除
+                  </button>
+                </>
               )}
-              <button type="button" className="w-full px-2.5 py-2 flex items-center gap-2 text-gray-600 cursor-not-allowed text-left" disabled>
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                行/列の追加はTODO
-              </button>
-              <button type="button" className="w-full px-2.5 py-2 flex items-center gap-2 text-gray-600 cursor-not-allowed text-left" disabled>
-                <Trash2 className="w-3.5 h-3.5" />
-                行/列の削除はTODO
-              </button>
+              {contextMenu.target.type === 'stage' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStructureEditModal({ type: 'segment', stageId: contextMenu.target.id, value: '新規列' });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    この工程に列追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({ type: 'stage', stageId: contextMenu.target.id, label: contextMenu.target.label });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    工程を削除
+                  </button>
+                </>
+              )}
+              {contextMenu.target.type === 'segment' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const stage = findStage(chain, contextMenu.target.id);
+                      if (stage) {
+                        setStructureEditModal({ type: 'segment', stageId: stage.id, afterSegmentId: contextMenu.target.id, value: '新規列' });
+                      }
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    右に列追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({ type: 'segment', segmentId: contextMenu.target.id, label: contextMenu.target.label });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    列削除
+                  </button>
+                </>
+              )}
+              {contextMenu.target.type === 'category' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStructureEditModal({ type: 'lane', categoryId: contextMenu.target.id, value: '新規行' });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    行を追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({ type: 'category', categoryId: contextMenu.target.id, label: contextMenu.target.label });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    大分類を削除
+                  </button>
+                </>
+              )}
+              {contextMenu.target.type === 'lane' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStructureEditModal({
+                        type: 'lane',
+                        categoryId: contextMenu.target.categoryId,
+                        afterLaneId: contextMenu.target.id,
+                        value: '新規行',
+                      });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    下に行追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({
+                        type: 'lane',
+                        categoryId: contextMenu.target.categoryId,
+                        laneId: contextMenu.target.id,
+                        label: contextMenu.target.label,
+                      });
+                      setContextMenu(null);
+                    }}
+                    className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-red-950/30 text-red-300 text-left"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    行削除
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1462,6 +1991,210 @@ export function ValueChainMap({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {structureEditModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/55 flex items-center justify-center px-4"
+          data-no-pan="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setStructureEditModal(null);
+          }}
+        >
+          <form
+            className="w-full max-w-sm bg-[#080808] border border-[#343434] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitStructureEdit();
+            }}
+          >
+            <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
+              <div className="text-xs font-bold text-white">
+                {structureEditModal.type === 'segment' ? '列を追加' : '行を追加'}
+              </div>
+              <button
+                type="button"
+                onClick={() => setStructureEditModal(null)}
+                className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white"
+                aria-label="行列追加を閉じる"
+                title="閉じる"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3">
+              <label className="block text-[10px] text-gray-500">
+                {structureEditModal.type === 'segment' ? '列名' : '行名'}
+                <input
+                  value={structureEditModal.value}
+                  onChange={(event) => setStructureEditModal((current) => current ? { ...current, value: event.target.value } : current)}
+                  className="mt-1 h-9 w-full bg-[#101010] border border-[#303030] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  autoFocus
+                />
+              </label>
+            </div>
+            <div className="h-11 border-t border-[#242424] px-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setStructureEditModal(null)}
+                className="h-7 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#171717]"
+              >
+                キャンセル
+              </button>
+              <button
+                type="submit"
+                className="h-7 px-3 border border-emerald-700 bg-emerald-600 text-[11px] font-bold text-white hover:bg-emerald-500"
+              >
+                追加
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {stockEditModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/55 flex items-center justify-center px-4"
+          data-no-pan="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !stockEditModal.loading) setStockEditModal(null);
+          }}
+        >
+          <form
+            className="w-full max-w-md bg-[#080808] border border-[#343434] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitStockEdit();
+            }}
+          >
+            <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
+              <div className="text-xs font-bold text-white">
+                {stockEditModal.mode === 'edit' ? '銘柄編集' : '銘柄追加'}
+              </div>
+              <button
+                type="button"
+                onClick={() => setStockEditModal(null)}
+                disabled={stockEditModal.loading}
+                className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white disabled:opacity-40"
+                aria-label="銘柄編集を閉じる"
+                title="閉じる"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 space-y-3">
+              <label className="block text-[10px] text-gray-500">
+                銘柄コードまたは銘柄名
+                <input
+                  value={stockEditModal.symbol}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, symbol: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full bg-[#101010] border border-[#303030] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="NVDA / JP.8035 / 東京エレクトロン"
+                  autoFocus
+                />
+              </label>
+              <label className="block text-[10px] text-gray-500">
+                銘柄名
+                <input
+                  value={stockEditModal.name}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, name: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full bg-[#101010] border border-[#303030] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="空ならMoomoo検索で補完"
+                />
+              </label>
+              <label className="block text-[10px] text-gray-500">
+                市場
+                <input
+                  value={stockEditModal.market}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, market: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full bg-[#101010] border border-[#303030] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="US / JP"
+                />
+              </label>
+              {stockEditModal.error && (
+                <div className="border border-red-900/70 bg-red-950/20 px-2 py-1.5 text-[10px] text-red-200">
+                  {stockEditModal.error}
+                </div>
+              )}
+            </div>
+            <div className="h-11 border-t border-[#242424] px-3 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => void fillStockFromSearch()}
+                disabled={stockEditModal.loading}
+                className="h-7 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#171717] disabled:opacity-40"
+              >
+                {stockEditModal.loading ? '検索中' : '補完'}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStockEditModal(null)}
+                  disabled={stockEditModal.loading}
+                  className="h-7 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#171717] disabled:opacity-40"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  disabled={stockEditModal.loading}
+                  className="h-7 px-3 border border-emerald-700 bg-emerald-600 text-[11px] font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  {stockEditModal.mode === 'edit' ? '保存' : '追加'}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {confirmModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center px-4"
+          data-no-pan="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmModal(null);
+          }}
+        >
+          <div
+            className="w-full max-w-sm bg-[#080808] border border-[#343434] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
+              <div className="text-xs font-bold text-white">{confirmTitle}</div>
+              <button
+                type="button"
+                onClick={() => setConfirmModal(null)}
+                className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white"
+                aria-label="削除確認を閉じる"
+                title="閉じる"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 text-xs text-gray-300 leading-relaxed">
+              {confirmMessage}
+            </div>
+            <div className="h-11 border-t border-[#242424] px-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmModal(null)}
+                className="h-7 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#171717]"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={executeConfirmedDelete}
+                className="h-7 px-3 border border-red-800 bg-red-700 text-[11px] font-bold text-white hover:bg-red-600"
+              >
+                削除
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1632,7 +2365,7 @@ export function ValueChainMap({
           )}
         </div>
 
-        <nav className="w-11 shrink-0 bg-[#070707] border-l border-[#242424] flex flex-col items-center py-2 gap-1" data-no-pan="true">
+        <nav className="relative w-11 shrink-0 bg-[#070707] border-l border-[#242424] flex flex-col items-center py-2 gap-1" data-no-pan="true">
           <button
             type="button"
             onClick={() => {
@@ -1662,33 +2395,64 @@ export function ValueChainMap({
           >
             <Upload className="w-4 h-4" />
           </button>
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-emerald-200 hover:bg-[#161616]"
-            title="CSVエクスポート"
-            aria-label="CSVエクスポート"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={handleExportJson}
-            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-sky-200 hover:bg-[#161616]"
-            title="JSONエクスポート"
-            aria-label="JSONエクスポート"
-          >
-            <FileJson className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={handleDownloadSpec}
-            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-white hover:bg-[#161616]"
-            title="テンプレート仕様書"
-            aria-label="テンプレート仕様書"
-          >
-            <FileDown className="w-4 h-4" />
-          </button>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setExportMenuOpen((open) => !open);
+              }}
+              className={`w-9 h-9 flex items-center justify-center border transition ${
+                exportMenuOpen
+                  ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
+              }`}
+              title="エクスポート"
+              aria-label="エクスポートメニューを開く"
+            >
+              <FileDown className="w-4 h-4" />
+            </button>
+            {exportMenuOpen && (
+              <div
+                className="absolute right-10 top-0 z-50 w-52 bg-[#080808] border border-[#303030] shadow-2xl py-1 text-[10px] text-gray-200"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleExportCsv();
+                    setExportMenuOpen(false);
+                  }}
+                  className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />
+                  CSVエクスポート
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleExportJson();
+                    setExportMenuOpen(false);
+                  }}
+                  className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                >
+                  <FileJson className="w-3.5 h-3.5 text-sky-300" />
+                  JSONエクスポート
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleDownloadSpec();
+                    setExportMenuOpen(false);
+                  }}
+                  className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-gray-300" />
+                  テンプレート仕様書
+                </button>
+              </div>
+            )}
+          </div>
           <input
             ref={importInputRef}
             type="file"

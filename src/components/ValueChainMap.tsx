@@ -3,16 +3,12 @@ import {
   CalendarDays,
   CheckSquare,
   ChartNoAxesCombined,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Download,
   ExternalLink,
   FileDown,
   FileJson,
   FileSpreadsheet,
-  Maximize2,
-  MoreVertical,
   PanelRightOpen,
   Pencil,
   Plus,
@@ -93,6 +89,7 @@ interface ValueChainMapProps {
 }
 
 type HeaderMenuTarget =
+  | { type: 'stage'; id: string; label: string }
   | { type: 'segment'; id: string; label: string }
   | { type: 'category'; id: string; label: string }
   | { type: 'group'; id: string; label: string };
@@ -101,6 +98,11 @@ type ContextMenu =
   | { x: number; y: number; target: HeaderMenuTarget }
   | { x: number; y: number; target: { type: 'stock'; groupId: string; symbol: string; label: string } }
   | { x: number; y: number; target: { type: 'empty-cell'; categoryId: string; laneId: string; segmentId: string; label: string } };
+
+type NameEditModalState = {
+  target: HeaderMenuTarget;
+  value: string;
+};
 
 const DEFAULT_VALUE_CHAIN: ValueChainData = {
   name: '半導体バリューチェーン',
@@ -338,6 +340,12 @@ function findStage(chain: ValueChainData, segmentId: string): Stage | null {
   return chain.stages.find((stage) => stage.segments.some((segment) => segment.id === segmentId)) ?? null;
 }
 
+function shouldMergeStageHeader(stage: Stage): boolean {
+  if (stage.segments.length !== 1) return false;
+  const segmentName = stage.segments[0]?.name.trim() ?? '';
+  return !segmentName || segmentName === stage.name.trim() || (stage.id === 'design' && segmentName === '設計');
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -554,8 +562,8 @@ export function ValueChainMap({
   const [sortMode, setSortMode] = useState<SortMode>('change');
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
-  const [ioMenuOpen, setIoMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [nameEditModal, setNameEditModal] = useState<NameEditModalState | null>(null);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null);
@@ -586,6 +594,15 @@ export function ValueChainMap({
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!nameEditModal) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setNameEditModal(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [nameEditModal]);
 
   useEffect(() => {
     if (!chartSidebarOpen && !detailSymbol && !comparisonPanelOpen) return;
@@ -653,18 +670,32 @@ export function ValueChainMap({
   const updateGroupName = (groupId: string) => {
     const group = chain.groups.find((item) => item.id === groupId);
     if (!group) return;
-    const nextName = window.prompt('グループ名を編集', group.name);
-    if (!nextName) return;
-    setChain((current) => ({
-      ...current,
-      groups: current.groups.map((item) => item.id === groupId ? { ...item, name: nextName.trim() || item.name } : item),
-    }));
+    setNameEditModal({
+      target: { type: 'group', id: groupId, label: group.name },
+      value: group.name,
+    });
   };
 
   const updateHeaderName = (target: HeaderMenuTarget) => {
-    const nextName = window.prompt('名前を編集', target.label);
-    if (!nextName) return;
+    setNameEditModal({
+      target,
+      value: target.label,
+    });
+  };
+
+  const applyNameEdit = (target: HeaderMenuTarget, rawName: string) => {
+    const nextName = rawName.trim();
+    if (!nextName) {
+      setNameEditModal(null);
+      return;
+    }
     setChain((current) => {
+      if (target.type === 'stage') {
+        return {
+          ...current,
+          stages: current.stages.map((stage) => stage.id === target.id ? { ...stage, name: nextName } : stage),
+        };
+      }
       if (target.type === 'segment') {
         return {
           ...current,
@@ -682,9 +713,10 @@ export function ValueChainMap({
       }
       return {
         ...current,
-        groups: current.groups.map((group) => group.id === target.id ? { ...group, name: nextName.trim() || group.name } : group),
+        groups: current.groups.map((group) => group.id === target.id ? { ...group, name: nextName } : group),
       };
     });
+    setNameEditModal(null);
   };
 
   const addStockToGroup = (groupId: string) => {
@@ -757,17 +789,14 @@ export function ValueChainMap({
 
   const handleExportJson = () => {
     downloadText('mooview-value-chain-template.json', 'application/json;charset=utf-8', JSON.stringify(chain, null, 2));
-    setIoMenuOpen(false);
   };
 
   const handleExportCsv = () => {
     downloadText('mooview-value-chain-template.csv', 'text/csv;charset=utf-8', createCsv(chain));
-    setIoMenuOpen(false);
   };
 
   const handleDownloadSpec = () => {
     downloadText('mooview-value-chain-template-spec.md', 'text/markdown;charset=utf-8', createTemplateSpec(chain));
-    setIoMenuOpen(false);
   };
 
   const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -965,13 +994,12 @@ export function ValueChainMap({
 
   return (
     <div className="flex-1 min-h-0 bg-[#050505] text-[#d1d4dc] flex flex-col overflow-hidden">
-      <div className="h-12 border-b border-[#202020] bg-[#080808] px-3 shrink-0 flex items-center justify-between gap-3">
+      <div className="h-12 border-b border-[#202020] bg-[#080808] pl-3 pr-[56px] shrink-0 flex items-center justify-between gap-3">
         <div className="min-w-0 flex items-center gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-1.5 h-8 bg-emerald-500 rounded-full" />
             <div className="min-w-0">
               <div className="text-xs font-bold text-white truncate">{chain.name}</div>
-              <div className="text-[10px] text-[#848e9c] truncate">工程 x カテゴリ x 銘柄ヒートマップ</div>
             </div>
           </div>
           <div className="h-7 w-px bg-[#2a2a2a]" />
@@ -1036,56 +1064,13 @@ export function ValueChainMap({
               週ごと
             </button>
           </div>
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setIoMenuOpen((open) => !open)}
-              className="w-8 h-8 border border-[#242424] bg-[#101010] flex items-center justify-center text-gray-300 hover:text-white hover:bg-[#181818]"
-              title="インポートとエクスポート"
-              aria-label="インポートとエクスポート"
-            >
-              <MoreVertical className="w-4 h-4" />
-            </button>
-            {ioMenuOpen && (
-              <div className="absolute right-0 top-9 z-40 w-56 bg-[#080808] border border-[#303030] shadow-2xl py-1 text-[10px]">
-                <button type="button" onClick={handleExportCsv} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />
-                  CSVエクスポート
-                </button>
-                <button type="button" onClick={handleExportJson} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <FileJson className="w-3.5 h-3.5 text-sky-300" />
-                  JSONエクスポート
-                </button>
-                <button type="button" onClick={() => importInputRef.current?.click()} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <Upload className="w-3.5 h-3.5 text-gray-300" />
-                  CSV/JSONインポート
-                </button>
-                <button type="button" onClick={handleExportCsv} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <Download className="w-3.5 h-3.5 text-gray-300" />
-                  テンプレートダウンロード
-                </button>
-                <button type="button" onClick={handleDownloadSpec} className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717] text-left">
-                  <FileDown className="w-3.5 h-3.5 text-gray-300" />
-                  テンプレート仕様書
-                </button>
-              </div>
-            )}
-            <input
-              ref={importInputRef}
-              type="file"
-              accept=".csv,.json,application/json,text/csv"
-              className="hidden"
-              onChange={handleImportFile}
-            />
-          </div>
         </div>
       </div>
 
-      <div className="h-8 border-b border-[#181818] bg-[#060606] px-3 shrink-0 flex items-center justify-between text-[10px] text-[#848e9c]">
+      <div className="h-8 border-b border-[#181818] bg-[#060606] pl-3 pr-[56px] shrink-0 flex items-center justify-between text-[10px] text-[#848e9c]">
         <div className="flex items-center gap-4 min-w-0">
           <span className="truncate">参照日: <b className="text-gray-200 font-mono">{referenceLabel}</b></span>
           <span className="truncate">銘柄数: <b className="text-gray-200">{chain.groups.reduce((sum, group) => sum + group.stocks.length, 0)}</b></span>
-          <span className="truncate">空セル維持: <b className="text-emerald-300">ON</b></span>
           {multiSelectMode && <span className="text-emerald-300">複数選択: {selectedSymbols.length}件</span>}
         </div>
         <div className="flex items-center gap-2 shrink-0" data-no-pan="true">
@@ -1120,7 +1105,7 @@ export function ValueChainMap({
         onMouseDown={(event) => {
           if (event.button !== 0) return;
           const target = event.target as HTMLElement;
-          if (target.closest('input,select,textarea,a,[data-pan-block="true"]')) return;
+          if (target.closest('input,select,textarea,a,[data-pan-block="true"],[data-no-pan="true"]')) return;
           panMovedRef.current = false;
           setIsPanning(true);
           setPanStart({ mouseX: event.clientX, mouseY: event.clientY, x: pan.x, y: pan.y });
@@ -1155,20 +1140,34 @@ export function ValueChainMap({
           >
             <div className="bg-[#101010] border-r border-b border-[#252525]" />
             <div className="bg-[#101010] border-r border-b border-[#252525]" />
-            {chain.stages.map((stage) => (
-              <div
-                key={stage.id}
-                className="h-8 bg-[#1d1d1f] border-r border-b border-[#353535] flex items-center justify-center text-gray-200 font-bold"
-                style={{ gridColumn: `span ${stage.segments.length}` }}
-              >
-                {stage.name}
-              </div>
-            ))}
+            {chain.stages.map((stage) => {
+              const merged = shouldMergeStageHeader(stage);
+              return (
+                <button
+                  key={stage.id}
+                  type="button"
+                  data-no-pan="true"
+                  className={`${merged ? 'min-h-[72px]' : 'h-8'} bg-[#1d1d1f] border-r border-b border-[#353535] flex items-center justify-center text-gray-200 font-bold hover:bg-[#27272a] transition px-2`}
+                  style={{
+                    gridColumn: `span ${stage.segments.length}`,
+                    gridRow: merged ? 'span 2' : undefined,
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stage', id: stage.id, label: stage.name } });
+                  }}
+                  title={stage.name}
+                >
+                  <span className="truncate">{stage.name}</span>
+                </button>
+              );
+            })}
 
             <div className="h-10 bg-[#101010] border-r border-b border-[#252525]" />
             <div className="h-10 bg-[#101010] border-r border-b border-[#252525]" />
             {segments.map((segment) => {
               const stage = findStage(chain, segment.id);
+              if (stage && shouldMergeStageHeader(stage)) return null;
               return (
                 <button
                   key={segment.id}
@@ -1310,12 +1309,6 @@ export function ValueChainMap({
           </div>
         </div>
 
-        <div className="absolute left-3 bottom-3 bg-[#080808]/95 border border-[#242424] px-3 py-2 text-[10px] text-gray-400 flex items-center gap-3 pointer-events-none">
-          <Maximize2 className="w-3.5 h-3.5 text-emerald-300" />
-          <span>ドラッグで移動、ホイールで拡大縮小</span>
-          <span className="text-[#303030]">|</span>
-          <span>赤 -5% / 黒 0% / 緑 +5%</span>
-        </div>
       </div>
 
       {contextMenu && (
@@ -1406,8 +1399,74 @@ export function ValueChainMap({
         </div>
       )}
 
+      {nameEditModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/55 flex items-center justify-center px-4"
+          data-no-pan="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setNameEditModal(null);
+            }
+          }}
+        >
+          <form
+            className="w-full max-w-sm bg-[#080808] border border-[#343434] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              applyNameEdit(nameEditModal.target, nameEditModal.value);
+            }}
+          >
+            <div className="h-10 border-b border-[#242424] px-3 flex items-center justify-between">
+              <div className="text-xs font-bold text-white">名前の編集</div>
+              <button
+                type="button"
+                onClick={() => setNameEditModal(null)}
+                className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-white"
+                aria-label="名前編集を閉じる"
+                title="閉じる"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 space-y-3">
+              <label className="block text-[10px] text-gray-500">
+                対象
+                <span className="mt-1 block text-xs text-gray-200 font-bold truncate">
+                  {nameEditModal.target.label}
+                </span>
+              </label>
+              <label className="block text-[10px] text-gray-500">
+                新しい名前
+                <input
+                  value={nameEditModal.value}
+                  onChange={(event) => setNameEditModal((current) => current ? { ...current, value: event.target.value } : current)}
+                  className="mt-1 h-9 w-full bg-[#101010] border border-[#303030] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  autoFocus
+                />
+              </label>
+            </div>
+            <div className="h-11 border-t border-[#242424] px-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setNameEditModal(null)}
+                className="h-7 px-3 border border-[#303030] bg-[#101010] text-[11px] text-gray-300 hover:text-white hover:bg-[#171717]"
+              >
+                キャンセル
+              </button>
+              <button
+                type="submit"
+                className="h-7 px-3 border border-emerald-700 bg-emerald-600 text-[11px] font-bold text-white hover:bg-emerald-500"
+              >
+                保存
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div
-        className="fixed top-12 right-0 bottom-0 z-40 flex border-l border-[#202020] bg-[#080808] shadow-2xl overflow-hidden transition-[width] duration-150 ease-out"
+        className="fixed top-24 right-0 bottom-0 z-40 flex border-l border-[#202020] bg-[#080808] shadow-2xl overflow-hidden transition-[width] duration-150 ease-out"
         style={{
           width: chartSidebarOpen
             ? `${chartSidebarWidth + DETAIL_PANEL_NAV_WIDTH}px`
@@ -1573,7 +1632,7 @@ export function ValueChainMap({
           )}
         </div>
 
-        <nav className="w-11 shrink-0 bg-[#070707] border-l border-[#242424] flex flex-col items-center py-2 gap-1">
+        <nav className="w-11 shrink-0 bg-[#070707] border-l border-[#242424] flex flex-col items-center py-2 gap-1" data-no-pan="true">
           <button
             type="button"
             onClick={() => {
@@ -1593,6 +1652,50 @@ export function ValueChainMap({
           >
             <ChartNoAxesCombined className="w-5 h-5" />
           </button>
+          <div className="my-1 h-px w-7 bg-[#242424]" />
+          <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-white hover:bg-[#161616]"
+            title="CSV/JSONインポート"
+            aria-label="CSV/JSONインポート"
+          >
+            <Upload className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-emerald-200 hover:bg-[#161616]"
+            title="CSVエクスポート"
+            aria-label="CSVエクスポート"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handleExportJson}
+            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-sky-200 hover:bg-[#161616]"
+            title="JSONエクスポート"
+            aria-label="JSONエクスポート"
+          >
+            <FileJson className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadSpec}
+            className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 hover:text-white hover:bg-[#161616]"
+            title="テンプレート仕様書"
+            aria-label="テンプレート仕様書"
+          >
+            <FileDown className="w-4 h-4" />
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".csv,.json,application/json,text/csv"
+            className="hidden"
+            onChange={handleImportFile}
+          />
         </nav>
       </div>
     </div>

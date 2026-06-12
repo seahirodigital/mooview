@@ -14,6 +14,10 @@
 | Step 4 | グループ名編集、銘柄追加、行列追加/削除、銘柄削除などの完全CRUDを実装する | 一部完了（名前編集、銘柄追加、銘柄削除のみ。行列追加/削除は未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | Step 5 | ダブルクリック詳細サイドパネルと複数銘柄比較を既存チャート/ウォッチリストへ連携する | 一部完了（右端固定チャートアイコン、幅リサイズ、既存チャートコンポーネント埋め込み、時間足/VOL/RSI/MACD/比較/リセット操作は完了。TradingViewエンジン切替の移植は未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 追加修正 | サイドパネル位置をヘッダー下へ変更し、日付ピッカー、実データAPI取得同期、不要な銘柄情報カード削除を行う | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 追加修正 | 右クリック名前編集を自前モーダルへ統一し、工程大分類も右クリック編集できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 追加修正 | 右固定アイコン列へチャート、インポート、CSVエクスポート、JSONエクスポート、テンプレート仕様書を配置し、ヘッダー操作と重ならない余白を確保する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 追加修正 | 不要説明テキスト削除、ハンバーガーメニューの「チャートビュー」表記、現在時計と最終更新の二段表示、単独工程ヘッダー結合を実装する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証・push | lint/build、HTTP 200確認、差分確認、コミット、push | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 検証・push | 型チェック、ビルド、HTTP疎通、コミット、push | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 
 世界屈指のプロエンジニアとして、ご指摘の事項を完全に統合し、機能要件の漏れを一切許さない最終版の「プロダクト要件定義書（PRD）」を作成しました。

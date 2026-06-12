@@ -215,6 +215,10 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
   };
 }
 
+function formatClockTime(date = new Date()): string {
+  return date.toLocaleTimeString('ja-JP', { hour12: false });
+}
+
 function formatTickerPrice(symbol: string, price: number | null): string {
   if (price === null) return 'N/A';
   if (parseSymbolExpression(symbol)) {
@@ -990,7 +994,8 @@ export default function App() {
 
   // Status message tracker for simulated API state
   const [networkLatency, setNetworkLatency] = useState(24);
-  const [lastApiSyncTime, setLastApiSyncTime] = useState(new Date().toLocaleTimeString());
+  const [currentClockTime, setCurrentClockTime] = useState(() => formatClockTime());
+  const [lastApiSyncTime, setLastApiSyncTime] = useState(() => formatClockTime());
 
   // --- MOOMOO API (OPEND) CONFIG AND STATE ---
   const [moomooStatus, setMoomooStatus] = useState<'disconnected' | 'connected' | 'connecting' | 'error'>('disconnected');
@@ -1041,6 +1046,14 @@ export default function App() {
     localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
     moomooRealTimeActiveRef.current = moomooRealTimeActive;
   }, [moomooRealTimeActive]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setCurrentClockTime(formatClockTime());
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('tv_dashboard_focused_symbol', JSON.stringify(focusedSymbolIndex));
@@ -1337,7 +1350,7 @@ export default function App() {
     const interval = setInterval(() => {
       setTickTrigger(prev => prev + 1);
       setNetworkLatency(moomooRealTimeActive ? 12 : Math.floor(15 + Math.random() * 20));
-      setLastApiSyncTime(new Date().toLocaleTimeString());
+      setLastApiSyncTime(formatClockTime());
       
       if (moomooRealTimeActive) {
         // If we connect to Moomoo, we already fetch real data in the fetcher effect.
@@ -2828,8 +2841,9 @@ export default function App() {
         
         {/* Right header actions */}
         <div className="flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
-          <div className="flex items-center space-x-1 font-mono">
-            <span>最新同期: <b className="text-[#d1d4dc]">{lastApiSyncTime}</b></span>
+          <div className="flex flex-col items-end leading-tight font-mono">
+            <span className="text-[#d1d4dc]">{currentClockTime}</span>
+            <span className="text-[9px] text-[#848e9c]">更新 {lastApiSyncTime}</span>
           </div>
         </div>
       </div>
@@ -2852,7 +2866,7 @@ export default function App() {
               }}
               className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'charts' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
             >
-              <span>既存のチャート画面</span>
+              <span>チャートビュー</span>
               {appView === 'charts' && <span className="text-[9px]">表示中</span>}
             </button>
             <button

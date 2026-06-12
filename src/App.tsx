@@ -892,6 +892,22 @@ export default function App() {
       }
     ];
   });
+  const [valueChainChartState, setValueChainChartState] = useState<ChartPanel>(() =>
+    normalizePanel({
+      id: 'value-chain-side-chart',
+      symbol: 'NVDA',
+      timeframe: '5m',
+      zoomFactor: 8,
+      scrollOffsetPct: 0,
+      showRsi: false,
+      showMacd: false,
+      showVolume: true,
+      priceScale: 1,
+      rsiHeightPct: 25,
+      macdHeightPct: 25,
+    })
+  );
+  const [valueChainChartSymbols, setValueChainChartSymbols] = useState<string[]>(['NVDA']);
 
   // Symbol specific indicator settings
   const [indicatorDatabase, setIndicatorDatabase] = useState<Record<string, SymbolIndicatorSettings>>(() => {
@@ -1195,6 +1211,14 @@ export default function App() {
           });
         });
       });
+      valueChainChartSymbols.forEach((chartSymbol) => {
+        getStoredSymbolOperands(chartSymbol).forEach((symbol) => {
+          requests.set(`${symbol}-${valueChainChartState.timeframe}`, {
+            symbol,
+            timeframe: valueChainChartState.timeframe,
+          });
+        });
+      });
 
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
         const cachedCandles = candlesCache[key];
@@ -1256,7 +1280,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [panels, moomooRealTimeActive, tickTrigger]);
+  }, [panels, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive || quoteFetchInFlightRef.current || tickers.length === 0) return;
@@ -1392,10 +1416,19 @@ export default function App() {
           });
         }
       });
+      valueChainChartSymbols.forEach((chartSymbol) => {
+        getStoredSymbolOperands(chartSymbol).forEach((symbol) => {
+          const key = `${symbol}-${valueChainChartState.timeframe}`;
+          if (!updated[key]) {
+            updated[key] = generateCandles(symbol, valueChainChartState.timeframe, 220);
+            changed = true;
+          }
+        });
+      });
       
       return changed ? updated : prev;
     });
-  }, [panels, moomooRealTimeActive]);
+  }, [panels, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive]);
 
   // --- HANDLERS ---
   // Grouping configuration for unified resizable grid layout calculation
@@ -2666,31 +2699,82 @@ export default function App() {
   };
 
   const openValueChainTickerInChart = (symbol: string) => {
-    addSymbolToActiveWatchlist(symbol);
     selectTickerForPrimaryChart(symbol);
-    setSelectedSymbols([symbol]);
-    setLastClickedSymbol(symbol);
-    setSidebarView('watchlist');
-    setSidebarOpen(true);
     setAppView('charts');
   };
 
-  const compareValueChainSymbols = (symbols: string[]) => {
-    const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
-    if (uniqueSymbols.length === 0) return;
-    addSymbolsToActiveWatchlist(uniqueSymbols);
-    setSelectedSymbols(uniqueSymbols);
-    setLastClickedSymbol(uniqueSymbols.at(-1) ?? null);
-    setSidebarView('watchlist');
-    setSidebarOpen(true);
-    const primaryPanel = panels[0];
-    if (!primaryPanel) return;
-    handleUpdatePanel(primaryPanel.id, {
-      comparisonSymbols: Array.from(new Set([
-        ...(primaryPanel.comparisonSymbols || []),
-        ...uniqueSymbols.filter((symbol) => symbol !== primaryPanel.symbol),
-      ])),
-    });
+  const renderValueChainTickerChart = ({
+    symbol,
+    comparisonSymbols = [],
+  }: {
+    symbol: string;
+    comparisonSymbols?: string[];
+  }) => {
+    const panelExpression = normalizeSymbolExpressionForStorage(symbol);
+    const resolvedChartCandles = resolveCandlesForSymbol(symbol, valueChainChartState.timeframe, candlesCache);
+    const chartCandles = moomooRealTimeActive
+      ? resolvedChartCandles
+      : resolvedChartCandles.length > 0
+      ? resolvedChartCandles
+      : generateCandles(symbol, valueChainChartState.timeframe, 220);
+    const chartSettings = panelExpression
+      ? createDefaultIndicatorSettings(symbol)
+      : indicatorDatabase[symbol.toUpperCase()] || createDefaultIndicatorSettings(symbol);
+    const comparableSymbols = Array.from(new Set(comparisonSymbols))
+      .filter((comparisonSymbol) => comparisonSymbol && comparisonSymbol !== symbol);
+
+    return (
+      <InteractiveCustomChart
+        symbol={symbol}
+        candles={chartCandles}
+        timeframe={valueChainChartState.timeframe}
+        indicatorSettings={chartSettings}
+        zoomFactor={valueChainChartState.zoomFactor}
+        setZoomFactor={(zoomFactor) =>
+          setValueChainChartState((current) => ({ ...current, zoomFactor }))
+        }
+        scrollOffsetPct={valueChainChartState.scrollOffsetPct}
+        setScrollOffsetPct={(scrollOffsetPct) =>
+          setValueChainChartState((current) => ({ ...current, scrollOffsetPct }))
+        }
+        showVolume={!panelExpression && valueChainChartState.showVolume}
+        showRsi={!panelExpression && valueChainChartState.showRsi}
+        showMacd={!panelExpression && valueChainChartState.showMacd}
+        comparisonSymbols={comparableSymbols}
+        comparisonCandles={
+          comparableSymbols.reduce((acc, comparisonSymbol) => {
+            const candles = resolveCandlesForSymbol(
+              comparisonSymbol,
+              valueChainChartState.timeframe,
+              candlesCache,
+            );
+            if (moomooRealTimeActive) {
+              if (candles.length > 0) acc[comparisonSymbol] = candles;
+            } else {
+              acc[comparisonSymbol] = candles.length > 0
+                ? candles
+                : generateCandles(comparisonSymbol, valueChainChartState.timeframe, 220);
+            }
+            return acc;
+          }, {} as Record<string, Candle[]>)
+        }
+        emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
+        priceScale={valueChainChartState.priceScale ?? 1}
+        setPriceScale={(priceScale) =>
+          setValueChainChartState((current) => ({ ...current, priceScale }))
+        }
+        rsiHeightPct={valueChainChartState.rsiHeightPct ?? 25}
+        setRsiHeightPct={(rsiHeightPct) =>
+          setValueChainChartState((current) => ({ ...current, rsiHeightPct }))
+        }
+        macdHeightPct={valueChainChartState.macdHeightPct ?? 25}
+        setMacdHeightPct={(macdHeightPct) =>
+          setValueChainChartState((current) => ({ ...current, macdHeightPct }))
+        }
+        allowNegativeValues={Boolean(panelExpression)}
+        valuePrecision={panelExpression ? 4 : 2}
+      />
+    );
   };
 
   return (
@@ -2798,9 +2882,12 @@ export default function App() {
       {appView === 'value-chain' ? (
         <ValueChainMap
           tickers={liveTickerStats}
+          chartState={valueChainChartState}
+          onChartStateChange={setValueChainChartState}
+          renderTickerChart={renderValueChainTickerChart}
           onOpenTickerInChart={openValueChainTickerInChart}
           onAddSymbolsToWatchlist={addSymbolsToActiveWatchlist}
-          onCompareSymbols={compareValueChainSymbols}
+          onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : (
       <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">

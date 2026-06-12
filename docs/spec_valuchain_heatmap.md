@@ -12,7 +12,9 @@
 | Step 3 | 日付選択、日次/週次切替、前後移動ボタンを実装する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | Step 3 | 日本/海外の休場日を直前営業日に補正して実データ取得する | 一部完了（週末補正のみ。JP/US祝日カレンダー連携は未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | Step 4 | グループ名編集、銘柄追加、行列追加/削除、銘柄削除などの完全CRUDを実装する | 一部完了（名前編集、銘柄追加、銘柄削除のみ。行列追加/削除は未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
-| Step 5 | ダブルクリック詳細サイドパネルと複数銘柄比較を既存チャート/ウォッチリストへ連携する | 一部完了（詳細パネル、ウォッチリスト追加、比較ライン連携のみ。既存チャート完全埋め込みは未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| Step 5 | ダブルクリック詳細サイドパネルと複数銘柄比較を既存チャート/ウォッチリストへ連携する | 一部完了（右端固定チャートアイコン、幅リサイズ、既存チャートコンポーネント埋め込み、時間足/VOL/RSI/MACD/比較/リセット操作は完了。TradingViewエンジン切替の移植は未完） | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 追加修正 | サイドパネル位置をヘッダー下へ変更し、日付ピッカー、実データAPI取得同期、不要な銘柄情報カード削除を行う | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 検証・push | 型チェック、ビルド、HTTP疎通、コミット、push | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 
 世界屈指のプロエンジニアとして、ご指摘の事項を完全に統合し、機能要件の漏れを一切許さない最終版の「プロダクト要件定義書（PRD）」を作成しました。
 開発チームが「土台（Step 1）」から順に構築できるよう、依存関係を整理した実装ステップとなっています。

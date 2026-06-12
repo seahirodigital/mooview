@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays,
   CheckSquare,
+  ChartNoAxesCombined,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -21,7 +22,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { TickerInfo } from '../types';
+import type { ChartPanel, TickerInfo, Timeframe } from '../types';
 
 type SortMode = 'change' | 'marketCap';
 type PeriodMode = 'day' | 'week';
@@ -80,9 +81,15 @@ interface TickerStat extends TickerInfo {
 
 interface ValueChainMapProps {
   tickers: TickerStat[];
+  chartState: ChartPanel;
+  onChartStateChange: React.Dispatch<React.SetStateAction<ChartPanel>>;
+  renderTickerChart: (options: {
+    symbol: string;
+    comparisonSymbols?: string[];
+  }) => React.ReactNode;
   onOpenTickerInChart: (symbol: string) => void;
   onAddSymbolsToWatchlist: (symbols: string[]) => void;
-  onCompareSymbols: (symbols: string[]) => void;
+  onChartSymbolsChange: (symbols: string[]) => void;
 }
 
 type HeaderMenuTarget =
@@ -299,7 +306,19 @@ const DEFAULT_VALUE_CHAIN: ValueChainData = {
 };
 
 const STORAGE_KEY = 'mooview_value_chain_map_v1';
+const CHART_PANEL_WIDTH_STORAGE_KEY = 'mooview_value_chain_chart_panel_width';
+const DETAIL_PANEL_NAV_WIDTH = 44;
+const DETAIL_PANEL_MIN_WIDTH = 360;
+const DETAIL_PANEL_MAX_WIDTH = 860;
+const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
 const todayString = () => new Date().toISOString().slice(0, 10);
+
+function formatTimeframeLabel(timeframe: Timeframe): string {
+  if (timeframe === '1mo') return '1月';
+  if (timeframe === '1d') return '日';
+  if (timeframe === '1w') return '週';
+  return timeframe;
+}
 
 function normalizeSymbol(symbol: string): string {
   const trimmed = symbol.trim();
@@ -512,12 +531,17 @@ AIまたは人間が調査した銘柄を、MooViewのバリューチェーン�
 
 export function ValueChainMap({
   tickers,
+  chartState,
+  onChartStateChange,
+  renderTickerChart,
   onOpenTickerInChart,
   onAddSymbolsToWatchlist,
-  onCompareSymbols,
+  onChartSymbolsChange,
 }: ValueChainMapProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const dateInputRef = useRef<HTMLInputElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const panMovedRef = useRef(false);
   const [chain, setChain] = useState<ValueChainData>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return DEFAULT_VALUE_CHAIN;
@@ -536,6 +560,13 @@ export function ValueChainMap({
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [detailSymbol, setDetailSymbol] = useState<string | null>(null);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
+  const [chartSidebarOpen, setChartSidebarOpen] = useState(false);
+  const [chartSidebarWidth, setChartSidebarWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(CHART_PANEL_WIDTH_STORAGE_KEY));
+    return Number.isFinite(saved)
+      ? clamp(saved, DETAIL_PANEL_MIN_WIDTH, DETAIL_PANEL_MAX_WIDTH)
+      : 460;
+  });
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -546,6 +577,10 @@ export function ValueChainMap({
   }, [chain]);
 
   useEffect(() => {
+    localStorage.setItem(CHART_PANEL_WIDTH_STORAGE_KEY, String(chartSidebarWidth));
+  }, [chartSidebarWidth]);
+
+  useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
     window.addEventListener('click', close);
@@ -553,16 +588,31 @@ export function ValueChainMap({
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!detailSymbol && !comparisonPanelOpen) return;
+    if (!chartSidebarOpen && !detailSymbol && !comparisonPanelOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setDetailSymbol(null);
         setComparisonPanelOpen(false);
+        setChartSidebarOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [comparisonPanelOpen, detailSymbol]);
+  }, [chartSidebarOpen, comparisonPanelOpen, detailSymbol]);
+
+  const openDatePicker = () => {
+    const input = dateInputRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
+    if (!input) return;
+    try {
+      if (typeof input.showPicker === 'function') {
+        input.showPicker();
+      } else {
+        input.focus();
+      }
+    } catch {
+      input.focus();
+    }
+  };
 
   const displayDate = previousBusinessDate(selectedDate);
   const isToday = selectedDate === todayString();
@@ -772,6 +822,19 @@ export function ValueChainMap({
     setSelectedDate(date.toISOString().slice(0, 10));
   };
 
+  const updateChartState = (updates: Partial<ChartPanel>) => {
+    onChartStateChange((current) => ({ ...current, ...updates }));
+  };
+
+  const openSymbolInSidebar = (rawSymbol: string) => {
+    const symbol = normalizeSymbol(rawSymbol);
+    setComparisonPanelOpen(false);
+    setSelectedSymbols([symbol]);
+    setDetailSymbol(symbol);
+    setChartSidebarOpen(true);
+    updateChartState({ symbol });
+  };
+
   const toggleSelectSymbol = (symbol: string) => {
     setSelectedSymbols((current) => (
       current.includes(symbol)
@@ -785,13 +848,22 @@ export function ValueChainMap({
     if (uniqueSymbols.length === 0) return;
     setSelectedSymbols(uniqueSymbols);
     setComparisonPanelOpen(true);
+    setDetailSymbol(null);
+    setChartSidebarOpen(true);
+    updateChartState({ symbol: uniqueSymbols[0] });
     onAddSymbolsToWatchlist(uniqueSymbols);
-    onCompareSymbols(uniqueSymbols);
   };
 
   const resetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
+  };
+
+  const finishPanning = () => {
+    setIsPanning(false);
+    window.setTimeout(() => {
+      panMovedRef.current = false;
+    }, 0);
   };
 
   const detailStock = useMemo(() => {
@@ -802,6 +874,91 @@ export function ValueChainMap({
     }
     return null;
   }, [chain.groups, detailSymbol]);
+
+  const firstStock = useMemo(() => {
+    return chain.groups.find((group) => group.stocks.length > 0)?.stocks[0] ?? null;
+  }, [chain.groups]);
+
+  const sidePanelPrimarySymbol =
+    comparisonPanelOpen && selectedSymbols.length > 0
+      ? selectedSymbols[0]
+      : detailStock?.stock.symbol ?? selectedSymbols[0] ?? firstStock?.symbol ?? null;
+  const sidePanelComparisonSymbols = comparisonPanelOpen && sidePanelPrimarySymbol
+    ? selectedSymbols.filter((symbol) => symbol !== sidePanelPrimarySymbol)
+    : [];
+  const sidePanelChartSymbols = useMemo(() => (
+    Array.from(new Set([
+      sidePanelPrimarySymbol,
+      ...sidePanelComparisonSymbols,
+    ].filter((symbol): symbol is string => Boolean(symbol))))
+  ), [sidePanelComparisonSymbols.join('|'), sidePanelPrimarySymbol]);
+  const sidePanelSymbolOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    chain.groups.forEach((group) => {
+      group.stocks.forEach((stock) => {
+        options.set(stock.symbol, stock.name || stock.symbol);
+      });
+    });
+    tickers.forEach((ticker) => {
+      options.set(ticker.symbol, ticker.name || ticker.symbol);
+    });
+    if (sidePanelPrimarySymbol && !options.has(sidePanelPrimarySymbol)) {
+      options.set(sidePanelPrimarySymbol, sidePanelPrimarySymbol);
+    }
+    if (chartState.symbol && !options.has(chartState.symbol)) {
+      options.set(chartState.symbol, chartState.symbol);
+    }
+    return Array.from(options.entries()).map(([symbol, name]) => ({ symbol, name }));
+  }, [chain.groups, chartState.symbol, sidePanelPrimarySymbol, tickers]);
+
+  useEffect(() => {
+    if (sidePanelChartSymbols.length > 0) {
+      onChartSymbolsChange(sidePanelChartSymbols);
+    }
+  }, [onChartSymbolsChange, sidePanelChartSymbols]);
+
+  const openChartSidebar = () => {
+    if (!detailSymbol && !comparisonPanelOpen) {
+      const symbolToOpen = selectedSymbols[0] ?? firstStock?.symbol;
+      if (symbolToOpen) {
+        openSymbolInSidebar(symbolToOpen);
+        return;
+      }
+    }
+    if (sidePanelPrimarySymbol) {
+      updateChartState({ symbol: sidePanelPrimarySymbol });
+    }
+    setChartSidebarOpen(true);
+  };
+
+  const closeChartSidebar = () => {
+    setChartSidebarOpen(false);
+    setComparisonPanelOpen(false);
+    setDetailSymbol(null);
+  };
+
+  const handleChartSidebarResizeMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = chartSidebarWidth;
+    const maxWidth = Math.min(DETAIL_PANEL_MAX_WIDTH, Math.max(DETAIL_PANEL_MIN_WIDTH, window.innerWidth - 96));
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      setChartSidebarWidth(clamp(startWidth + startX - moveEvent.clientX, DETAIL_PANEL_MIN_WIDTH, maxWidth));
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
 
   const gridTemplateColumns = '132px 64px ' + segments.map(() => '142px').join(' ');
   const canvasWidth = 196 + segments.length * 142;
@@ -841,12 +998,22 @@ export function ValueChainMap({
             <button type="button" onClick={() => moveDate(-1)} className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-white" title="前へ" aria-label="前へ">
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <CalendarDays className="w-3.5 h-3.5 text-emerald-300" />
+            <button
+              type="button"
+              onClick={openDatePicker}
+              className="w-5 h-6 flex items-center justify-center text-emerald-300 hover:text-emerald-200"
+              title="日付を選択"
+              aria-label="日付を選択"
+            >
+              <CalendarDays className="w-3.5 h-3.5" />
+            </button>
             <input
+              ref={dateInputRef}
               type="date"
               value={selectedDate}
+              onClick={openDatePicker}
               onChange={(event) => setSelectedDate(event.target.value)}
-              className="bg-transparent text-[10px] text-gray-200 outline-none w-[116px]"
+              className="bg-transparent text-[10px] text-gray-200 outline-none w-[116px] cursor-pointer"
               aria-label="表示日を選択"
             />
             <button type="button" onClick={() => moveDate(1)} className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-white" title="次へ" aria-label="次へ">
@@ -937,25 +1104,42 @@ export function ValueChainMap({
         className={`relative flex-1 min-h-0 overflow-hidden bg-[#050505] ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`}
         onWheel={(event) => {
           event.preventDefault();
+          if (Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey) {
+            const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+              ? event.deltaX
+              : event.deltaY;
+            setPan((current) => ({
+              ...current,
+              x: current.x - horizontalDelta,
+            }));
+            return;
+          }
           const nextZoom = clamp(zoom + (event.deltaY > 0 ? -0.06 : 0.06), 0.55, 1.6);
           setZoom(nextZoom);
         }}
         onMouseDown={(event) => {
           if (event.button !== 0) return;
           const target = event.target as HTMLElement;
-          if (target.closest('[data-no-pan="true"],button,input,select,a')) return;
+          if (target.closest('input,select,textarea,a,[data-pan-block="true"]')) return;
+          panMovedRef.current = false;
           setIsPanning(true);
           setPanStart({ mouseX: event.clientX, mouseY: event.clientY, x: pan.x, y: pan.y });
         }}
         onMouseMove={(event) => {
           if (!isPanning) return;
+          if (
+            Math.abs(event.clientX - panStart.mouseX) > 4 ||
+            Math.abs(event.clientY - panStart.mouseY) > 4
+          ) {
+            panMovedRef.current = true;
+          }
           setPan({
             x: panStart.x + event.clientX - panStart.mouseX,
             y: panStart.y + event.clientY - panStart.mouseY,
           });
         }}
-        onMouseUp={() => setIsPanning(false)}
-        onMouseLeave={() => setIsPanning(false)}
+        onMouseUp={finishPanning}
+        onMouseLeave={finishPanning}
       >
         <div
           className="absolute left-3 top-3 pb-10"
@@ -1048,7 +1232,10 @@ export function ValueChainMap({
                             <button
                               type="button"
                               className="w-full text-left text-[9px] font-bold text-gray-300 hover:text-white truncate mb-1"
-                              onClick={() => updateGroupName(group.id)}
+                              onClick={() => {
+                                if (panMovedRef.current) return;
+                                updateGroupName(group.id);
+                              }}
                               title={`${findStage(chain, group.segmentId)?.name ?? ''} / ${findSegment(chain, group.segmentId)?.name.replace(/\n/g, ' ') ?? ''} / ${group.name}`}
                             >
                               {group.name}
@@ -1066,13 +1253,15 @@ export function ValueChainMap({
                                     style={getHeatStyle(change)}
                                     title={`${findStage(chain, group.segmentId)?.name ?? ''} / ${findSegment(chain, group.segmentId)?.name.replace(/\n/g, ' ') ?? ''}\n${stock.name}\n${periodMode === 'week' ? '5日間変動率' : '前日比'} ${formatPct(change)}`}
                                     onClick={() => {
+                                      if (panMovedRef.current) return;
                                       if (multiSelectMode) {
                                         toggleSelectSymbol(stock.symbol);
-                                      } else {
-                                        setDetailSymbol(stock.symbol);
                                       }
                                     }}
-                                    onDoubleClick={() => setDetailSymbol(stock.symbol)}
+                                    onDoubleClick={() => {
+                                      if (panMovedRef.current) return;
+                                      openSymbolInSidebar(stock.symbol);
+                                    }}
                                     onContextMenu={(event) => {
                                       event.preventDefault();
                                       setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stock', groupId: group.id, symbol: stock.symbol, label: stock.name } });
@@ -1217,99 +1406,195 @@ export function ValueChainMap({
         </div>
       )}
 
-      {(detailStock || comparisonPanelOpen) && (
+      <div
+        className="fixed top-12 right-0 bottom-0 z-40 flex border-l border-[#202020] bg-[#080808] shadow-2xl overflow-hidden transition-[width] duration-150 ease-out"
+        style={{
+          width: chartSidebarOpen
+            ? `${chartSidebarWidth + DETAIL_PANEL_NAV_WIDTH}px`
+            : `${DETAIL_PANEL_NAV_WIDTH}px`,
+        }}
+      >
+        {chartSidebarOpen && (
+          <div
+            className="w-1.5 bg-[#191919]/90 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch"
+            onMouseDown={handleChartSidebarResizeMouseDown}
+            title="左右にドラッグしてサイドパネル幅を変更"
+          />
+        )}
+
         <div
-          className="fixed inset-0 z-40 bg-black/20"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setDetailSymbol(null);
-              setComparisonPanelOpen(false);
-            }
-          }}
+          className={`min-w-0 flex flex-col overflow-hidden transition-[width] duration-150 ease-out ${chartSidebarOpen ? '' : 'pointer-events-none'}`}
+          style={{ width: chartSidebarOpen ? `${chartSidebarWidth}px` : '0px' }}
         >
-        <div className="absolute inset-y-0 right-0 w-[380px] max-w-[92vw] bg-[#080808] border-l border-[#303030] shadow-2xl flex flex-col">
-          <div className="h-11 border-b border-[#242424] px-3 flex items-center justify-between">
+          <div className="h-11 shrink-0 border-b border-[#242424] px-3 flex items-center justify-between bg-[#080808]">
             <div className="min-w-0">
-              <div className="text-xs font-bold text-white truncate">{comparisonPanelOpen ? '比較サイドパネル' : detailStock?.stock.name}</div>
-              <div className="text-[10px] text-gray-500 truncate">{comparisonPanelOpen ? `${selectedSymbols.length}銘柄を既存ウォッチリストへ連携` : detailStock?.stock.symbol}</div>
+              <div className="text-xs font-bold text-white truncate">チャート</div>
+              <div className="text-[10px] text-gray-500 truncate">時間足・比較・指標</div>
             </div>
             <button
               type="button"
-              onClick={() => {
-                setDetailSymbol(null);
-                setComparisonPanelOpen(false);
-              }}
+              onClick={closeChartSidebar}
               className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white"
-              aria-label="サイドパネルを閉じる"
+              aria-label="チャートサイドパネルを閉じる"
+              title="閉じる"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
-          {comparisonPanelOpen ? (
-            <div className="p-3 space-y-2 overflow-y-auto">
-              <div className="bg-[#101010] border border-[#242424] p-3 text-[11px] leading-relaxed text-gray-300">
-                選択銘柄は既存ウォッチリストへ追加済みです。既存チャート側の比較ラインにも同じ銘柄を連携します。
+
+          <div className="shrink-0 border-b border-[#242424] bg-[#0b0b0b] px-3 py-2 space-y-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <select
+                value={sidePanelPrimarySymbol ?? chartState.symbol}
+                onChange={(event) => openSymbolInSidebar(event.target.value)}
+                className="min-w-[112px] max-w-[150px] bg-[#171717] border border-[#2a2a2a] text-white text-xs px-2 py-1 font-bold uppercase outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                aria-label="チャート銘柄"
+              >
+                {sidePanelSymbolOptions.map((option) => (
+                  <option key={option.symbol} value={option.symbol}>
+                    {option.symbol}
+                  </option>
+                ))}
+              </select>
+
+              {sidePanelComparisonSymbols.length > 0 && (
+                <div className="min-w-0 flex items-center gap-1 overflow-x-auto scrollbar-none">
+                  {sidePanelComparisonSymbols.map((symbol) => (
+                    <span
+                      key={symbol}
+                      className="shrink-0 border border-[#2a2a2a] bg-[#171717]/80 px-1.5 py-0.5 text-[9px] font-mono font-bold text-emerald-300"
+                    >
+                      {symbol}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => compareSymbols(selectedSymbols.length > 0 ? selectedSymbols : sidePanelPrimarySymbol ? [sidePanelPrimarySymbol] : [])}
+                disabled={selectedSymbols.length <= 1}
+                className="ml-auto w-7 h-7 flex items-center justify-center border border-[#2a2a2a] bg-[#171717] text-gray-400 hover:text-white hover:bg-[#202020] disabled:opacity-30 disabled:cursor-not-allowed"
+                title="選択中の銘柄を比較"
+                aria-label="選択中の銘柄を比較"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 flex items-center bg-[#171717] border border-[#2a2a2a] p-0.5 gap-0.5 overflow-x-auto scrollbar-none">
+                {CHART_TIMEFRAMES.map((timeframe) => (
+                  <button
+                    key={timeframe}
+                    type="button"
+                    onClick={() => updateChartState({ timeframe })}
+                    className={`px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
+                      chartState.timeframe === timeframe
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-gray-400 hover:text-white hover:bg-[#202020]'
+                    }`}
+                  >
+                    {formatTimeframeLabel(timeframe)}
+                  </button>
+                ))}
               </div>
+
+              <div className="shrink-0 flex items-center gap-1 bg-[#171717]/70 px-1.5 py-0.5 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => updateChartState({ showVolume: !chartState.showVolume })}
+                  className={`px-1 ${chartState.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500 hover:text-gray-200'}`}
+                  title="出来高を表示"
+                >
+                  VOL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateChartState({ showRsi: !chartState.showRsi })}
+                  className={`px-1 ${chartState.showRsi ? 'text-[#f3a14b] font-bold bg-[#342416]' : 'text-gray-500 hover:text-gray-200'}`}
+                  title="RSIを表示"
+                >
+                  RSI
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateChartState({ showMacd: !chartState.showMacd })}
+                  className={`px-1 ${chartState.showMacd ? 'text-emerald-400 font-bold bg-[#0f2a22]' : 'text-gray-500 hover:text-gray-200'}`}
+                  title="MACDを表示"
+                >
+                  MACD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateChartState({
+                    zoomFactor: 8,
+                    scrollOffsetPct: 100,
+                    priceScale: 1,
+                    rsiHeightPct: 25,
+                    macdHeightPct: 25,
+                  })}
+                  className="w-6 h-6 flex items-center justify-center text-gray-500 hover:text-white hover:bg-[#202020]"
+                  title="チャート表示をリセット"
+                  aria-label="チャート表示をリセット"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 bg-[#090909]">
+            {sidePanelPrimarySymbol ? (
+              renderTickerChart({
+                symbol: sidePanelPrimarySymbol,
+                comparisonSymbols: sidePanelComparisonSymbols,
+              })
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-gray-500">
+                銘柄をダブルクリックしてください
+              </div>
+            )}
+          </div>
+
+          {comparisonPanelOpen && selectedSymbols.length > 0 && (
+            <div className="max-h-36 shrink-0 overflow-y-auto border-t border-[#242424] bg-[#080808] p-2 space-y-1">
               {selectedSymbols.map((symbol) => {
                 const stock = chain.groups.flatMap((group) => group.stocks).find((item) => item.symbol === symbol);
                 const change = stock ? resolveChange(stock) : 0;
                 return (
-                  <div key={symbol} className="h-10 border border-[#242424] bg-[#101010] px-2 flex items-center justify-between">
-                    <span className="font-bold text-gray-100 text-xs truncate">{stock?.name ?? symbol}</span>
-                    <span className={`font-mono text-[11px] ${change >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatPct(change)}</span>
+                  <div key={symbol} className="h-8 border border-[#242424] bg-[#101010] px-2 flex items-center justify-between text-[10px]">
+                    <span className="font-bold text-gray-100 truncate">{stock?.name ?? symbol}</span>
+                    <span className={`font-mono ${change >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatPct(change)}</span>
                   </div>
                 );
               })}
             </div>
-          ) : detailStock && (
-            <div className="p-3 space-y-3 overflow-y-auto">
-              <div className="grid grid-cols-2 gap-2 text-[10px]">
-                <div className="bg-[#101010] border border-[#242424] p-2">
-                  <span className="block text-gray-500">グループ</span>
-                  <span className="block text-gray-100 font-bold truncate">{detailStock.group.name}</span>
-                </div>
-                <div className="bg-[#101010] border border-[#242424] p-2">
-                  <span className="block text-gray-500">変動率</span>
-                  <span className={`block font-mono font-bold ${resolveChange(detailStock.stock) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatPct(resolveChange(detailStock.stock))}</span>
-                </div>
-                <div className="bg-[#101010] border border-[#242424] p-2">
-                  <span className="block text-gray-500">市場</span>
-                  <span className="block text-gray-100 font-bold">{detailStock.stock.market}</span>
-                </div>
-                <div className="bg-[#101010] border border-[#242424] p-2">
-                  <span className="block text-gray-500">時価総額</span>
-                  <span className="block text-gray-100 font-bold font-mono">{detailStock.stock.marketCap.toLocaleString()}</span>
-                </div>
-              </div>
-              <div className="h-48 bg-[#101010] border border-[#242424] p-3">
-                <div className="text-[10px] text-gray-500 mb-2">簡易チャート</div>
-                <svg viewBox="0 0 320 130" className="w-full h-[130px] overflow-visible">
-                  <polyline
-                    fill="none"
-                    stroke={resolveChange(detailStock.stock) >= 0 ? '#34d399' : '#f87171'}
-                    strokeWidth="2"
-                    points={Array.from({ length: 18 }).map((_, index) => {
-                      const seed = dateSeed(`${detailStock.stock.symbol}-${index}-${displayDate}`);
-                      const x = (index / 17) * 320;
-                      const y = 65 - resolveChange(detailStock.stock) * 4 + (seed - 0.5) * 42;
-                      return `${x},${clamp(y, 12, 118)}`;
-                    }).join(' ')}
-                  />
-                </svg>
-              </div>
-              <button
-                type="button"
-                onClick={() => onOpenTickerInChart(detailStock.stock.symbol)}
-                className="w-full h-9 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-2"
-              >
-                <ExternalLink className="w-4 h-4" />
-                既存チャートで表示
-              </button>
-            </div>
           )}
         </div>
-        </div>
-      )}
+
+        <nav className="w-11 shrink-0 bg-[#070707] border-l border-[#242424] flex flex-col items-center py-2 gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              if (chartSidebarOpen) {
+                setChartSidebarOpen(false);
+              } else {
+                openChartSidebar();
+              }
+            }}
+            className={`w-9 h-10 flex items-center justify-center border transition ${
+              chartSidebarOpen
+                ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
+            }`}
+            title="バリューチェーンのチャートパネル"
+            aria-label="バリューチェーンのチャートパネルを表示"
+          >
+            <ChartNoAxesCombined className="w-5 h-5" />
+          </button>
+        </nav>
+      </div>
     </div>
   );
 }

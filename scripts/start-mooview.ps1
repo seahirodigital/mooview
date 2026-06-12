@@ -86,6 +86,32 @@ function Wait-MooViewStatus {
     return $null
 }
 
+function Test-MooViewWeb {
+    try {
+        $response = Invoke-WebRequest `
+            -Uri "http://127.0.0.1:3000" `
+            -UseBasicParsing `
+            -TimeoutSec 5
+        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-MooViewWeb {
+    param([int]$TimeoutSeconds = 90)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-MooViewWeb) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function Get-ProcessLineage {
     param([int]$ProcessId)
 
@@ -245,56 +271,64 @@ function Test-PythonModules {
 }
 
 try {
-    Write-Step "OpenD、Python、MooViewサーバーを順番に確認します。"
+    Write-Step "MooViewサーバーを起動し、ブラウザを開く準備をします。"
 
     if (-not (Test-Path -LiteralPath $repoRoot)) {
         throw "プロジェクトが見つかりません: $repoRoot"
-    }
-    if (-not (Test-Path -LiteralPath $openDPath)) {
-        throw "Moomoo OpenDが見つかりません: $openDPath"
     }
     if (-not (Test-Path -LiteralPath $npmPath)) {
         throw "Node.jsが見つかりません: $npmPath"
     }
 
-    if (-not (Test-TcpPort -HostName "127.0.0.1" -Port 11111)) {
+    if ((Test-Path -LiteralPath $openDPath) -and -not (Test-TcpPort -HostName "127.0.0.1" -Port 11111)) {
         Write-Step "Moomoo OpenDを起動しています。ログイン画面が出た場合はログインしてください。"
         $openDProcess = Get-Process -Name "moomoo_OpenD" -ErrorAction SilentlyContinue
         if (-not $openDProcess) {
             Start-Process -FilePath $openDPath -WorkingDirectory "C:\Users\mahha\AppData\Roaming\moomoo_OpenD"
         }
 
-        if (-not (Wait-TcpPort -HostName "127.0.0.1" -Port 11111 -TimeoutSeconds 120)) {
-            throw "OpenDは起動しましたが、Socket API 127.0.0.1:11111 が開きませんでした。OpenDへログインし、APIポートが11111になっているか確認してください。"
+        if (-not (Wait-TcpPort -HostName "127.0.0.1" -Port 11111 -TimeoutSeconds 20)) {
+            Write-Host "OpenD注意: 127.0.0.1:11111 を確認できません。MooViewは開きますが、実データはデモ表示または接続待ちになります。" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "OpenD接続: 正常（127.0.0.1:11111）" -ForegroundColor Green
         }
     }
-    Write-Host "OpenD接続: 正常（127.0.0.1:11111）" -ForegroundColor Green
+    elseif (-not (Test-Path -LiteralPath $openDPath)) {
+        Write-Host "OpenD注意: Moomoo OpenDが見つかりません: $openDPath" -ForegroundColor Yellow
+        Write-Host "MooViewは開きますが、実データ接続は利用できません。" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "OpenD接続: 正常（127.0.0.1:11111）" -ForegroundColor Green
+    }
 
     if (-not (Test-Path -LiteralPath $pythonPath)) {
-        Write-Step "MooView専用Python環境を作成しています。"
+        Write-Step "MooView専用Python環境を確認できないため、作成を試みます。"
         & "C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -NoProfile `
             -ExecutionPolicy Bypass `
             -File $setupRuntimePath
         if ($LASTEXITCODE -ne 0) {
-            throw "MooView専用Python環境の作成に失敗しました。"
+            Write-Host "Python注意: MooView専用Python環境の作成に失敗しました。実データ接続は利用できない可能性があります。" -ForegroundColor Yellow
         }
     }
 
-    $pythonModulesAvailable = Test-PythonModules
-    if (-not $pythonModulesAvailable) {
+    $pythonModulesAvailable = (Test-Path -LiteralPath $pythonPath) -and (Test-PythonModules)
+    if ((Test-Path -LiteralPath $pythonPath) -and -not $pythonModulesAvailable) {
         Write-Step "Moomoo公式Python SDKが不足しているため、初回セットアップを実行しています。"
         & $pythonPath -m pip install --disable-pip-version-check -r $requirementsPath
         if ($LASTEXITCODE -ne 0) {
-            throw "Moomoo公式Python SDKのインストールに失敗しました。"
+            Write-Host "Python注意: Moomoo公式Python SDKのインストールに失敗しました。実データ接続は利用できない可能性があります。" -ForegroundColor Yellow
         }
         $pythonModulesAvailable = Test-PythonModules
     }
 
     if (-not $pythonModulesAvailable) {
-        throw "Moomoo公式Python SDKを読み込めません。"
+        Write-Host "Python SDK注意: Moomoo公式Python SDKを読み込めません。MooView本体は起動を続けます。" -ForegroundColor Yellow
     }
-    Write-Host "Python SDK: 正常（$pythonPath）" -ForegroundColor Green
+    else {
+        Write-Host "Python SDK: 正常（$pythonPath）" -ForegroundColor Green
+    }
 
     if (-not (Test-Path -LiteralPath $tsxPath)) {
         Write-Step "Node.js依存関係が不足しているため、初回セットアップを実行しています。"
@@ -308,8 +342,9 @@ try {
     }
     Write-Host "Node.js依存関係: 正常" -ForegroundColor Green
 
-    $status = Wait-MooViewStatus
-    if (-not $status) {
+    $webReady = Test-MooViewWeb
+    $status = if ($webReady) { Get-MooViewStatus } else { $null }
+    if (-not $webReady) {
         if (Test-TcpPort -HostName "127.0.0.1" -Port 3000) {
             Restart-StaleMooViewServer | Out-Null
         }
@@ -334,40 +369,43 @@ try {
             -RedirectStandardError $stderrLog `
             -PassThru
 
-        $deadline = (Get-Date).AddSeconds(90)
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 1
-            $serverProcess.Refresh()
-            if ($serverProcess.HasExited) {
-                Show-RecentLog -Path $stdoutLog
-                Show-RecentLog -Path $stderrLog
-                throw "MooViewサーバーが起動途中で終了しました。終了コード: $($serverProcess.ExitCode)"
-            }
-
-            $status = Get-MooViewStatus
-            if ($status -and $status.connected -eq $true) {
-                break
-            }
-        }
-
-        if (-not $status -or $status.connected -ne $true) {
+        $webReady = Wait-MooViewWeb -TimeoutSeconds 90
+        $serverProcess.Refresh()
+        if (-not $webReady -and $serverProcess.HasExited) {
             Show-RecentLog -Path $stdoutLog
             Show-RecentLog -Path $stderrLog
-            $detail = if ($status -and $status.error) { " 詳細: $($status.error)" } else { "" }
-            throw "MooViewサーバーは起動しましたが、OpenD実データ接続を確認できませんでした。$detail"
+            throw "MooViewサーバーが起動途中で終了しました。終了コード: $($serverProcess.ExitCode)"
+        }
+
+        if (-not $webReady) {
+            Show-RecentLog -Path $stdoutLog
+            Show-RecentLog -Path $stderrLog
+            throw "MooViewサーバーを起動しましたが、http://127.0.0.1:3000 が応答しませんでした。"
+        }
+        $status = Get-MooViewStatus
+    }
+
+    Write-Host "MooView Web: 正常（http://127.0.0.1:3000）" -ForegroundColor Green
+    if ($status -and $status.connected -eq $true) {
+        Write-Host "MooView API: 正常（OpenD実データ接続あり）" -ForegroundColor Green
+    }
+    else {
+        $detail = if ($status -and $status.error) { " 詳細: $($status.error)" } else { "" }
+        Write-Host "MooView API注意: OpenD実データ接続は未確認です。$detail" -ForegroundColor Yellow
+    }
+
+    try {
+        if ($status -and $status.connected -eq $true) {
+            Write-Step "実株価とローソク足を確認しています。"
+            $marketData = Test-MooViewMarketData
+            Write-Host "実株価: 正常（US.VOO = $($marketData.Quote.price)）" -ForegroundColor Green
+            Write-Host "ローソク足: 正常（5分足 $($marketData.CandleCount)本）" -ForegroundColor Green
         }
     }
-
-    if ($status.connected -ne $true) {
-        $detail = if ($status.error) { " 詳細: $($status.error)" } else { "" }
-        throw "MooView APIは応答しましたが、OpenDへ接続できていません。$detail"
+    catch {
+        Write-Host "実データ注意: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "MooView本体はブラウザで開きます。" -ForegroundColor Yellow
     }
-
-    Write-Host "MooView API: 正常（http://127.0.0.1:3000）" -ForegroundColor Green
-    Write-Step "実株価とローソク足を確認しています。"
-    $marketData = Test-MooViewMarketData
-    Write-Host "実株価: 正常（US.VOO = $($marketData.Quote.price)）" -ForegroundColor Green
-    Write-Host "ローソク足: 正常（5分足 $($marketData.CandleCount)本）" -ForegroundColor Green
 
     if (-not $SkipBrowser) {
         Write-Step "ブラウザでMooViewを開きます。"

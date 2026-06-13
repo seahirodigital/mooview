@@ -2,6 +2,13 @@
 
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
+| 今回修正 | チャート内の銘柄プルダウンをOS標準selectから黒背景・白文字の自前メニューへ置換する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | チャートデータ取得失敗時にMoomoo検索で会社名/表示名を引き直し、候補コードでローソク足を再取得する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回修正 | 再検索後もチャートが空の場合、ティッカーコード違いの可能性をチャート内に表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\InteractiveCustomChart.tsx` |
+| 今回修正 | バリューチェーン右サイドパネルのRSI/MACD高さを前回値として保存・復元する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回追加修正 | 会社名が銘柄コードとして保存された場合も、INTEL→INTC、BROADCOM→AVGO、QUALCOMM→QCOM等へ補正してチャート用APIに渡す | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint`、`npm.cmd run build`、`python -m py_compile moomoo_gateway.py` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | 保存済みシンボルとキャンドルキャッシュの表記ゆれを正規化し、AVGO/QCOMのような一部銘柄だけチャートが空になる問題を解消する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
 | 今回検証 | `npm.cmd run lint`、`npm.cmd run build`、`python -m py_compile moomoo_gateway.py` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回追加修正 | ヘッダー銘柄の変動率が0%固定にならないよう、Moomooスナップショットの変動率/変動額/前日終値フィールドを補完してchangePctを算出する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\moomoo_gateway.py` |

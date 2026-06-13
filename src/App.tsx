@@ -55,7 +55,23 @@ const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
+const VALUE_CHAIN_CHART_STATE_STORAGE_KEY = 'mooview_value_chain_chart_state_v1';
 const DEFAULT_HEADER_TICKER_SYMBOLS = DEFAULT_TICKERS.slice(0, 6).map((ticker) => ticker.symbol);
+const SYMBOL_NAME_ALIASES: Record<string, string> = {
+  BROADCOM: 'AVGO',
+  QUALCOMM: 'QCOM',
+  INTEL: 'INTC',
+  ADEKA: 'JP.4401',
+  MICRON: 'MU',
+  NVIDIA: 'NVDA',
+  'NVIDIA CORPORATION': 'NVDA',
+  TSMC: 'TSM',
+  'TAIWAN SEMICONDUCTOR': 'TSM',
+  'TAIWAN SEMICONDUCTOR MANUFACTURING': 'TSM',
+  'APPLIED MATERIALS': 'AMAT',
+  'LAM RESEARCH': 'LRCX',
+  'KLA': 'KLAC',
+};
 
 interface WatchlistSection {
   id: string;
@@ -443,8 +459,15 @@ function normalizeTickerSymbolForStorage(rawSymbol: string): string {
   const cleaned = rawSymbol.trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return '';
   const upper = cleaned.toUpperCase();
-  if (upper.startsWith('US.')) return cleaned.slice(3);
-  if (upper.endsWith('.US')) return cleaned.slice(0, -3);
+  const usStripped = upper.startsWith('US.')
+    ? upper.slice(3)
+    : upper.endsWith('.US')
+      ? upper.slice(0, -3)
+      : upper;
+  const aliased = SYMBOL_NAME_ALIASES[usStripped] || SYMBOL_NAME_ALIASES[upper];
+  if (aliased) return aliased;
+  if (upper.startsWith('US.')) return cleaned.slice(3).toUpperCase();
+  if (upper.endsWith('.US')) return cleaned.slice(0, -3).toUpperCase();
   if (upper.startsWith('JP.')) return `JP.${cleaned.slice(3).toUpperCase()}`;
   if (upper.endsWith('.JP')) return `JP.${cleaned.slice(0, -3).toUpperCase()}`;
   if (upper.endsWith('.T')) return `JP.${cleaned.slice(0, -2).toUpperCase()}`;
@@ -814,6 +837,28 @@ async function fetchJsonWithTimeout(
   }
 }
 
+async function searchMoomooSymbolCandidate(query: string): Promise<SymbolSearchCandidate | null> {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  try {
+    const { data } = await fetchJsonWithTimeout('/api/moomoo/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: trimmed, limit: 1 }),
+    }, 15_000);
+    const candidates = Array.isArray(data.candidates)
+      ? data.candidates as SymbolSearchCandidate[]
+      : [];
+    return data.success && candidates.length > 0 ? candidates[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatCandleLookupError(symbol: string): string {
+  return `${symbol}のチャートデータを取得できません。会社名で再検索しても候補が確定できなかったため、ティッカーコードが違う可能性があります。銘柄名またはコードを確認してください。`;
+}
+
 export default function App() {
   // --- STATE ---
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -969,8 +1014,8 @@ export default function App() {
       }
     ];
   });
-  const [valueChainChartState, setValueChainChartState] = useState<ChartPanel>(() =>
-    normalizePanel({
+  const [valueChainChartState, setValueChainChartState] = useState<ChartPanel>(() => {
+    const defaults: ChartPanel = {
       id: 'value-chain-side-chart',
       symbol: 'NVDA',
       timeframe: '1d',
@@ -983,8 +1028,14 @@ export default function App() {
       priceOffsetPct: 0,
       rsiHeightPct: 25,
       macdHeightPct: 25,
-    })
-  );
+    };
+    const saved = readStoredValue<Partial<ChartPanel> | null>(VALUE_CHAIN_CHART_STATE_STORAGE_KEY, null);
+    return normalizePanel({
+      ...defaults,
+      ...(saved || {}),
+      id: defaults.id,
+    });
+  });
   const [valueChainChartSymbols, setValueChainChartSymbols] = useState<string[]>(['NVDA']);
 
   // Symbol specific indicator settings
@@ -1029,6 +1080,7 @@ export default function App() {
   const [candlesCache, setCandlesCache] = useState<Record<string, Candle[]>>(() =>
     normalizeStoredCandlesCache(readStoredValue<unknown>(CANDLES_CACHE_STORAGE_KEY, {}))
   );
+  const [candleFetchErrors, setCandleFetchErrors] = useState<Record<string, string>>({});
   const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
@@ -1120,6 +1172,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tv_dashboard_panels', JSON.stringify(panels));
   }, [panels]);
+
+  useEffect(() => {
+    localStorage.setItem(VALUE_CHAIN_CHART_STATE_STORAGE_KEY, JSON.stringify(valueChainChartState));
+  }, [valueChainChartState]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -1322,30 +1378,32 @@ export default function App() {
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
-      const requests = new Map<string, { symbol: string; timeframe: Timeframe }>();
-      panels.forEach((panel) => {
-        getStoredSymbolOperands(panel.symbol).forEach((symbol) => {
-          requests.set(`${symbol}-${panel.timeframe}`, {
+      const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[] }>();
+      const addCandleRequest = (rawSymbol: string, timeframe: Timeframe) => {
+        getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
+          const key = `${symbol}-${timeframe}`;
+          const existing = requests.get(key);
+          const lookupQueries = Array.from(new Set([
+            ...(existing?.lookupQueries || []),
+            rawSymbol,
             symbol,
-            timeframe: panel.timeframe,
+          ].map((query) => query.trim()).filter(Boolean)));
+          requests.set(key, {
+            symbol,
+            timeframe,
+            lookupQueries,
           });
         });
+      };
+
+      panels.forEach((panel) => {
+        addCandleRequest(panel.symbol, panel.timeframe);
         panel.comparisonSymbols?.forEach((symbol) => {
-          getStoredSymbolOperands(symbol).forEach((operand) => {
-            requests.set(`${operand}-${panel.timeframe}`, {
-              symbol: operand,
-              timeframe: panel.timeframe,
-            });
-          });
+          addCandleRequest(symbol, panel.timeframe);
         });
       });
       valueChainChartSymbols.forEach((chartSymbol) => {
-        getStoredSymbolOperands(chartSymbol).forEach((symbol) => {
-          requests.set(`${symbol}-${valueChainChartState.timeframe}`, {
-            symbol,
-            timeframe: valueChainChartState.timeframe,
-          });
-        });
+        addCandleRequest(chartSymbol, valueChainChartState.timeframe);
       });
 
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
@@ -1362,26 +1420,75 @@ export default function App() {
 
       candleFetchInFlightRef.current = true;
       const updatedCache: Record<string, Candle[]> = {};
+      const successfulKeys = new Set<string>();
+      const failedErrors: Record<string, string> = {};
       let firstError: string | null = null;
+      const fetchCandlesForSymbol = async (symbol: string, timeframe: Timeframe) => {
+        const { data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol,
+            timeframe,
+            reqNum: 150
+          })
+        }, 25_000);
+        const candles = Array.isArray(data.candles) ? data.candles as Candle[] : [];
+        return {
+          candles: data.success && candles.length > 0 ? candles : [],
+          error: data.error ? String(data.error) : null,
+        };
+      };
+
+      const findFallbackSymbol = async (request: { symbol: string; lookupQueries: string[] }) => {
+        const tried = new Set<string>();
+        for (const query of request.lookupQueries) {
+          const normalizedQuery = normalizeTickerSymbolForStorage(query);
+          if (normalizedQuery && normalizedQuery !== request.symbol && !tried.has(normalizedQuery)) {
+            tried.add(normalizedQuery);
+            return normalizedQuery;
+          }
+          if (tried.has(query)) continue;
+          tried.add(query);
+          const candidate = await searchMoomooSymbolCandidate(query);
+          const candidateSymbol = normalizeTickerSymbolForStorage(candidate?.symbol || candidate?.code || '');
+          if (candidateSymbol && candidateSymbol !== request.symbol) {
+            return candidateSymbol;
+          }
+        }
+        return null;
+      };
+
       try {
         await Promise.all(requestsToFetch.map(async ([key, request]) => {
           try {
-            const { data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                symbol: request.symbol,
-                timeframe: request.timeframe,
-                reqNum: 150
-              })
-            }, 25_000);
-            if (data.success && data.candles && data.candles.length > 0) {
-              updatedCache[key] = data.candles;
-            } else {
-              firstError ||= data.error || `${key}のローソク足を取得できません。`;
+            const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
+            if (directResult.candles.length > 0) {
+              updatedCache[key] = directResult.candles;
+              successfulKeys.add(key);
+              return;
             }
+
+            const fallbackSymbol = await findFallbackSymbol(request);
+            if (fallbackSymbol) {
+              const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
+              if (fallbackResult.candles.length > 0) {
+                const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
+                updatedCache[key] = fallbackResult.candles;
+                updatedCache[fallbackKey] = fallbackResult.candles;
+                successfulKeys.add(key);
+                successfulKeys.add(fallbackKey);
+                return;
+              }
+            }
+
+            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+            failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
+            firstError ||= failedErrors[key];
           } catch (error) {
-            firstError ||= error instanceof Error ? error.message : String(error);
+            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+            failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
+            firstError ||= failedErrors[key];
           }
         }));
 
@@ -1402,6 +1509,14 @@ export default function App() {
           setMoomooStatus('error');
           setMoomooError(firstError);
         }
+        setCandleFetchErrors((current) => {
+          const next = { ...current };
+          successfulKeys.forEach((key) => {
+            delete next[key];
+          });
+          Object.assign(next, failedErrors);
+          return next;
+        });
       } finally {
         candleFetchInFlightRef.current = false;
       }
@@ -2899,6 +3014,13 @@ export default function App() {
     setAppView('charts');
   };
 
+  const getCandleFetchError = (symbol: string, timeframe: Timeframe) => {
+    const canonicalSymbol = normalizeStoredSymbolValue(symbol);
+    return candleFetchErrors[`${canonicalSymbol}-${timeframe}`]
+      || candleFetchErrors[`${symbol}-${timeframe}`]
+      || null;
+  };
+
   const renderValueChainTickerChart = ({
     symbol,
     comparisonSymbols = [],
@@ -2914,6 +3036,7 @@ export default function App() {
   }) => {
     const panelExpression = normalizeSymbolExpressionForStorage(symbol);
     const resolvedChartCandles = resolveCandlesForSymbol(symbol, valueChainChartState.timeframe, candlesCache);
+    const chartFetchError = getCandleFetchError(symbol, valueChainChartState.timeframe);
     const chartCandles = moomooRealTimeActive
       ? resolvedChartCandles
       : resolvedChartCandles.length > 0
@@ -2960,7 +3083,7 @@ export default function App() {
             return acc;
           }, {} as Record<string, Candle[]>)
         }
-        emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
+        emptyMessage={chartFetchError ?? (moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...')}
         priceScale={valueChainChartState.priceScale ?? 1}
         setPriceScale={(priceScale) =>
           setValueChainChartState((current) => ({ ...current, priceScale }))
@@ -3223,6 +3346,7 @@ export default function App() {
                   {col.map((panel, pIdx) => {
                     const panelExpression = normalizeSymbolExpressionForStorage(panel.symbol);
                     const pCandles = resolveCandlesForSymbol(panel.symbol, panel.timeframe, candlesCache);
+                    const pCandleError = getCandleFetchError(panel.symbol, panel.timeframe);
                     const pSettings = panelExpression
                       ? createDefaultIndicatorSettings(panel.symbol)
                       : indicatorDatabase[panel.symbol.toUpperCase()] || createDefaultIndicatorSettings(panel.symbol);
@@ -3500,7 +3624,7 @@ export default function App() {
                                       return acc;
                                     }, {} as Record<string, Candle[]>)
                                   }
-                                  emptyMessage={moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...'}
+                                  emptyMessage={pCandleError ?? (moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...')}
                                   priceScale={panel.priceScale ?? 1}
                                   setPriceScale={(scale) => handleUpdatePanel(panel.id, { priceScale: scale })}
                                   priceOffsetPct={panel.priceOffsetPct ?? 0}

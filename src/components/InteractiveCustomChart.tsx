@@ -875,7 +875,7 @@ export function InteractiveCustomChart({
       {/* 2. CHOSEN CHANGER STATE PANEL */}
       <div className="flex-1 w-full h-full relative">
         {candles.length === 0 ? (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500 animate-pulse">
+          <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs leading-relaxed text-gray-400">
             {emptyMessage}
           </div>
         ) : (

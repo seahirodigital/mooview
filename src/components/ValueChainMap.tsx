@@ -377,6 +377,19 @@ const DETAIL_PANEL_MAX_WIDTH = 860;
 const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
 const todayString = () => new Date().toISOString().slice(0, 10);
 const CALENDAR_WEEK_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const SYMBOL_NAME_ALIASES: Record<string, string> = {
+  BROADCOM: 'AVGO',
+  QUALCOMM: 'QCOM',
+  INTEL: 'INTC',
+  MICRON: 'MU',
+  NVIDIA: 'NVDA',
+  TSMC: 'TSM',
+  'TAIWAN SEMICONDUCTOR': 'TSM',
+  'TAIWAN SEMICONDUCTOR MANUFACTURING': 'TSM',
+  'APPLIED MATERIALS': 'AMAT',
+  'LAM RESEARCH': 'LRCX',
+  KLA: 'KLAC',
+};
 
 function formatDateValue(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -472,6 +485,13 @@ function normalizeSymbol(symbol: string): string {
   const cleaned = symbol.trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return '';
   const upper = cleaned.toUpperCase();
+  const usStripped = upper.startsWith('US.')
+    ? upper.slice(3)
+    : upper.endsWith('.US')
+      ? upper.slice(0, -3)
+      : upper;
+  const aliased = SYMBOL_NAME_ALIASES[usStripped] || SYMBOL_NAME_ALIASES[upper];
+  if (aliased) return aliased;
   if (upper.startsWith('US.')) return upper.slice(3);
   if (upper.endsWith('.US')) return upper.slice(0, -3);
   if (upper.startsWith('JP.')) return `JP.${upper.slice(3)}`;
@@ -903,6 +923,7 @@ export function ValueChainMap({
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
   const [chartSidebarOpen, setChartSidebarOpen] = useState(false);
   const [sidePanelMode, setSidePanelMode] = useState<'chart' | 'indicators'>('chart');
+  const [sidePanelSymbolMenuOpen, setSidePanelSymbolMenuOpen] = useState(false);
   const [chartSidebarWidth, setChartSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem(CHART_PANEL_WIDTH_STORAGE_KEY));
     return Number.isFinite(saved)
@@ -996,6 +1017,20 @@ export function ValueChainMap({
   }, [calendarOpen]);
 
   useEffect(() => {
+    if (!sidePanelSymbolMenuOpen) return;
+    const close = () => setSidePanelSymbolMenuOpen(false);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [sidePanelSymbolMenuOpen]);
+
+  useEffect(() => {
     if (!nameEditModal && !structureEditModal && !stockEditModal && !confirmModal && !importDecisionModal) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -1086,7 +1121,7 @@ export function ValueChainMap({
   const totalHeaderHeight = stageHeaderHeight + segmentHeaderHeight;
 
   const resolveChange = (stock: ChainStock): number => {
-    const live = tickerStats.get(stock.symbol.toUpperCase());
+    const live = tickerStats.get(normalizeSymbol(stock.symbol).toUpperCase());
     if (isToday && periodMode === 'day' && live?.computedChange !== null && live?.computedChange !== undefined) {
       return live.computedChange;
     }
@@ -1785,6 +1820,7 @@ export function ValueChainMap({
 
   const openSymbolInSidebar = (rawSymbol: string) => {
     const symbol = normalizeSymbol(rawSymbol);
+    setSidePanelSymbolMenuOpen(false);
     setComparisonPanelOpen(false);
     setSelectedSymbols([symbol]);
     setDetailSymbol(symbol);
@@ -1995,6 +2031,8 @@ export function ValueChainMap({
     }
     return Array.from(options.entries()).map(([symbol, name]) => ({ symbol, name }));
   }, [chain.groups, chartState.symbol, sidePanelPrimarySymbol, tickers]);
+  const activeSidePanelSymbol = sidePanelPrimarySymbol ?? chartState.symbol;
+  const activeSidePanelOption = sidePanelSymbolOptions.find((option) => option.symbol === activeSidePanelSymbol);
   const activeHistoryEntry = useMemo(() => (
     chainHistory.find((entry) => entry.id === activeHistoryId) ?? null
   ), [activeHistoryId, chainHistory]);
@@ -2022,6 +2060,7 @@ export function ValueChainMap({
 
   const closeChartSidebar = () => {
     setChartSidebarOpen(false);
+    setSidePanelSymbolMenuOpen(false);
     setComparisonPanelOpen(false);
     setDetailSymbol(null);
     setSidePanelMode('chart');
@@ -3341,18 +3380,50 @@ export function ValueChainMap({
         >
           <div className="shrink-0 border-b border-[#1b1b1b] bg-transparent px-3 py-2 space-y-2">
             <div className="flex items-center gap-2 min-w-0">
-              <select
-                value={sidePanelPrimarySymbol ?? chartState.symbol}
-                onChange={(event) => openSymbolInSidebar(event.target.value)}
-                className="min-w-[112px] max-w-[150px] bg-transparent text-white text-xs px-2 py-1 font-bold uppercase outline-none focus:text-emerald-300 cursor-pointer"
-                aria-label="チャート銘柄"
+              <div
+                className="relative min-w-[112px] max-w-[170px]"
+                data-no-pan="true"
+                onClick={(event) => event.stopPropagation()}
               >
-                {sidePanelSymbolOptions.map((option) => (
-                  <option key={option.symbol} value={option.symbol}>
-                    {option.symbol}
-                  </option>
-                ))}
-              </select>
+                <button
+                  type="button"
+                  onClick={() => setSidePanelSymbolMenuOpen((open) => !open)}
+                  className="h-7 w-full min-w-0 bg-[#050505] border border-[#222222] px-2 flex items-center justify-between gap-2 text-xs font-bold uppercase text-white outline-none transition hover:border-emerald-500/60 hover:text-emerald-200 focus:border-emerald-500"
+                  aria-haspopup="listbox"
+                  aria-expanded={sidePanelSymbolMenuOpen}
+                  aria-label="チャート銘柄"
+                >
+                  <span className="truncate">{activeSidePanelOption?.symbol ?? activeSidePanelSymbol}</span>
+                  <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-emerald-300 transition-transform ${sidePanelSymbolMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {sidePanelSymbolMenuOpen && (
+                  <div
+                    className="absolute left-0 top-full z-[70] mt-1 max-h-72 w-48 overflow-y-auto border border-[#252525] bg-[#050505] py-1 shadow-2xl"
+                    role="listbox"
+                  >
+                    {sidePanelSymbolOptions.map((option) => {
+                      const selected = option.symbol === activeSidePanelSymbol;
+                      return (
+                        <button
+                          key={option.symbol}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          onClick={() => openSymbolInSidebar(option.symbol)}
+                          className={`w-full border-l-2 px-2.5 py-1.5 text-left text-[11px] font-bold uppercase transition ${
+                            selected
+                              ? 'border-emerald-400 bg-[#101010] text-white'
+                              : 'border-transparent bg-[#050505] text-white hover:bg-[#111111] hover:text-emerald-300'
+                          }`}
+                        >
+                          <span className="block truncate">{option.symbol}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               {sidePanelComparisonSymbols.length > 0 && (
                 <div className="min-w-0 flex items-center gap-1 overflow-x-auto scrollbar-none">

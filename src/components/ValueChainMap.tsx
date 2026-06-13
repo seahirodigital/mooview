@@ -14,6 +14,7 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  Search,
   Settings,
   Trash2,
   Upload,
@@ -369,6 +370,12 @@ const INDEX_GROUP_ID = 'g-index';
 const INDEX_CATEGORY_ID = '__index-category';
 const INDEX_LANE_ID = '__index-lane';
 const INDEX_SEGMENT_ID = '__index-segment';
+const MAX_STOCK_ROWS_PER_GROUP = 5;
+const MAX_STOCKS_PER_GROUP_BEFORE_SPLIT = 20;
+const BASE_CATEGORY_COLUMN_WIDTH = 132;
+const LANE_COLUMN_WIDTH = 64;
+const BASE_SEGMENT_COLUMN_WIDTH = 142;
+const STOCK_GRID_COLUMN_WIDTH = 70;
 const HEADER_STAGE_ROW_HEIGHT = 52;
 const HEADER_SEGMENT_ROW_HEIGHT = 40;
 const DETAIL_PANEL_NAV_WIDTH = 44;
@@ -513,6 +520,68 @@ function findStage(chain: ValueChainData, segmentId: string): Stage | null {
   return chain.stages.find((stage) => stage.segments.some((segment) => segment.id === segmentId)) ?? null;
 }
 
+function createDetailSegmentId(segmentId: string, partIndex: number): string {
+  return `${segmentId}-detail-${partIndex}`;
+}
+
+function createDetailGroupId(groupId: string, partIndex: number): string {
+  return `${groupId}-detail-${partIndex}`;
+}
+
+function normalizeDenseGroups(chain: ValueChainData): ValueChainData {
+  const requiredDetailCountBySegment = new Map<string, number>();
+  chain.groups.forEach((group) => {
+    if (group.id === INDEX_GROUP_ID || group.stocks.length <= MAX_STOCKS_PER_GROUP_BEFORE_SPLIT) return;
+    const partCount = Math.ceil(group.stocks.length / MAX_STOCKS_PER_GROUP_BEFORE_SPLIT);
+    const current = requiredDetailCountBySegment.get(group.segmentId) ?? 1;
+    requiredDetailCountBySegment.set(group.segmentId, Math.max(current, partCount));
+  });
+  if (requiredDetailCountBySegment.size === 0) return chain;
+
+  const existingSegmentIds = new Set(chain.stages.flatMap((stage) => stage.segments.map((segment) => segment.id)));
+  const nextStages = chain.stages.map((stage) => {
+    const nextSegments = stage.segments.flatMap((segment) => {
+      const detailCount = requiredDetailCountBySegment.get(segment.id) ?? 1;
+      if (detailCount <= 1) return [segment];
+      const detailSegments: Segment[] = [segment];
+      for (let partIndex = 2; partIndex <= detailCount; partIndex += 1) {
+        const detailSegmentId = createDetailSegmentId(segment.id, partIndex);
+        if (existingSegmentIds.has(detailSegmentId)) continue;
+        detailSegments.push({
+          id: detailSegmentId,
+          name: `${segment.name}\n詳細${partIndex}`,
+          parentId: stage.id,
+        });
+        existingSegmentIds.add(detailSegmentId);
+      }
+      return detailSegments;
+    });
+    return { ...stage, segments: nextSegments };
+  });
+
+  const nextGroups = chain.groups.flatMap((group) => {
+    if (group.id === INDEX_GROUP_ID || group.stocks.length <= MAX_STOCKS_PER_GROUP_BEFORE_SPLIT) return [group];
+    const groups: ValueGroup[] = [];
+    for (let startIndex = 0; startIndex < group.stocks.length; startIndex += MAX_STOCKS_PER_GROUP_BEFORE_SPLIT) {
+      const partIndex = Math.floor(startIndex / MAX_STOCKS_PER_GROUP_BEFORE_SPLIT) + 1;
+      groups.push({
+        ...group,
+        id: partIndex === 1 ? group.id : createDetailGroupId(group.id, partIndex),
+        segmentId: partIndex === 1 ? group.segmentId : createDetailSegmentId(group.segmentId, partIndex),
+        name: `${group.name} ${partIndex}`,
+        stocks: group.stocks.slice(startIndex, startIndex + MAX_STOCKS_PER_GROUP_BEFORE_SPLIT),
+      });
+    }
+    return groups;
+  });
+
+  return {
+    ...chain,
+    stages: nextStages,
+    groups: nextGroups,
+  };
+}
+
 function shouldMergeStageHeader(stage: Stage): boolean {
   if (stage.segments.length !== 1) return false;
   const segmentName = stage.segments[0]?.name.trim() ?? '';
@@ -561,6 +630,18 @@ function getHeatStyle(value: number): React.CSSProperties {
     backgroundColor: 'rgba(31, 31, 31, 0.92)',
     borderColor: 'rgba(75, 85, 99, 0.22)',
   };
+}
+
+function getStockGridColumnCount(stockCount: number): number {
+  return Math.max(2, Math.ceil(Math.max(1, stockCount) / MAX_STOCK_ROWS_PER_GROUP));
+}
+
+function getStockGridTemplateColumns(stockCount: number): string {
+  return `repeat(${getStockGridColumnCount(stockCount)}, minmax(0, 1fr))`;
+}
+
+function getStockGridRequiredWidth(stockCount: number, baseWidth: number): number {
+  return Math.max(baseWidth, getStockGridColumnCount(stockCount) * STOCK_GRID_COLUMN_WIDTH + 8);
 }
 
 function escapeCsv(value: string | number): string {
@@ -772,12 +853,12 @@ function validateChainData(value: unknown): ValueChainData | null {
       }).filter((stock) => stock.symbol && !stock.symbol.startsWith('UNKNOWN-')),
     };
   });
-  return ensureIndexGroup({
+  return normalizeDenseGroups(ensureIndexGroup({
     name: typeof source.name === 'string' && source.name.trim() ? source.name : 'インポート済みバリューチェーン',
     stages,
     categories,
     groups,
-  });
+  }));
 }
 
 function parseValueChainJson(text: string): ValueChainData | null {
@@ -851,9 +932,14 @@ AIまたは人間が調査した銘柄を、MooViewのバリューチェーン�
 - \`categories[].lanes[].id\` は縦軸カテゴリ内の属性IDです。
 - \`groups[]\` は \`categoryId\`, \`laneId\`, \`segmentId\` を必ず持ち、交差セルに配置されます。
 - \`groups[].stocks[]\` は \`symbol\`, \`name\`, \`market\`, \`marketCap\`, \`baseChangePct\` を持ちます。
+- 横軸工程は、対象業界のバリューチェーンが左から右へ流れる順に並べます。上流工程を左、下流工程・顧客側を右に置き、工程の前後関係が逆転しないようにしてください。
+- 1つの \`groups[].stocks\` は最大20銘柄までにしてください。20銘柄を超える場合は、同じセルへ詰め込まず、\`stages[].segments[]\` をより詳細な工程へ分割し、右側へ追加した詳細工程列に銘柄を分散してください。
+- 画面上の銘柄カードは縦5行までを前提に表示します。20銘柄なら4列 x 5行になるため、CSV/JSON作成時も「1分類20銘柄以内」を守ってください。
 
 ## CSV形式
 \`chainName,stageId,stageName,segmentId,segmentName,categoryId,categoryName,laneId,laneName,groupId,groupName,symbol,name,market,marketCap,baseChangePct\`
+- CSVでも、\`segmentId\` / \`segmentName\` は左から右へバリューチェーンが進む順に設計してください。
+- 同じ \`groupId\` に20銘柄を超えて入れないでください。超える場合は、詳細工程用の新しい \`segmentId\` / \`segmentName\` と、それに対応する \`groupId\` / \`groupName\` を作り、銘柄を分割してください。
 
 ## 現在の軸
 - バリューチェーン名: ${chain.name}
@@ -861,7 +947,7 @@ AIまたは人間が調査した銘柄を、MooViewのバリューチェーン�
 - 縦軸: ${chain.categories.map((category) => `${category.name}（${category.lanes.map((lane) => lane.name).join(', ')}）`).join(' / ')}
 
 ## AIへの作成指示例
-対象セクターの主要企業を調査し、上記CSVまたはJSON形式で、横軸工程、縦軸カテゴリ、グループ名、銘柄コード、銘柄名、国/市場、概算時価総額、初期表示用の騰落率を出力してください。銘柄コードはMooViewで検索可能なコードを優先し、日本株は \`JP.8035\` の形式にしてください。
+対象セクターの主要企業を調査し、上記CSVまたはJSON形式で、横軸工程、縦軸カテゴリ、グループ名、銘柄コード、銘柄名、国/市場、概算時価総額、初期表示用の騰落率を出力してください。横軸工程はバリューチェーンが左から右へ流れる順に分類し、1つの個別銘柄分類が20銘柄を超える場合は、工程をより詳細に分けて別のsegment/groupへ分割してください。銘柄コードはMooViewで検索可能なコードを優先し、日本株は \`JP.8035\` の形式にしてください。
 `;
 }
 
@@ -924,6 +1010,9 @@ export function ValueChainMap({
   const [chartSidebarOpen, setChartSidebarOpen] = useState(false);
   const [sidePanelMode, setSidePanelMode] = useState<'chart' | 'indicators'>('chart');
   const [sidePanelSymbolMenuOpen, setSidePanelSymbolMenuOpen] = useState(false);
+  const [stockSearchQuery, setStockSearchQuery] = useState('');
+  const [stockSearchMessage, setStockSearchMessage] = useState<string | null>(null);
+  const [stockSearchLoading, setStockSearchLoading] = useState(false);
   const [chartSidebarWidth, setChartSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem(CHART_PANEL_WIDTH_STORAGE_KEY));
     return Number.isFinite(saved)
@@ -1302,16 +1391,16 @@ export function ValueChainMap({
     setStockEditModal({ ...modal, loading: true, error: null });
     try {
       const stock = await resolveStockInput(modal.symbol, modal.name, modal.market);
-      setChain((current) => ({
-        ...current,
-        groups: current.groups.map((group) => {
+      setChain((current) => {
+        const nextGroups = current.groups.map((group) => {
           if (group.id !== modal.groupId) return group;
           const nextStocks = modal.mode === 'edit'
             ? group.stocks.map((item) => item.symbol === modal.originalSymbol ? stock : item)
             : [...group.stocks.filter((item) => item.symbol !== stock.symbol), stock];
           return { ...group, stocks: nextStocks };
-        }),
-      }));
+        });
+        return normalizeDenseGroups({ ...current, groups: nextGroups });
+      });
       setStockEditModal(null);
     } catch (error) {
       setStockEditModal({
@@ -1612,7 +1701,7 @@ export function ValueChainMap({
 
   const queueImportDecision = (importedChain: ValueChainData, sourceName: string) => {
     setImportDecisionModal({
-      chain: ensureIndexGroup(importedChain),
+      chain: normalizeDenseGroups(ensureIndexGroup(importedChain)),
       importedAt: new Date().toISOString(),
       sourceName,
     });
@@ -1620,7 +1709,7 @@ export function ValueChainMap({
 
   const applyImportDecision = (mode: 'replace-current' | 'new-history') => {
     if (!importDecisionModal) return;
-    const importedChain = ensureIndexGroup(importDecisionModal.chain);
+    const importedChain = normalizeDenseGroups(ensureIndexGroup(importDecisionModal.chain));
     setImportBackup(chain);
     if (mode === 'new-history') {
       const entry = createHistoryEntry(importedChain, importDecisionModal.importedAt);
@@ -1894,6 +1983,78 @@ export function ValueChainMap({
       .filter(Boolean);
   };
 
+  const findStockInChain = (query: string) => {
+    const trimmed = query.trim();
+    if (!trimmed) return null;
+    const normalizedQuery = normalizeSymbol(trimmed);
+    const normalizedQueryWithoutMarket = normalizedQuery.replace(/^(JP|US|HK)\./, '');
+    const lowerQuery = trimmed.toLocaleLowerCase();
+    for (const group of chain.groups) {
+      for (const stock of group.stocks) {
+        const normalizedSymbol = normalizeSymbol(stock.symbol);
+        const symbolWithoutMarket = normalizedSymbol.replace(/^(JP|US|HK)\./, '');
+        const stockName = stock.name.toLocaleLowerCase();
+        if (
+          normalizedSymbol === normalizedQuery ||
+          symbolWithoutMarket === normalizedQueryWithoutMarket ||
+          normalizedSymbol.includes(normalizedQuery) ||
+          stockName.includes(lowerQuery)
+        ) {
+          return { stock, group };
+        }
+      }
+    }
+    return null;
+  };
+
+  const centerStockInViewport = (symbol: string) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const escapedSymbol = normalizeSymbol(symbol).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const element = viewport.querySelector<HTMLElement>(`[data-value-chain-symbol="${escapedSymbol}"]`);
+    if (!element) return;
+    const viewportRect = viewport.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const sideReserve = chartSidebarWidth + DETAIL_PANEL_NAV_WIDTH + 18;
+    const visibleWidth = Math.max(260, viewportRect.width - sideReserve);
+    const targetCenterX = viewportRect.left + visibleWidth / 2;
+    const targetCenterY = viewportRect.top + viewportRect.height / 2;
+    const elementCenterX = elementRect.left + elementRect.width / 2;
+    const elementCenterY = elementRect.top + elementRect.height / 2;
+    setPan((current) => ({
+      x: current.x + targetCenterX - elementCenterX,
+      y: current.y + targetCenterY - elementCenterY,
+    }));
+  };
+
+  const submitStockSearch = async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const query = stockSearchQuery.trim();
+    if (!query || stockSearchLoading) return;
+    setStockSearchMessage(null);
+    let result = findStockInChain(query);
+
+    if (!result) {
+      setStockSearchLoading(true);
+      const candidate = await searchMoomooCandidate(query);
+      setStockSearchLoading(false);
+      if (candidate) {
+        result = findStockInChain(candidate.symbol || candidate.code || candidate.name || candidate.nameEn || query);
+      }
+    }
+
+    if (!result) {
+      setStockSearchMessage('グリッド内に該当銘柄がありません');
+      return;
+    }
+
+    const symbol = normalizeSymbol(result.stock.symbol);
+    setStockSearchMessage(null);
+    setStockSearchQuery(result.stock.name || symbol);
+    openSymbolInSidebar(symbol);
+    window.setTimeout(() => centerStockInViewport(symbol), 80);
+  };
+
   const resetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -1921,6 +2082,7 @@ export function ValueChainMap({
       <button
         key={`${group.id}-${stock.symbol}`}
         type="button"
+        data-value-chain-symbol={normalizeSymbol(stock.symbol)}
         className={`min-h-[36px] overflow-hidden rounded-[4px] border border-[#262626] px-1.5 py-1 text-left transition hover:ring-1 hover:ring-emerald-400/25 ${selected ? 'ring-2 ring-emerald-300' : ''}`}
         style={{
           ...getHeatStyle(change),
@@ -2089,8 +2251,16 @@ export function ValueChainMap({
     document.addEventListener('mouseup', handleMouseUp);
   };
 
-  const gridTemplateColumns = '132px 64px ' + segments.map(() => '142px').join(' ');
-  const canvasWidth = 196 + segments.length * 142;
+  const indexBlockWidth = getStockGridRequiredWidth(indexGroup.stocks.length, BASE_CATEGORY_COLUMN_WIDTH + LANE_COLUMN_WIDTH);
+  const categoryColumnWidth = Math.max(BASE_CATEGORY_COLUMN_WIDTH, indexBlockWidth - LANE_COLUMN_WIDTH);
+  const segmentColumnWidths = segments.map((segment) => {
+    const maxStockCount = chain.groups
+      .filter((group) => group.segmentId === segment.id)
+      .reduce((max, group) => Math.max(max, group.stocks.length), 0);
+    return getStockGridRequiredWidth(maxStockCount, BASE_SEGMENT_COLUMN_WIDTH);
+  });
+  const gridTemplateColumns = `${categoryColumnWidth}px ${LANE_COLUMN_WIDTH}px ${segmentColumnWidths.map((width) => `${width}px`).join(' ')}`;
+  const canvasWidth = categoryColumnWidth + LANE_COLUMN_WIDTH + segmentColumnWidths.reduce((sum, width) => sum + width, 0);
   const todayForSlider = new Date(`${todayString()}T12:00:00`);
   const selectedDateForSlider = new Date(`${selectedDate}T12:00:00`);
   const selectedDateDaysBack = Math.max(
@@ -2244,6 +2414,34 @@ export function ValueChainMap({
         </div>
 
         <div className="flex items-center gap-2 shrink-0" data-no-pan="true">
+          <form
+            className="relative h-7 w-56 border border-[#242424] bg-[#080808] flex items-center gap-1 px-2 focus-within:border-emerald-500/70"
+            onSubmit={submitStockSearch}
+          >
+            <Search className="w-3.5 h-3.5 shrink-0 text-gray-500" />
+            <input
+              value={stockSearchQuery}
+              onChange={(event) => {
+                setStockSearchQuery(event.target.value);
+                setStockSearchMessage(null);
+              }}
+              className="min-w-0 flex-1 bg-transparent text-[10px] text-gray-100 placeholder:text-gray-600 outline-none"
+              placeholder="コード/銘柄名検索"
+              aria-label="コードまたは銘柄名で検索"
+            />
+            <button
+              type="submit"
+              disabled={stockSearchLoading || !stockSearchQuery.trim()}
+              className="h-5 px-1.5 text-[9px] font-bold text-emerald-300 hover:bg-[#111111] disabled:text-gray-600 disabled:cursor-not-allowed"
+            >
+              表示
+            </button>
+            {stockSearchMessage && (
+              <div className="absolute right-0 top-8 z-50 max-w-64 border border-[#303030] bg-[#080808] px-2 py-1 text-[10px] text-gray-300 shadow-xl">
+                {stockSearchMessage}
+              </div>
+            )}
+          </form>
           {importBackup && (
             <button
               type="button"
@@ -2481,7 +2679,7 @@ export function ValueChainMap({
               >
                 {indexGroup.name}
               </button>
-              <div className="grid grid-cols-3 gap-0.5">
+              <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(indexGroup.stocks.length) }}>
                 {sortedStocks(indexGroup.stocks, indexGroup.id).map((stock) => renderStockCard(stock, indexGroup))}
               </div>
             </div>
@@ -2582,7 +2780,7 @@ export function ValueChainMap({
                             >
                               {group.name}
                             </button>
-                            <div className="grid grid-cols-2 gap-0.5">
+                            <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(group.stocks.length) }}>
                               {sortedStocks(group.stocks, group.id).map((stock) => renderStockCard(stock, group))}
                             </div>
                           </div>
@@ -3381,7 +3579,7 @@ export function ValueChainMap({
           <div className="shrink-0 border-b border-[#1b1b1b] bg-transparent px-3 py-2 space-y-2">
             <div className="flex items-center gap-2 min-w-0">
               <div
-                className="relative min-w-[112px] max-w-[170px]"
+                className="relative min-w-[150px] max-w-[230px]"
                 data-no-pan="true"
                 onClick={(event) => event.stopPropagation()}
               >
@@ -3393,13 +3591,20 @@ export function ValueChainMap({
                   aria-expanded={sidePanelSymbolMenuOpen}
                   aria-label="チャート銘柄"
                 >
-                  <span className="truncate">{activeSidePanelOption?.symbol ?? activeSidePanelSymbol}</span>
+                  <span className="min-w-0 flex items-baseline gap-1">
+                    <span className="shrink-0">{activeSidePanelOption?.symbol ?? activeSidePanelSymbol}</span>
+                    {activeSidePanelOption?.name && activeSidePanelOption.name !== activeSidePanelOption.symbol && (
+                      <span className="min-w-0 truncate text-[10px] font-semibold normal-case text-gray-300">
+                        {activeSidePanelOption.name}
+                      </span>
+                    )}
+                  </span>
                   <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-emerald-300 transition-transform ${sidePanelSymbolMenuOpen ? 'rotate-180' : ''}`} />
                 </button>
 
                 {sidePanelSymbolMenuOpen && (
                   <div
-                    className="absolute left-0 top-full z-[70] mt-1 max-h-72 w-48 overflow-y-auto border border-[#252525] bg-[#050505] py-1 shadow-2xl"
+                    className="absolute left-0 top-full z-[70] mt-1 max-h-72 w-64 overflow-y-auto border border-[#252525] bg-[#050505] py-1 shadow-2xl"
                     role="listbox"
                   >
                     {sidePanelSymbolOptions.map((option) => {
@@ -3417,7 +3622,14 @@ export function ValueChainMap({
                               : 'border-transparent bg-[#050505] text-white hover:bg-[#111111] hover:text-emerald-300'
                           }`}
                         >
-                          <span className="block truncate">{option.symbol}</span>
+                          <span className="flex min-w-0 items-baseline gap-2">
+                            <span className="shrink-0 font-mono text-white">{option.symbol}</span>
+                            {option.name && option.name !== option.symbol && (
+                              <span className="min-w-0 truncate text-[10px] font-semibold normal-case text-gray-300">
+                                {option.name}
+                              </span>
+                            )}
+                          </span>
                         </button>
                       );
                     })}

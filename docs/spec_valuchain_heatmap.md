@@ -2,6 +2,12 @@
 
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
+| 今回修正 | チャート内プルダウンにティッカーコードだけでなく銘柄名も幅内で併記する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 1分類20銘柄超のグループを詳細工程列へ自動分割し、グリッド内の銘柄集中を抑える | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 個別銘柄カードを最大5行で折り返し、20銘柄は4列 x 5行で横幅を広げて表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | インポート戻しの左側にコード/銘柄名検索を追加し、該当銘柄を中央へパンしてサイドパネルを開く | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | JSON/CSVテンプレート仕様書へ、左から右へ流れる工程順と20銘柄超分割ルールを追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回修正 | チャート内の銘柄プルダウンをOS標準selectから黒背景・白文字の自前メニューへ置換する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回修正 | チャートデータ取得失敗時にMoomoo検索で会社名/表示名を引き直し、候補コードでローソク足を再取得する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
 | 今回修正 | 再検索後もチャートが空の場合、ティッカーコード違いの可能性をチャート内に表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\components\InteractiveCustomChart.tsx` |
@@ -115,6 +121,8 @@
     *   クリックでメニュー展開: `[エクスポート]`, `[インポート]`, `[テンプレートダウンロード], ` `[テンプレート仕様書], `。
     *   拡張子選択: `CSV` または `JSON`。
     *   *テンプレート仕様*: 現在アクティブなバリューチェーンの軸、分類、カテゴリ、グループで整理された状態のコードと銘柄名が出力されること。これを修正してインポート可能にする。テンプレート仕様書には、AIで作成する際に、テンプレートの仕様を記載しAIがバリューチェーン構造を作りやすいようなmdファイルをダウンロードできるようにする。
+    *   *工程順ルール*: JSON/CSVテンプレート仕様書では、横軸工程を左から右へバリューチェーンが流れる順に並べることを明記する。上流工程を左、下流工程・顧客側を右に置き、前後関係が逆転しないようにする。
+    *   *20銘柄超の分割ルール*: 1つの個別銘柄分類に20銘柄を超えて入れない。20銘柄を超える場合は、同じGridセルへ詰め込まず、工程をより詳細なsegmentへ分けて右側へ追加し、groupも分割する。画面上のカードは最大5行で表示し、20銘柄は4列 x 5行で横幅を広げて表示する。
 3.  **インポート時の銘柄マッチングロジック**
     *   「銘柄コード（Ticker）」を正として登録。
     *   コードで見つからない場合、CSV/JSON内の「銘柄社名」を用いて、既存の銘柄検索機能のロジックで自動検索・補完を試みる。

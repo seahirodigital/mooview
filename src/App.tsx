@@ -802,6 +802,7 @@ interface MoomooTickerQuote {
   name: string;
   price: number;
   changePct: number;
+  marketCap?: number;
 }
 
 interface MoomooBatchQuoteResult {
@@ -810,6 +811,7 @@ interface MoomooBatchQuoteResult {
   name?: string;
   price?: number;
   changePct?: number;
+  marketCap?: number;
   error?: string;
 }
 
@@ -1553,6 +1555,9 @@ export default function App() {
                 name: quote.name || storedSymbol,
                 price,
                 changePct: Number(quote.changePct || 0),
+                marketCap: Number.isFinite(Number(quote.marketCap)) && Number(quote.marketCap) > 0
+                  ? Number(quote.marketCap)
+                  : undefined,
               }
             : null;
         });
@@ -2222,6 +2227,9 @@ export default function App() {
           name: String(data.name || symbol).replace(/^US\./i, ''),
           price,
           changePct: Number.isFinite(Number(data.changePct)) ? Number(data.changePct) : 0,
+          marketCap: Number.isFinite(Number(data.marketCap)) && Number(data.marketCap) > 0
+            ? Number(data.marketCap)
+            : undefined,
         };
       };
 
@@ -2263,11 +2271,13 @@ export default function App() {
           name: leftQuote.name,
           price: leftQuote.price,
           changePct: leftQuote.changePct,
+          marketCap: leftQuote.marketCap,
         },
         [rightQuote.symbol]: {
           name: rightQuote.name,
           price: rightQuote.price,
           changePct: rightQuote.changePct,
+          marketCap: rightQuote.marketCap,
         },
       }));
       setIndicatorDatabase((currentDatabase) => ({
@@ -2359,6 +2369,9 @@ export default function App() {
           name: newTicker.name,
           price: newTicker.basePrice,
           changePct: newTicker.dailyChangePct,
+          marketCap: Number.isFinite(Number(data.marketCap)) && Number(data.marketCap) > 0
+            ? Number(data.marketCap)
+            : undefined,
         },
       }));
       setIndicatorDatabase((currentDatabase) => ({
@@ -2654,6 +2667,9 @@ export default function App() {
                 name: importedTicker.name,
                 price: importedTicker.basePrice,
                 changePct: importedTicker.dailyChangePct,
+                marketCap: Number.isFinite(Number(data.marketCap)) && Number(data.marketCap) > 0
+                  ? Number(data.marketCap)
+                  : undefined,
               } satisfies MoomooTickerQuote,
             };
           } catch (error) {
@@ -2838,6 +2854,7 @@ export default function App() {
           ...t,
           currentPrice: quote?.price ?? null,
           computedChange: quote?.changePct ?? null,
+          marketCap: quote?.marketCap,
         };
       }
 

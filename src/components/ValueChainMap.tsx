@@ -25,6 +25,16 @@ import type { ChartPanel, TickerInfo, Timeframe } from '../types';
 type SortMode = 'change' | 'marketCap';
 type PeriodMode = 'day' | 'week';
 
+interface TreemapRect {
+  stock: ChainStock;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+type MarketCapResolver = (stock: ChainStock) => number;
+
 interface Segment {
   id: string;
   name: string;
@@ -81,6 +91,7 @@ interface ValueChainHistoryEntry {
 interface TickerStat extends TickerInfo {
   currentPrice: number | null;
   computedChange: number | null;
+  marketCap?: number;
 }
 
 interface SymbolSearchCandidate {
@@ -376,6 +387,9 @@ const BASE_CATEGORY_COLUMN_WIDTH = 132;
 const LANE_COLUMN_WIDTH = 64;
 const BASE_SEGMENT_COLUMN_WIDTH = 142;
 const STOCK_GRID_COLUMN_WIDTH = 70;
+const BASE_CELL_MIN_HEIGHT = 118;
+const HEATMAP_GROUP_MIN_HEIGHT = 118;
+const HEATMAP_GROUP_MAX_EXTRA_HEIGHT = 282;
 const HEADER_STAGE_ROW_HEIGHT = 52;
 const HEADER_SEGMENT_ROW_HEIGHT = 40;
 const DETAIL_PANEL_NAV_WIDTH = 44;
@@ -642,6 +656,106 @@ function getStockGridTemplateColumns(stockCount: number): string {
 
 function getStockGridRequiredWidth(stockCount: number, baseWidth: number): number {
   return Math.max(baseWidth, getStockGridColumnCount(stockCount) * STOCK_GRID_COLUMN_WIDTH + 8);
+}
+
+function getMarketCapValue(stock: ChainStock): number {
+  const value = Number(stock.marketCap);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getTreemapWeight(stock: ChainStock, resolveMarketCap: MarketCapResolver = getMarketCapValue): number {
+  const value = resolveMarketCap(stock);
+  return value > 0 ? value : 0.0001;
+}
+
+function buildUnknownMarketCapRects(
+  stocks: ChainStock[],
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): TreemapRect[] {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(stocks.length)));
+  const rows = Math.max(1, Math.ceil(stocks.length / columns));
+  const cellWidth = width / columns;
+  const cellHeight = height / rows;
+  const tileWidth = Math.max(1.2, Math.min(cellWidth * 0.38, width * 0.08));
+  const tileHeight = Math.max(1.2, Math.min(cellHeight * 0.38, height * 0.08));
+
+  return stocks.map((stock, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    return {
+      stock,
+      x: x + column * cellWidth,
+      y: y + row * cellHeight,
+      width: tileWidth,
+      height: tileHeight,
+    };
+  });
+}
+
+function sumMarketCap(stocks: ChainStock[], resolveMarketCap: MarketCapResolver = getMarketCapValue): number {
+  return stocks.reduce((sum, stock) => sum + resolveMarketCap(stock), 0);
+}
+
+function getGroupImpactValue(group: ValueGroup, resolveMarketCap: MarketCapResolver = getMarketCapValue): number {
+  return sumMarketCap(group.stocks, resolveMarketCap);
+}
+
+function splitTreemapItems(
+  stocks: ChainStock[],
+  resolveMarketCap: MarketCapResolver = getMarketCapValue,
+): [ChainStock[], ChainStock[]] {
+  const total = stocks.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
+  let bestIndex = 1;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  let running = 0;
+  for (let index = 0; index < stocks.length - 1; index += 1) {
+    running += getTreemapWeight(stocks[index], resolveMarketCap);
+    const delta = Math.abs(total / 2 - running);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      bestIndex = index + 1;
+    }
+  }
+  return [stocks.slice(0, bestIndex), stocks.slice(bestIndex)];
+}
+
+function buildTreemapRects(
+  stocks: ChainStock[],
+  resolveMarketCap: MarketCapResolver = getMarketCapValue,
+  x = 0,
+  y = 0,
+  width = 100,
+  height = 100,
+): TreemapRect[] {
+  if (stocks.length === 0) return [];
+  if (stocks.length === 1) {
+    return [{ stock: stocks[0], x, y, width, height }];
+  }
+  if (sumMarketCap(stocks, resolveMarketCap) <= 0) {
+    return buildUnknownMarketCapRects(stocks, x, y, width, height);
+  }
+
+  const [first, second] = splitTreemapItems(stocks, resolveMarketCap);
+  const firstTotal = first.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
+  const secondTotal = second.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
+  const total = firstTotal + secondTotal || 1;
+
+  if (width >= height) {
+    const firstWidth = width * (firstTotal / total);
+    return [
+      ...buildTreemapRects(first, resolveMarketCap, x, y, firstWidth, height),
+      ...buildTreemapRects(second, resolveMarketCap, x + firstWidth, y, width - firstWidth, height),
+    ];
+  }
+
+  const firstHeight = height * (firstTotal / total);
+  return [
+    ...buildTreemapRects(first, resolveMarketCap, x, y, width, firstHeight),
+    ...buildTreemapRects(second, resolveMarketCap, x, y + firstHeight, width, height - firstHeight),
+  ];
 }
 
 function escapeCsv(value: string | number): string {
@@ -987,6 +1101,7 @@ export function ValueChainMap({
     return history.some((entry) => entry.id === savedActiveHistoryId) ? savedActiveHistoryId : null;
   });
   const [sortMode, setSortMode] = useState<SortMode>('change');
+  const [heatmapMode, setHeatmapMode] = useState(false);
   const [periodMode, setPeriodMode] = useState<PeriodMode>('day');
   const [selectedDate, setSelectedDate] = useState(todayString());
   const [calendarOpen, setCalendarOpen] = useState(false);
@@ -1024,6 +1139,7 @@ export function ValueChainMap({
     return Number.isFinite(saved) ? clamp(saved, 8, 16) : 10;
   });
   const [tickerFlash, setTickerFlash] = useState<Record<string, 'up' | 'down'>>({});
+  const [heatmapMarketCaps, setHeatmapMarketCaps] = useState<Record<string, number>>({});
   const [stockTooltip, setStockTooltip] = useState<{
     x: number;
     y: number;
@@ -1037,6 +1153,8 @@ export function ValueChainMap({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ mouseX: 0, mouseY: 0, x: 0, y: 0 });
+  const heatmapMarketCapFetchInFlightRef = useRef(false);
+  const heatmapMarketCapFetchSignatureRef = useRef('');
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(chain));
@@ -1152,6 +1270,94 @@ export function ValueChainMap({
   const tickerStats = useMemo(() => {
     return new Map(tickers.map((ticker) => [ticker.symbol.toUpperCase(), ticker]));
   }, [tickers]);
+  const allStocksBySymbol = useMemo(() => {
+    const map = new Map<string, ChainStock>();
+    chain.groups.forEach((group) => {
+      group.stocks.forEach((stock) => {
+        map.set(normalizeSymbol(stock.symbol).toUpperCase(), stock);
+      });
+    });
+    return map;
+  }, [chain.groups]);
+  const resolveStockMarketCap = useMemo<MarketCapResolver>(() => (
+    (stock: ChainStock): number => {
+      const symbol = normalizeSymbol(stock.symbol).toUpperCase();
+      const rawSymbol = stock.symbol.trim().toUpperCase();
+      const liveMarketCap = Number(
+        tickerStats.get(symbol)?.marketCap
+        ?? tickerStats.get(rawSymbol)?.marketCap,
+      );
+      if (Number.isFinite(liveMarketCap) && liveMarketCap > 0) {
+        return liveMarketCap;
+      }
+      const cachedMarketCap = Number(heatmapMarketCaps[symbol] ?? heatmapMarketCaps[rawSymbol]);
+      if (Number.isFinite(cachedMarketCap) && cachedMarketCap > 0) {
+        return cachedMarketCap;
+      }
+      return getMarketCapValue(stock);
+    }
+  ), [heatmapMarketCaps, tickerStats]);
+
+  useEffect(() => {
+    if (!heatmapMode) return;
+
+    const missingSymbols = Array.from(new Set(
+      allStocksBySymbol.keys().filter((symbol) => {
+        const stock = allStocksBySymbol.get(symbol);
+        if (!stock) return false;
+        const liveMarketCap = Number(tickerStats.get(symbol)?.marketCap);
+        if (Number.isFinite(liveMarketCap) && liveMarketCap > 0) return false;
+        const cachedMarketCap = Number(heatmapMarketCaps[symbol]);
+        if (Number.isFinite(cachedMarketCap) && cachedMarketCap > 0) return false;
+        return !(Number(stock.marketCap) > 0);
+      }),
+    ));
+
+    if (missingSymbols.length === 0) return;
+    const signature = missingSymbols.slice().sort().join('|');
+    if (heatmapMarketCapFetchInFlightRef.current || heatmapMarketCapFetchSignatureRef.current === signature) {
+      return;
+    }
+
+    let cancelled = false;
+    heatmapMarketCapFetchInFlightRef.current = true;
+    heatmapMarketCapFetchSignatureRef.current = signature;
+
+    const loadMarketCaps = async () => {
+      try {
+        const response = await fetch('/api/moomoo/quotes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbols: missingSymbols }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success || !data.quotes) return;
+        const nextValues: Record<string, number> = {};
+        Object.values(data.quotes as Record<string, { symbol?: string; marketCap?: number }>).forEach((quote) => {
+          const symbol = normalizeSymbol(String(quote.symbol || '')).toUpperCase();
+          const marketCap = Number(quote.marketCap);
+          if (!symbol || !Number.isFinite(marketCap) || marketCap <= 0) return;
+          nextValues[symbol] = marketCap;
+        });
+        if (!cancelled && Object.keys(nextValues).length > 0) {
+          setHeatmapMarketCaps((current) => ({ ...current, ...nextValues }));
+        }
+      } catch {
+        if (!cancelled) {
+          heatmapMarketCapFetchSignatureRef.current = '';
+        }
+      } finally {
+        if (!cancelled) {
+          heatmapMarketCapFetchInFlightRef.current = false;
+        }
+      }
+    };
+
+    void loadMarketCaps();
+    return () => {
+      cancelled = true;
+    };
+  }, [allStocksBySymbol, heatmapMode, heatmapMarketCaps, tickerStats]);
 
   useEffect(() => {
     if (!isToday) {
@@ -1202,6 +1408,16 @@ export function ValueChainMap({
   const indexGroup = useMemo(() => (
     chain.groups.find((group) => group.id === INDEX_GROUP_ID) ?? createDefaultIndexGroup()
   ), [chain.groups]);
+  const groupMarketCaps = useMemo(() => {
+    const map = new Map<string, number>();
+    chain.groups.forEach((group) => {
+      map.set(group.id, getGroupImpactValue(group, resolveStockMarketCap));
+    });
+    return map;
+  }, [chain.groups, resolveStockMarketCap]);
+  const maxGroupMarketCap = useMemo(() => (
+    Array.from(groupMarketCaps.values()).reduce((max: number, value: number) => Math.max(max, value), 1)
+  ), [groupMarketCaps]);
   const selectedSet = useMemo(() => new Set(selectedSymbols), [selectedSymbols]);
   const indexStockRowCount = Math.max(2, Math.ceil(indexGroup.stocks.length / 3));
   const indexStockRowHeight = Math.max(35, stockFontSize * 2 + 16);
@@ -1221,7 +1437,9 @@ export function ValueChainMap({
 
   const sortStocksByActiveMode = (stocks: ChainStock[]) => {
     return [...stocks].sort((first, second) => {
-      if (sortMode === 'marketCap') return second.marketCap - first.marketCap;
+      if (heatmapMode || sortMode === 'marketCap') {
+        return resolveStockMarketCap(second) - resolveStockMarketCap(first);
+      }
       return resolveChange(second) - resolveChange(first);
     });
   };
@@ -1376,11 +1594,32 @@ export function ValueChainMap({
     }
 
     const live = tickerStats.get(symbol.toUpperCase());
+    const fetchQuoteMarketCap = async (): Promise<number> => {
+      try {
+        const response = await fetch('/api/moomoo/quote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol }),
+        });
+        const data = await response.json();
+        const marketCap = Number(data.marketCap);
+        if (!response.ok || !data.success || !Number.isFinite(marketCap) || marketCap <= 0) {
+          return 0;
+        }
+        return marketCap;
+      } catch {
+        return 0;
+      }
+    };
+    const liveMarketCap = Number(live?.marketCap);
+    const marketCap = Number.isFinite(liveMarketCap) && liveMarketCap > 0
+      ? liveMarketCap
+      : await fetchQuoteMarketCap();
     return {
       symbol,
       name: name || live?.name || symbol,
       market: market || (symbol.startsWith('JP.') ? 'JP' : 'US'),
-      marketCap: 0,
+      marketCap,
       baseChangePct: live?.computedChange ?? 0,
     };
   };
@@ -2060,15 +2299,13 @@ export function ValueChainMap({
     setPan({ x: 0, y: 0 });
   };
 
-  const renderStockCard = (stock: ChainStock, group: ValueGroup) => {
-    const change = resolveChange(stock);
-    const selected = selectedSet.has(normalizeSymbol(stock.symbol));
-    const flash = tickerFlash[normalizeSymbol(stock.symbol)];
+  const getStockClassification = (stock: ChainStock, group: ValueGroup) => {
     const category = chain.categories.find((item) => item.id === group.categoryId);
     const lane = category?.lanes.find((item) => item.id === group.laneId);
     const segment = findSegment(chain, group.segmentId);
     const stage = findStage(chain, group.segmentId);
-    const stockClassification = group.id === INDEX_GROUP_ID
+    const marketCap = resolveStockMarketCap(stock);
+    return group.id === INDEX_GROUP_ID
       ? group.name
       : [
           category?.name,
@@ -2076,7 +2313,15 @@ export function ValueChainMap({
           stage?.name,
           segment?.name.replace(/\n/g, ' '),
           group.name,
+          marketCap > 0 ? `時価総額 ${marketCap.toLocaleString()}` : '時価総額 未取得',
         ].filter(Boolean).join(' / ');
+  };
+
+  const renderStockCard = (stock: ChainStock, group: ValueGroup) => {
+    const change = resolveChange(stock);
+    const selected = selectedSet.has(normalizeSymbol(stock.symbol));
+    const flash = tickerFlash[normalizeSymbol(stock.symbol)];
+    const stockClassification = getStockClassification(stock, group);
 
     return (
       <button
@@ -2129,6 +2374,113 @@ export function ValueChainMap({
         <span className="block truncate font-semibold text-white leading-[1.05]">{stock.name}</span>
         <span className="block font-mono font-bold text-white/95 leading-[1.05]">{formatPct(change)}</span>
       </button>
+    );
+  };
+
+  const renderHeatmapStockTile = (rect: TreemapRect, group: ValueGroup) => {
+    const stock = rect.stock;
+    const change = resolveChange(stock);
+    const symbol = normalizeSymbol(stock.symbol);
+    const selected = selectedSet.has(symbol);
+    const flash = tickerFlash[symbol];
+    const showLabel = rect.width >= 13 && rect.height >= 10;
+    const emphasizeLabel = rect.width >= 22 && rect.height >= 18;
+    const stockClassification = getStockClassification(stock, group);
+    const marketCap = resolveStockMarketCap(stock);
+    const marketCapLabel = marketCap > 0 ? marketCap.toLocaleString() : '未取得';
+
+    return (
+      <button
+        key={`${group.id}-${stock.symbol}`}
+        type="button"
+        data-value-chain-symbol={symbol}
+        className={`absolute overflow-hidden rounded-[3px] border border-[#070707] text-left transition hover:z-10 hover:ring-1 hover:ring-white/80 ${selected ? 'ring-2 ring-emerald-200 z-10' : ''}`}
+        style={{
+          ...getHeatStyle(change),
+          left: `${rect.x}%`,
+          top: `${rect.y}%`,
+          width: `${rect.width}%`,
+          height: `${rect.height}%`,
+          minWidth: rect.width < 1 ? '2px' : undefined,
+          minHeight: rect.height < 1 ? '2px' : undefined,
+          boxShadow: flash
+            ? `inset 0 0 0 999px ${flash === 'up' ? 'rgba(16, 185, 129, 0.16)' : 'rgba(239, 83, 80, 0.16)'}`
+            : undefined,
+        }}
+        onMouseMove={(event) => {
+          setStockTooltip({
+            x: event.clientX + 14,
+            y: event.clientY + 14,
+            classification: stockClassification,
+            name: stock.name,
+            symbol: stock.symbol,
+            change,
+          });
+        }}
+        onMouseLeave={() => setStockTooltip(null)}
+        draggable
+        onDragStart={(event) => {
+          const dragSymbols = getDragSymbolsForStock(stock.symbol);
+          event.dataTransfer.effectAllowed = 'copy';
+          event.dataTransfer.setData('text/plain', dragSymbols.join(','));
+          event.dataTransfer.setData('application/x-mooview-symbols', JSON.stringify(dragSymbols));
+        }}
+        onClick={(event) => {
+          if (panMovedRef.current) return;
+          if (event.ctrlKey || event.metaKey || multiSelectMode) {
+            setMultiSelectMode(true);
+            toggleSelectSymbol(stock.symbol);
+          }
+        }}
+        onDoubleClick={() => {
+          if (panMovedRef.current) return;
+          openSymbolInSidebar(stock.symbol);
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'stock', groupId: group.id, symbol: stock.symbol, label: stock.name } });
+        }}
+        aria-label={`${stock.name} ${stock.symbol} ${formatPct(change)}`}
+        title={`${stock.name} / ${stock.symbol} / ${formatPct(change)} / 時価総額 ${marketCapLabel}`}
+      >
+        {showLabel && (
+          <span className="flex h-full w-full flex-col items-center justify-center px-1 text-center leading-tight text-white">
+            <span className={`block max-w-full truncate font-semibold ${emphasizeLabel ? 'text-[11px]' : 'text-[8px]'}`}>
+              {stock.name}
+            </span>
+            {emphasizeLabel && (
+              <span className="block max-w-full truncate font-mono text-[10px] font-bold text-white/95">
+                {formatPct(change)}
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  const getHeatmapGroupHeight = (group: ValueGroup) => {
+    const totalMarketCap = groupMarketCaps.get(group.id) ?? 0;
+    const ratio = totalMarketCap > 0 ? Math.pow(totalMarketCap / maxGroupMarketCap, 0.42) : 0;
+    return Math.round(HEATMAP_GROUP_MIN_HEIGHT + ratio * HEATMAP_GROUP_MAX_EXTRA_HEIGHT);
+  };
+
+  const renderGroupStockArea = (group: ValueGroup) => {
+    const orderedStocks = sortedStocks(group.stocks, group.id);
+    if (!heatmapMode) {
+      return (
+        <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(group.stocks.length) }}>
+          {orderedStocks.map((stock) => renderStockCard(stock, group))}
+        </div>
+      );
+    }
+
+    const rects = buildTreemapRects(orderedStocks, resolveStockMarketCap);
+    return (
+      <div className="relative h-full min-h-[48px] overflow-hidden rounded-[3px] bg-[#050505]">
+        {rects.map((rect) => renderHeatmapStockTile(rect, group))}
+      </div>
     );
   };
 
@@ -2254,10 +2606,15 @@ export function ValueChainMap({
   const indexBlockWidth = getStockGridRequiredWidth(indexGroup.stocks.length, BASE_CATEGORY_COLUMN_WIDTH + LANE_COLUMN_WIDTH);
   const categoryColumnWidth = Math.max(BASE_CATEGORY_COLUMN_WIDTH, indexBlockWidth - LANE_COLUMN_WIDTH);
   const segmentColumnWidths = segments.map((segment) => {
-    const maxStockCount = chain.groups
-      .filter((group) => group.segmentId === segment.id)
-      .reduce((max, group) => Math.max(max, group.stocks.length), 0);
-    return getStockGridRequiredWidth(maxStockCount, BASE_SEGMENT_COLUMN_WIDTH);
+    const segmentGroups = chain.groups.filter((group) => group.segmentId === segment.id);
+    const maxStockCount = segmentGroups.reduce((max, group) => Math.max(max, group.stocks.length), 0);
+    const stockCountWidth = getStockGridRequiredWidth(maxStockCount, BASE_SEGMENT_COLUMN_WIDTH);
+    if (!heatmapMode) return stockCountWidth;
+    const maxSegmentGroupMarketCap = segmentGroups.reduce((max, group) => (
+      Math.max(max, groupMarketCaps.get(group.id) ?? 0)
+    ), 0);
+    const ratio = maxSegmentGroupMarketCap > 0 ? Math.pow(maxSegmentGroupMarketCap / maxGroupMarketCap, 0.4) : 0;
+    return Math.max(stockCountWidth, Math.round(BASE_SEGMENT_COLUMN_WIDTH + ratio * 280));
   });
   const gridTemplateColumns = `${categoryColumnWidth}px ${LANE_COLUMN_WIDTH}px ${segmentColumnWidths.map((width) => `${width}px`).join(' ')}`;
   const canvasWidth = categoryColumnWidth + LANE_COLUMN_WIDTH + segmentColumnWidths.reduce((sum, width) => sum + width, 0);
@@ -2401,6 +2758,14 @@ export function ValueChainMap({
               className={`h-7 px-2 text-[10px] border transition ${sortMode === 'marketCap' ? 'bg-emerald-950/70 border-emerald-700 text-emerald-200' : 'bg-[#111] border-[#242424] text-gray-400 hover:text-white'}`}
             >
               時価総額順
+            </button>
+            <button
+              type="button"
+              onClick={() => setHeatmapMode((current) => !current)}
+              className={`h-7 px-2 text-[10px] border transition ${heatmapMode ? 'bg-emerald-500 border-emerald-400 text-black font-bold' : 'bg-[#111] border-[#242424] text-gray-400 hover:text-white'}`}
+              title="時価総額の相対サイズでグループと銘柄を表示"
+            >
+              ヒートマップ
             </button>
             <span className="ml-2 text-[10px] text-[#848e9c] truncate">
               銘柄数: <b className="text-gray-200">{chain.groups.reduce((sum, group) => sum + group.stocks.length, 0)}</b>
@@ -2679,8 +3044,8 @@ export function ValueChainMap({
               >
                 {indexGroup.name}
               </button>
-              <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(indexGroup.stocks.length) }}>
-                {sortedStocks(indexGroup.stocks, indexGroup.id).map((stock) => renderStockCard(stock, indexGroup))}
+              <div style={{ height: heatmapMode ? `${Math.max(46, totalHeaderHeight - 24)}px` : undefined }}>
+                {renderGroupStockArea(indexGroup)}
               </div>
             </div>
             {chain.stages.map((stage) => {
@@ -2732,10 +3097,17 @@ export function ValueChainMap({
             {chain.categories.flatMap((category) => category.lanes.map((lane, laneIndex) => {
               const rowCells = segments.map((segment) => {
                 const groups = groupsByCell.get(`${category.id}|${lane.id}|${segment.id}`) ?? [];
+                const heatmapCellMinHeight = heatmapMode && groups.length > 0
+                  ? Math.max(
+                      BASE_CELL_MIN_HEIGHT,
+                      groups.reduce((sum, group) => sum + getHeatmapGroupHeight(group), 14 + Math.max(0, groups.length - 1) * 2),
+                    )
+                  : BASE_CELL_MIN_HEIGHT;
                 return (
                   <div
                     key={`${category.id}-${lane.id}-${segment.id}`}
                     className="min-h-[118px] bg-[#0a0a0a] p-1"
+                    style={{ minHeight: `${heatmapCellMinHeight}px` }}
                     onContextMenu={(event) => {
                       event.preventDefault();
                       if (groups.length === 0) {
@@ -2764,6 +3136,7 @@ export function ValueChainMap({
                           <div
                             key={group.id}
                             className="overflow-hidden rounded-[4px] border border-[#1e1e1e] bg-[#0a0a0a] p-1"
+                            style={heatmapMode ? { height: `${getHeatmapGroupHeight(group)}px` } : undefined}
                             onContextMenu={(event) => {
                               event.preventDefault();
                               setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: group.id, label: group.name } });
@@ -2780,8 +3153,8 @@ export function ValueChainMap({
                             >
                               {group.name}
                             </button>
-                            <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(group.stocks.length) }}>
-                              {sortedStocks(group.stocks, group.id).map((stock) => renderStockCard(stock, group))}
+                            <div style={heatmapMode ? { height: `calc(100% - 14px)` } : undefined}>
+                              {renderGroupStockArea(group)}
                             </div>
                           </div>
                         ))}

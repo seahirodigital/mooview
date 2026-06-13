@@ -231,6 +231,38 @@ class MoomooQuoteService:
             if calculated_change_pct is not None and (direct_change_pct is None or direct_change_pct == 0.0)
             else direct_change_pct
         )
+        direct_market_cap = first_optional_float(
+            row,
+            [
+                "market_val",
+                "market_value",
+                "market_cap",
+                "marketCapital",
+                "total_market_val",
+                "stock_market_val",
+                "stock_market_value",
+                "capitalization",
+                "total_mv",
+            ],
+        )
+        share_count = first_optional_float(
+            row,
+            [
+                "total_share",
+                "total_shares",
+                "outstanding_shares",
+                "issued_shares",
+                "share_total",
+                "float_share",
+                "float_shares",
+            ],
+        )
+        calculated_market_cap = (
+            last_price * share_count
+            if last_price > 0 and share_count is not None and share_count > 0
+            else None
+        )
+        market_cap = direct_market_cap or calculated_market_cap or 0.0
         return {
             "success": True,
             "symbol": symbol,
@@ -242,6 +274,7 @@ class MoomooQuoteService:
             "previousClose": previous_close or 0.0,
             "volume": int(as_float(row.get("volume"))),
             "changePct": change_pct or 0.0,
+            "marketCap": market_cap,
             "dataDate": str(row.get("update_time", "")).split(" ", 1)[0],
             "dataTime": (
                 str(row.get("update_time", "")).split(" ", 1)[1]

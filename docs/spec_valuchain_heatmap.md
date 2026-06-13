@@ -2,6 +2,18 @@
 
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
+| 今回修正 | ヒートマップ用に不足している時価総額を `/api/moomoo/quotes` から補完し、面積が均等四分割に見える状態を減らす | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 銘柄追加・編集時に `marketCap` を `0` 固定にせず、Moomoo quote から取得した値を保存する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回修正 | 取得済み時価総額をヒートマップの面積計算とソート、ツールチップに統一反映する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | ヒートマップの面積計算をライブ取得した時価総額へ切り替え、未取得時は均等四分割に見えない小タイル表示へ寄せる | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | グループ合計・工程幅・銘柄ソート・ツールチップが同じ時価総額解決値を見るよう統一する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | ヒートマップ表示時に時価総額未設定グループでもGrid行高が通常表示未満に縮まないようにし、縦横を広げて見える表示にする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | 変動率順・時価総額順の右横にヒートマップ切替ボタンを追加する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | ヒートマップ時にグループ合計時価総額で工程列幅・グループ箱高さを相対表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | ヒートマップ時にグループ内銘柄を時価総額比率のタイル面積で表示し、小型銘柄はホバーで名称確認できるようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実施する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
 | 今回修正 | チャート内プルダウンにティッカーコードだけでなく銘柄名も幅内で併記する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回修正 | 1分類20銘柄超のグループを詳細工程列へ自動分割し、グリッド内の銘柄集中を抑える | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回修正 | 個別銘柄カードを最大5行で折り返し、20銘柄は4列 x 5行で横幅を広げて表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |

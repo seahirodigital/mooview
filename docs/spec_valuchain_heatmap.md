@@ -2,6 +2,27 @@
 
 | 区分 | 内容 | 状態 | 対象ファイル |
 |---|---|---:|---|
+| 今回修正 | 時価総額取得中にキャッシュ更新で取得ループが自己キャンセルされ、inFlight が戻らず未取得のまま止まる問題を修正する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | A+/A- の個別銘柄フォントサイズ変更をヒートマップ内テキストにも反映する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | ヒートマップ用の時価総額取得をヒートマップ表示時限定から全銘柄の先行取得に変更し、当日表示前に不足分を埋める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 時価総額未取得銘柄は symbol だけで諦めず、銘柄名/旧コード検索で実ティッカーを補完して quote を取り直す | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | BRCM/Broadcom などの旧コード・会社名を AVGO へ補正し、チャート/ヒートマップの取得漏れを減らす | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
+| 今回修正 | Moomoo gateway の時価総額フィールド候補を追加し、日本株/米株の列名揺れを拾いやすくする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\moomoo_gateway.py` |
+| 今回検証 | `python -m py_compile moomoo_gateway.py`、`npm.cmd run lint`、`npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | ヒートマップの最小タイルをCSSの最小幅で後から広げる方式をやめ、面積計算時点で最小ウェイトを与えて重なりなく敷き詰める | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 時価総額未取得グループも小さい点を散らさず、セル内を隙間なく均等分割して表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | ヒートマップ時に各セル内のグループを上詰め固定にせず、セルの余白いっぱいまで縦方向に伸ばして表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | 銘柄マウスオーバー時のツールチップに時価総額を表示する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | ヒートマップ内の最小タイルを通常カード相当の大きさに底上げし、時価総額が小さい銘柄も潰れて見えなくならないようにする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回検証 | `npm.cmd run lint` と `npm.cmd run build` を実行する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview` |
+| 今回修正 | ヒートマップ時価総額補完を12銘柄ずつの逐次取得に変更し、取得できた分から即座に再描画する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | バッチ取得で `marketCap` が返らない銘柄は、同じバッチ内で個別 quote 取得にフォールバックする | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | 指数/ETFグループは Moomoo の `marketCap` が 0 になるため、ヒートマップ時も小粒表示に落とさず通常カード表示へ戻す | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
+| 今回修正 | `/api/moomoo/quotes` の 200 銘柄上限に当たるメインチェーン向けに、時価総額補完を分割取得へ変更する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回修正 | ヒートマップ用に不足している時価総額を `/api/moomoo/quotes` から補完し、面積が均等四分割に見える状態を減らす | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |
 | 今回修正 | 銘柄追加・編集時に `marketCap` を `0` 固定にせず、Moomoo quote から取得した値を保存する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` / `C:\Users\mahha\OneDrive\開発\mooview\src\App.tsx` |
 | 今回修正 | 取得済み時価総額をヒートマップの面積計算とソート、ツールチップに統一反映する | 完了 | `C:\Users\mahha\OneDrive\開発\mooview\src\components\ValueChainMap.tsx` |

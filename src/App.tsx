@@ -58,7 +58,10 @@ const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
 const VALUE_CHAIN_CHART_STATE_STORAGE_KEY = 'mooview_value_chain_chart_state_v1';
 const DEFAULT_HEADER_TICKER_SYMBOLS = DEFAULT_TICKERS.slice(0, 6).map((ticker) => ticker.symbol);
 const SYMBOL_NAME_ALIASES: Record<string, string> = {
+  BRCM: 'AVGO',
   BROADCOM: 'AVGO',
+  'BROADCOM INC': 'AVGO',
+  'BROADCOM INC.': 'AVGO',
   QUALCOMM: 'QCOM',
   INTEL: 'INTC',
   ADEKA: 'JP.4401',

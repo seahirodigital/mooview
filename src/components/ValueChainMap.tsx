@@ -395,11 +395,20 @@ const HEADER_SEGMENT_ROW_HEIGHT = 40;
 const DETAIL_PANEL_NAV_WIDTH = 44;
 const DETAIL_PANEL_MIN_WIDTH = 360;
 const DETAIL_PANEL_MAX_WIDTH = 860;
+const HEATMAP_MARKET_CAP_BATCH_SIZE = 24;
+const HEATMAP_MARKET_CAP_BATCH_DELAY_MS = 120;
+const HEATMAP_MARKET_CAP_FALLBACK_FLUSH_SIZE = 8;
+const HEATMAP_MIN_WEIGHT_SHARE_TARGET = 0.7;
+const HEATMAP_MIN_WEIGHT_SHARE_MIN = 0.018;
+const HEATMAP_MIN_WEIGHT_SHARE_MAX = 0.08;
 const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
 const todayString = () => new Date().toISOString().slice(0, 10);
 const CALENDAR_WEEK_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const SYMBOL_NAME_ALIASES: Record<string, string> = {
+  BRCM: 'AVGO',
   BROADCOM: 'AVGO',
+  'BROADCOM INC': 'AVGO',
+  'BROADCOM INC.': 'AVGO',
   QUALCOMM: 'QCOM',
   INTEL: 'INTC',
   MICRON: 'MU',
@@ -626,6 +635,11 @@ function formatPct(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
+function formatMarketCap(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '未取得';
+  return value.toLocaleString();
+}
+
 function getHeatStyle(value: number): React.CSSProperties {
   const intensity = clamp(Math.abs(value) / 5, 0.08, 1);
   if (value > 0) {
@@ -668,6 +682,30 @@ function getTreemapWeight(stock: ChainStock, resolveMarketCap: MarketCapResolver
   return value > 0 ? value : 0.0001;
 }
 
+function createTreemapWeightResolver(
+  stocks: ChainStock[],
+  resolveMarketCap: MarketCapResolver = getMarketCapValue,
+): MarketCapResolver {
+  const rawWeights = stocks.map((stock) => Math.max(0, resolveMarketCap(stock)));
+  const maxWeight = Math.max(0, ...rawWeights);
+  if (maxWeight <= 0) {
+    return () => 1;
+  }
+
+  const minShare = clamp(
+    HEATMAP_MIN_WEIGHT_SHARE_TARGET / Math.max(1, stocks.length),
+    HEATMAP_MIN_WEIGHT_SHARE_MIN,
+    HEATMAP_MIN_WEIGHT_SHARE_MAX,
+  );
+  const minWeight = maxWeight * minShare;
+  const weights = new Map<string, number>();
+  stocks.forEach((stock, index) => {
+    weights.set(normalizeSymbol(stock.symbol), Math.max(rawWeights[index], minWeight));
+  });
+
+  return (stock: ChainStock) => weights.get(normalizeSymbol(stock.symbol)) ?? minWeight;
+}
+
 function buildUnknownMarketCapRects(
   stocks: ChainStock[],
   x: number,
@@ -679,8 +717,6 @@ function buildUnknownMarketCapRects(
   const rows = Math.max(1, Math.ceil(stocks.length / columns));
   const cellWidth = width / columns;
   const cellHeight = height / rows;
-  const tileWidth = Math.max(1.2, Math.min(cellWidth * 0.38, width * 0.08));
-  const tileHeight = Math.max(1.2, Math.min(cellHeight * 0.38, height * 0.08));
 
   return stocks.map((stock, index) => {
     const column = index % columns;
@@ -689,8 +725,8 @@ function buildUnknownMarketCapRects(
       stock,
       x: x + column * cellWidth,
       y: y + row * cellHeight,
-      width: tileWidth,
-      height: tileHeight,
+      width: cellWidth,
+      height: cellHeight,
     };
   });
 }
@@ -705,14 +741,14 @@ function getGroupImpactValue(group: ValueGroup, resolveMarketCap: MarketCapResol
 
 function splitTreemapItems(
   stocks: ChainStock[],
-  resolveMarketCap: MarketCapResolver = getMarketCapValue,
+  resolveWeight: MarketCapResolver = getTreemapWeight,
 ): [ChainStock[], ChainStock[]] {
-  const total = stocks.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
+  const total = stocks.reduce((sum, stock) => sum + resolveWeight(stock), 0);
   let bestIndex = 1;
   let bestDelta = Number.POSITIVE_INFINITY;
   let running = 0;
   for (let index = 0; index < stocks.length - 1; index += 1) {
-    running += getTreemapWeight(stocks[index], resolveMarketCap);
+    running += resolveWeight(stocks[index]);
     const delta = Math.abs(total / 2 - running);
     if (delta < bestDelta) {
       bestDelta = delta;
@@ -729,6 +765,7 @@ function buildTreemapRects(
   y = 0,
   width = 100,
   height = 100,
+  resolveWeight: MarketCapResolver = createTreemapWeightResolver(stocks, resolveMarketCap),
 ): TreemapRect[] {
   if (stocks.length === 0) return [];
   if (stocks.length === 1) {
@@ -738,23 +775,23 @@ function buildTreemapRects(
     return buildUnknownMarketCapRects(stocks, x, y, width, height);
   }
 
-  const [first, second] = splitTreemapItems(stocks, resolveMarketCap);
-  const firstTotal = first.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
-  const secondTotal = second.reduce((sum, stock) => sum + getTreemapWeight(stock, resolveMarketCap), 0);
+  const [first, second] = splitTreemapItems(stocks, resolveWeight);
+  const firstTotal = first.reduce((sum, stock) => sum + resolveWeight(stock), 0);
+  const secondTotal = second.reduce((sum, stock) => sum + resolveWeight(stock), 0);
   const total = firstTotal + secondTotal || 1;
 
   if (width >= height) {
     const firstWidth = width * (firstTotal / total);
     return [
-      ...buildTreemapRects(first, resolveMarketCap, x, y, firstWidth, height),
-      ...buildTreemapRects(second, resolveMarketCap, x + firstWidth, y, width - firstWidth, height),
+      ...buildTreemapRects(first, resolveMarketCap, x, y, firstWidth, height, resolveWeight),
+      ...buildTreemapRects(second, resolveMarketCap, x + firstWidth, y, width - firstWidth, height, resolveWeight),
     ];
   }
 
   const firstHeight = height * (firstTotal / total);
   return [
-    ...buildTreemapRects(first, resolveMarketCap, x, y, width, firstHeight),
-    ...buildTreemapRects(second, resolveMarketCap, x, y + firstHeight, width, height - firstHeight),
+    ...buildTreemapRects(first, resolveMarketCap, x, y, width, firstHeight, resolveWeight),
+    ...buildTreemapRects(second, resolveMarketCap, x, y + firstHeight, width, height - firstHeight, resolveWeight),
   ];
 }
 
@@ -1147,14 +1184,18 @@ export function ValueChainMap({
     name: string;
     symbol: string;
     change: number;
+    marketCapLabel: string;
   } | null>(null);
   const [importBackup, setImportBackup] = useState<ValueChainData | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ mouseX: 0, mouseY: 0, x: 0, y: 0 });
+  const heatmapMarketCapsRef = useRef<Record<string, number>>({});
   const heatmapMarketCapFetchInFlightRef = useRef(false);
   const heatmapMarketCapFetchSignatureRef = useRef('');
+  const heatmapMarketCapFetchIdRef = useRef(0);
+  const tickerStatsRef = useRef<Map<string, TickerStat>>(new Map());
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(chain));
@@ -1184,6 +1225,10 @@ export function ValueChainMap({
   useEffect(() => {
     localStorage.setItem(STOCK_FONT_SIZE_STORAGE_KEY, String(stockFontSize));
   }, [stockFontSize]);
+
+  useEffect(() => {
+    heatmapMarketCapsRef.current = heatmapMarketCaps;
+  }, [heatmapMarketCaps]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -1270,6 +1315,9 @@ export function ValueChainMap({
   const tickerStats = useMemo(() => {
     return new Map(tickers.map((ticker) => [ticker.symbol.toUpperCase(), ticker]));
   }, [tickers]);
+  useEffect(() => {
+    tickerStatsRef.current = tickerStats;
+  }, [tickerStats]);
   const allStocksBySymbol = useMemo(() => {
     const map = new Map<string, ChainStock>();
     chain.groups.forEach((group) => {
@@ -1299,55 +1347,172 @@ export function ValueChainMap({
   ), [heatmapMarketCaps, tickerStats]);
 
   useEffect(() => {
-    if (!heatmapMode) return;
-
-    const missingSymbols = Array.from(new Set(
-      allStocksBySymbol.keys().filter((symbol) => {
-        const stock = allStocksBySymbol.get(symbol);
-        if (!stock) return false;
-        const liveMarketCap = Number(tickerStats.get(symbol)?.marketCap);
+    const currentMarketCaps = heatmapMarketCapsRef.current;
+    const currentTickerStats = tickerStatsRef.current;
+    const missingTargets = Array.from(allStocksBySymbol.entries())
+      .map(([symbol, stock]) => ({ requestSymbol: symbol, stock }))
+      .filter(({ requestSymbol, stock }) => {
+        const rawSymbol = stock.symbol.trim().toUpperCase();
+        const liveMarketCap = Number(
+          currentTickerStats.get(requestSymbol)?.marketCap
+          ?? currentTickerStats.get(rawSymbol)?.marketCap,
+        );
         if (Number.isFinite(liveMarketCap) && liveMarketCap > 0) return false;
-        const cachedMarketCap = Number(heatmapMarketCaps[symbol]);
+        const cachedMarketCap = Number(currentMarketCaps[requestSymbol] ?? currentMarketCaps[rawSymbol]);
         if (Number.isFinite(cachedMarketCap) && cachedMarketCap > 0) return false;
         return !(Number(stock.marketCap) > 0);
-      }),
-    ));
+      });
 
-    if (missingSymbols.length === 0) return;
-    const signature = missingSymbols.slice().sort().join('|');
-    if (heatmapMarketCapFetchInFlightRef.current || heatmapMarketCapFetchSignatureRef.current === signature) {
+    if (missingTargets.length === 0) return;
+    const signature = missingTargets.map((target) => target.requestSymbol).sort().join('|');
+    if (heatmapMarketCapFetchInFlightRef.current && heatmapMarketCapFetchSignatureRef.current === signature) {
       return;
     }
 
     let cancelled = false;
+    const fetchId = heatmapMarketCapFetchIdRef.current + 1;
+    heatmapMarketCapFetchIdRef.current = fetchId;
     heatmapMarketCapFetchInFlightRef.current = true;
     heatmapMarketCapFetchSignatureRef.current = signature;
+    const wait = (milliseconds: number) => new Promise((resolve) => {
+      window.setTimeout(resolve, milliseconds);
+    });
+    const flushMarketCaps = (values: Record<string, number>) => {
+      if (cancelled || heatmapMarketCapFetchIdRef.current !== fetchId || Object.keys(values).length === 0) return;
+      const nextValues = { ...heatmapMarketCapsRef.current, ...values };
+      heatmapMarketCapsRef.current = nextValues;
+      setHeatmapMarketCaps(nextValues);
+    };
+    const writeMarketCapValue = (
+      values: Record<string, number>,
+      target: { requestSymbol: string; stock: ChainStock },
+      quoteSymbol: string,
+      marketCap: number,
+    ) => {
+      const keys = new Set<string>([
+        target.requestSymbol,
+        normalizeSymbol(target.stock.symbol).toUpperCase(),
+        target.stock.symbol.trim().toUpperCase(),
+        normalizeSymbol(quoteSymbol).toUpperCase(),
+      ]);
+      keys.forEach((key) => {
+        if (key) values[key] = marketCap;
+      });
+    };
+    const readQuoteMarketCap = (
+      target: { requestSymbol: string; stock: ChainStock },
+      quote: { success?: boolean; symbol?: string; marketCap?: number },
+      values: Record<string, number>,
+    ) => {
+      const marketCap = Number(quote.marketCap);
+      if (!quote.success || !Number.isFinite(marketCap) || marketCap <= 0) return false;
+      writeMarketCapValue(values, target, quote.symbol || target.requestSymbol, marketCap);
+      return true;
+    };
+    const fetchSingleMarketCap = async (
+      symbol: string,
+      target: { requestSymbol: string; stock: ChainStock },
+    ): Promise<Record<string, number>> => {
+      const quoteResponse = await fetch('/api/moomoo/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol }),
+      });
+      const quote = await quoteResponse.json();
+      const values: Record<string, number> = {};
+      readQuoteMarketCap(target, quote, values);
+      return values;
+    };
+    const resolveMissingMarketCap = async (
+      target: { requestSymbol: string; stock: ChainStock },
+    ): Promise<Record<string, number>> => {
+      const tried = new Set<string>();
+      const directSymbols = [
+        target.requestSymbol,
+        normalizeSymbol(target.stock.symbol).toUpperCase(),
+      ].filter(Boolean);
+
+      for (const symbol of directSymbols) {
+        if (cancelled || tried.has(symbol)) continue;
+        tried.add(symbol);
+        const values = await fetchSingleMarketCap(symbol, target);
+        if (Object.keys(values).length > 0) return values;
+      }
+
+      const searchQueries = [
+        target.stock.name,
+        target.stock.symbol,
+        target.requestSymbol,
+      ].map((query) => query.trim()).filter(Boolean);
+
+      for (const query of Array.from(new Set(searchQueries))) {
+        if (cancelled) return {};
+        const candidate = await searchMoomooCandidate(query);
+        const candidateSymbol = normalizeSymbol(candidate?.symbol || candidate?.code || '');
+        if (!candidateSymbol || tried.has(candidateSymbol)) continue;
+        tried.add(candidateSymbol);
+        const values = await fetchSingleMarketCap(candidateSymbol, target);
+        if (Object.keys(values).length > 0) return values;
+      }
+
+      return {};
+    };
 
     const loadMarketCaps = async () => {
       try {
-        const response = await fetch('/api/moomoo/quotes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbols: missingSymbols }),
-        });
-        const data = await response.json();
-        if (!response.ok || !data.success || !data.quotes) return;
-        const nextValues: Record<string, number> = {};
-        Object.values(data.quotes as Record<string, { symbol?: string; marketCap?: number }>).forEach((quote) => {
-          const symbol = normalizeSymbol(String(quote.symbol || '')).toUpperCase();
-          const marketCap = Number(quote.marketCap);
-          if (!symbol || !Number.isFinite(marketCap) || marketCap <= 0) return;
-          nextValues[symbol] = marketCap;
-        });
-        if (!cancelled && Object.keys(nextValues).length > 0) {
-          setHeatmapMarketCaps((current) => ({ ...current, ...nextValues }));
+        for (let index = 0; index < missingTargets.length; index += HEATMAP_MARKET_CAP_BATCH_SIZE) {
+          if (cancelled) return;
+          const batch = missingTargets.slice(index, index + HEATMAP_MARKET_CAP_BATCH_SIZE);
+          const batchTargets = new Map(batch.map((target) => [target.requestSymbol, target]));
+          const resolvedInBatch = new Set<string>();
+          const batchValues: Record<string, number> = {};
+          const response = await fetch('/api/moomoo/quotes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbols: batch.map((target) => target.requestSymbol) }),
+          });
+          const data = await response.json();
+          if (response.ok && data.success && data.quotes) {
+            Object.values(data.quotes as Record<string, { symbol?: string; marketCap?: number }>).forEach((quote) => {
+              const symbol = normalizeSymbol(String(quote.symbol || '')).toUpperCase();
+              const target = batchTargets.get(symbol);
+              if (!symbol || !target) return;
+              if (readQuoteMarketCap(target, quote, batchValues)) {
+                resolvedInBatch.add(target.requestSymbol);
+              }
+            });
+          }
+          flushMarketCaps(batchValues);
+
+          let fallbackValues: Record<string, number> = {};
+          for (const target of batch) {
+            if (cancelled) return;
+            if (resolvedInBatch.has(target.requestSymbol)) continue;
+            try {
+              fallbackValues = {
+                ...fallbackValues,
+                ...await resolveMissingMarketCap(target),
+              };
+              if (Object.keys(fallbackValues).length >= HEATMAP_MARKET_CAP_FALLBACK_FLUSH_SIZE) {
+                flushMarketCaps(fallbackValues);
+                fallbackValues = {};
+              }
+            } catch {
+              // 時価総額が取れない銘柄は次回以降の再試行に回す。
+            }
+          }
+          flushMarketCaps(fallbackValues);
+
+          if (index + HEATMAP_MARKET_CAP_BATCH_SIZE < missingTargets.length) {
+            await wait(HEATMAP_MARKET_CAP_BATCH_DELAY_MS);
+          }
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && heatmapMarketCapFetchIdRef.current === fetchId) {
           heatmapMarketCapFetchSignatureRef.current = '';
         }
       } finally {
-        if (!cancelled) {
+        if (heatmapMarketCapFetchIdRef.current === fetchId) {
           heatmapMarketCapFetchInFlightRef.current = false;
         }
       }
@@ -1356,8 +1521,11 @@ export function ValueChainMap({
     void loadMarketCaps();
     return () => {
       cancelled = true;
+      if (heatmapMarketCapFetchIdRef.current === fetchId) {
+        heatmapMarketCapFetchInFlightRef.current = false;
+      }
     };
-  }, [allStocksBySymbol, heatmapMode, heatmapMarketCaps, tickerStats]);
+  }, [allStocksBySymbol]);
 
   useEffect(() => {
     if (!isToday) {
@@ -2322,6 +2490,7 @@ export function ValueChainMap({
     const selected = selectedSet.has(normalizeSymbol(stock.symbol));
     const flash = tickerFlash[normalizeSymbol(stock.symbol)];
     const stockClassification = getStockClassification(stock, group);
+    const marketCapLabel = formatMarketCap(resolveStockMarketCap(stock));
 
     return (
       <button
@@ -2344,6 +2513,7 @@ export function ValueChainMap({
             name: stock.name,
             symbol: stock.symbol,
             change,
+            marketCapLabel,
           });
         }}
         onMouseLeave={() => setStockTooltip(null)}
@@ -2383,26 +2553,25 @@ export function ValueChainMap({
     const symbol = normalizeSymbol(stock.symbol);
     const selected = selectedSet.has(symbol);
     const flash = tickerFlash[symbol];
-    const showLabel = rect.width >= 13 && rect.height >= 10;
-    const emphasizeLabel = rect.width >= 22 && rect.height >= 18;
+    const showLabel = true;
+    const emphasizeLabel = true;
     const stockClassification = getStockClassification(stock, group);
     const marketCap = resolveStockMarketCap(stock);
-    const marketCapLabel = marketCap > 0 ? marketCap.toLocaleString() : '未取得';
+    const marketCapLabel = formatMarketCap(marketCap);
 
     return (
       <button
         key={`${group.id}-${stock.symbol}`}
         type="button"
         data-value-chain-symbol={symbol}
-        className={`absolute overflow-hidden rounded-[3px] border border-[#070707] text-left transition hover:z-10 hover:ring-1 hover:ring-white/80 ${selected ? 'ring-2 ring-emerald-200 z-10' : ''}`}
+        className={`absolute overflow-hidden rounded-none border border-[#050505] text-left transition hover:z-10 hover:ring-1 hover:ring-white/80 ${selected ? 'ring-2 ring-emerald-200 z-10' : ''}`}
         style={{
           ...getHeatStyle(change),
           left: `${rect.x}%`,
           top: `${rect.y}%`,
           width: `${rect.width}%`,
           height: `${rect.height}%`,
-          minWidth: rect.width < 1 ? '2px' : undefined,
-          minHeight: rect.height < 1 ? '2px' : undefined,
+          fontSize: `${stockFontSize}px`,
           boxShadow: flash
             ? `inset 0 0 0 999px ${flash === 'up' ? 'rgba(16, 185, 129, 0.16)' : 'rgba(239, 83, 80, 0.16)'}`
             : undefined,
@@ -2415,6 +2584,7 @@ export function ValueChainMap({
             name: stock.name,
             symbol: stock.symbol,
             change,
+            marketCapLabel,
           });
         }}
         onMouseLeave={() => setStockTooltip(null)}
@@ -2446,11 +2616,11 @@ export function ValueChainMap({
       >
         {showLabel && (
           <span className="flex h-full w-full flex-col items-center justify-center px-1 text-center leading-tight text-white">
-            <span className={`block max-w-full truncate font-semibold ${emphasizeLabel ? 'text-[11px]' : 'text-[8px]'}`}>
+            <span className="block max-w-full truncate font-semibold">
               {stock.name}
             </span>
             {emphasizeLabel && (
-              <span className="block max-w-full truncate font-mono text-[10px] font-bold text-white/95">
+              <span className="block max-w-full truncate font-mono font-bold text-white/95">
                 {formatPct(change)}
               </span>
             )}
@@ -2469,6 +2639,15 @@ export function ValueChainMap({
   const renderGroupStockArea = (group: ValueGroup) => {
     const orderedStocks = sortedStocks(group.stocks, group.id);
     if (!heatmapMode) {
+      return (
+        <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(group.stocks.length) }}>
+          {orderedStocks.map((stock) => renderStockCard(stock, group))}
+        </div>
+      );
+    }
+
+    const hasResolvedMarketCap = orderedStocks.some((stock) => resolveStockMarketCap(stock) > 0);
+    if (group.id === INDEX_GROUP_ID && !hasResolvedMarketCap) {
       return (
         <div className="grid gap-0.5" style={{ gridTemplateColumns: getStockGridTemplateColumns(group.stocks.length) }}>
           {orderedStocks.map((stock) => renderStockCard(stock, group))}
@@ -3131,33 +3310,36 @@ export function ValueChainMap({
                         title="該当銘柄0件の空白枠。右クリックで銘柄追加"
                       />
                     ) : (
-                      <div className="space-y-0.5">
-                        {groups.map((group) => (
-                          <div
-                            key={group.id}
-                            className="overflow-hidden rounded-[4px] border border-[#1e1e1e] bg-[#0a0a0a] p-1"
-                            style={heatmapMode ? { height: `${getHeatmapGroupHeight(group)}px` } : undefined}
-                            onContextMenu={(event) => {
-                              event.preventDefault();
-                              setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: group.id, label: group.name } });
-                            }}
-                          >
-                            <button
-                              type="button"
-                              className="mb-0.5 w-full truncate text-left text-[8px] font-medium text-gray-400 hover:text-white"
-                              onClick={() => {
-                                if (panMovedRef.current) return;
-                                updateGroupName(group.id);
+                      <div className={heatmapMode ? 'flex h-full min-h-[104px] flex-col gap-0.5' : 'space-y-0.5'}>
+                        {groups.map((group) => {
+                          const groupHeight = getHeatmapGroupHeight(group);
+                          return (
+                            <div
+                              key={group.id}
+                              className="overflow-hidden rounded-[4px] border border-[#1e1e1e] bg-[#0a0a0a] p-1"
+                              style={heatmapMode ? { flex: `${groupHeight} 1 0`, minHeight: `${groupHeight}px` } : undefined}
+                              onContextMenu={(event) => {
+                                event.preventDefault();
+                                setContextMenu({ x: event.clientX, y: event.clientY, target: { type: 'group', id: group.id, label: group.name } });
                               }}
-                              title={`${findStage(chain, group.segmentId)?.name ?? ''} / ${findSegment(chain, group.segmentId)?.name.replace(/\n/g, ' ') ?? ''} / ${group.name}`}
                             >
-                              {group.name}
-                            </button>
-                            <div style={heatmapMode ? { height: `calc(100% - 14px)` } : undefined}>
-                              {renderGroupStockArea(group)}
+                              <button
+                                type="button"
+                                className="mb-0.5 w-full truncate text-left text-[8px] font-medium text-gray-400 hover:text-white"
+                                onClick={() => {
+                                  if (panMovedRef.current) return;
+                                  updateGroupName(group.id);
+                                }}
+                                title={`${findStage(chain, group.segmentId)?.name ?? ''} / ${findSegment(chain, group.segmentId)?.name.replace(/\n/g, ' ') ?? ''} / ${group.name}`}
+                              >
+                                {group.name}
+                              </button>
+                              <div style={heatmapMode ? { height: `calc(100% - 14px)` } : undefined}>
+                                {renderGroupStockArea(group)}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -3571,6 +3753,10 @@ export function ValueChainMap({
           <div className="mt-1 flex items-center justify-between gap-3">
             <span className="font-bold truncate">{stockTooltip.name}</span>
             <span className="font-mono text-gray-300">{stockTooltip.symbol}</span>
+          </div>
+          <div className="mt-1 flex items-center justify-between gap-3">
+            <span className="text-gray-400">時価総額</span>
+            <span className="font-mono font-bold text-white">{stockTooltip.marketCapLabel}</span>
           </div>
           <div className="mt-1 flex items-center justify-between gap-3">
             <span className="text-gray-400">変動率</span>

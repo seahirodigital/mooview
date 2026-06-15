@@ -29,6 +29,7 @@ type FlowColumnKey = 'regional' | SortColumnKey;
 type SidePanelMode = 'chart' | 'settings' | 'summary' | 'annotation' | 'sources' | 'basket-db';
 type RangeHandle = 'start' | 'end';
 type ColumnBoundary = 'regional-sector' | 'sector-basket' | 'basket-stock' | 'stock-right';
+type MarketFilter = 'all' | 'jp' | 'us';
 
 interface MacroTickerStat extends TickerInfo {
   currentPrice: number | null;
@@ -547,6 +548,24 @@ function formatTimeframeLabel(timeframe: Timeframe): string {
 
 function isJapanStock(symbol: string): boolean {
   return normalizeSymbol(symbol).startsWith('JP.');
+}
+
+function isJapanMacroStock(stock: Pick<MacroStock, 'symbol' | 'market'>): boolean {
+  const market = stock.market.trim().toUpperCase();
+  return market === 'JP' || isJapanStock(stock.symbol);
+}
+
+function filterBasketsByMarket(baskets: MacroBasket[], marketFilter: MarketFilter): MacroBasket[] {
+  if (marketFilter === 'all') return baskets;
+  return baskets
+    .map((basket) => ({
+      ...basket,
+      stocks: basket.stocks.filter((stock) => {
+        const isJapan = isJapanMacroStock(stock);
+        return marketFilter === 'jp' ? isJapan : !isJapan;
+      }),
+    }))
+    .filter((basket) => basket.stocks.length > 0);
 }
 
 function formatStockCode(symbol: string): string {
@@ -1605,6 +1624,7 @@ export function MacroFlowMap({
   const [searchQuery, setSearchQuery] = useState('');
   const [macroScope, setMacroScope] = useState<string>(MACRO_ALL_SCOPE_ID);
   const [macroScopeMenuOpen, setMacroScopeMenuOpen] = useState(false);
+  const [marketFilter, setMarketFilter] = useState<MarketFilter>('all');
   const [sortState, setSortState] = useState<Record<SortColumnKey, SortDirection>>({
     sectors: null,
     baskets: null,
@@ -1672,10 +1692,11 @@ export function MacroFlowMap({
       width: stocksLeft + columnWidths.stocks + FLOW_STOCK_RIGHT_PADDING,
     };
   }, [columnWidths]);
-  const baskets = useMemo(() => readValueChainBaskets(macroScope, macroScopeOptions), [macroScope, macroScopeOptions]);
+  const rawBaskets = useMemo(() => readValueChainBaskets(macroScope, macroScopeOptions), [macroScope, macroScopeOptions]);
+  const baskets = useMemo(() => filterBasketsByMarket(rawBaskets, marketFilter), [marketFilter, rawBaskets]);
   const sectorEtfDefs = useMemo(
-    () => (isSemiconductorScope(macroScope, macroScopeOptions, baskets) ? SEMICONDUCTOR_SECTOR_ETF_DEFS : MACRO_SECTOR_ETF_DEFS),
-    [baskets, macroScope, macroScopeOptions],
+    () => (isSemiconductorScope(macroScope, macroScopeOptions, rawBaskets) ? SEMICONDUCTOR_SECTOR_ETF_DEFS : MACRO_SECTOR_ETF_DEFS),
+    [macroScope, macroScopeOptions, rawBaskets],
   );
   const macroQuoteSymbols = useMemo(() => Array.from(new Set([
     ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
@@ -2037,6 +2058,23 @@ export function MacroFlowMap({
     ));
     return { sectors, baskets, stocks };
   }, [metrics, searchQuery]);
+
+  useEffect(() => {
+    if (selectedSectorId && !metrics.sectors.some((sector) => sector.id === selectedSectorId)) {
+      setSelectedSectorId(null);
+      setSelectedBasketId(null);
+      setSelectedStockKey(null);
+    }
+    if (selectedBasketId && !metrics.baskets.some((basket) => basket.id === selectedBasketId)) {
+      setSelectedBasketId(null);
+      setSelectedStockKey(null);
+    }
+    if (selectedStockKey) {
+      const [basketId, symbol] = selectedStockKey.split(':');
+      const hasStock = metrics.stocks.some((stock) => stock.basketId === basketId && normalizeSymbol(stock.symbol) === normalizeSymbol(symbol));
+      if (!hasStock) setSelectedStockKey(null);
+    }
+  }, [metrics.baskets, metrics.sectors, metrics.stocks, selectedBasketId, selectedSectorId, selectedStockKey]);
 
   const orderedBaskets = useMemo(() => (
     sortState.baskets
@@ -2646,6 +2684,7 @@ export function MacroFlowMap({
     setRangeEndDate(FLOW_END_DATE);
     setSearchQuery('');
     setMacroScope(MACRO_ALL_SCOPE_ID);
+    setMarketFilter('all');
     setSortState({ sectors: null, baskets: null, stocks: null });
     setSelectedSectorId(null);
     setSelectedBasketId(null);
@@ -2817,7 +2856,7 @@ export function MacroFlowMap({
             </div>
           </div>
           <div className="h-7 w-px bg-[#2a2a2a]" />
-          <div className="relative h-12 w-[520px] bg-[#050505] px-1.5 py-1.5">
+          <div className="relative h-12 w-[364px] bg-[#050505] px-1.5 py-1.5">
             <div className="flex items-center justify-between font-mono text-[10px]">
               <button
                 type="button"
@@ -2940,6 +2979,24 @@ export function MacroFlowMap({
                 </div>
               </div>
             )}
+          </div>
+          <div className="flex h-8 shrink-0 items-center border border-[#242424] bg-[#050505] p-0.5">
+            {(['jp', 'us', 'all'] as MarketFilter[]).map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setMarketFilter(option)}
+                className={`h-6 min-w-9 px-2 text-[10px] font-bold uppercase transition ${
+                  marketFilter === option
+                    ? 'bg-emerald-500 text-black'
+                    : 'text-gray-400 hover:bg-[#111111] hover:text-white'
+                }`}
+                aria-pressed={marketFilter === option}
+                title={option === 'jp' ? '日本株のみ' : option === 'us' ? '海外株のみ' : '日本株と海外株'}
+              >
+                {option.toUpperCase()}
+              </button>
+            ))}
           </div>
         </div>
 

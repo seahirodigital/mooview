@@ -293,8 +293,10 @@ const FLOW_NODE_DEFAULT_WIDTH = {
   baskets: 310,
   stocks: 280,
 } as const;
-const FLOW_CANVAS_PADDING_X = 10;
-const FLOW_COLUMN_GAP = 76;
+const FLOW_CANVAS_PADDING_X = 3;
+const FLOW_MACRO_COLUMN_GAP = 19;
+const FLOW_LINK_COLUMN_GAP = 76;
+const FLOW_STOCK_RIGHT_PADDING = 44;
 const FLOW_COLUMN_MIN_WIDTH = 130;
 const FLOW_COLUMN_MAX_WIDTH = 460;
 const SIDE_PANEL_MIN_WIDTH = 340;
@@ -1429,7 +1431,7 @@ function FlowCardBody({
   endDate: string;
   columnWidth: number;
 }) {
-  const sparklineWidth = columnWidth < 190 ? 0 : columnWidth < 230 ? 24 : 36;
+  const sparklineWidth = columnWidth < 150 ? 0 : columnWidth < 190 ? 20 : columnWidth < 230 ? 24 : 36;
   return (
     <div
       className="grid h-full min-h-0 items-center gap-1 overflow-hidden"
@@ -1553,9 +1555,9 @@ export function MacroFlowMap({
   const [sidePanelResizing, setSidePanelResizing] = useState<null | { startX: number; startWidth: number }>(null);
   const flowLayout = useMemo(() => {
     const regionalLeft = FLOW_CANVAS_PADDING_X;
-    const sectorsLeft = regionalLeft + columnWidths.regional + FLOW_COLUMN_GAP;
-    const basketsLeft = sectorsLeft + columnWidths.sectors + FLOW_COLUMN_GAP;
-    const stocksLeft = basketsLeft + columnWidths.baskets + FLOW_COLUMN_GAP;
+    const sectorsLeft = regionalLeft + columnWidths.regional + FLOW_MACRO_COLUMN_GAP;
+    const basketsLeft = sectorsLeft + columnWidths.sectors + FLOW_LINK_COLUMN_GAP;
+    const stocksLeft = basketsLeft + columnWidths.baskets + FLOW_LINK_COLUMN_GAP;
     const left = {
       regional: regionalLeft,
       sectors: sectorsLeft,
@@ -1571,7 +1573,7 @@ export function MacroFlowMap({
     return {
       left,
       center,
-      width: stocksLeft + columnWidths.stocks + FLOW_CANVAS_PADDING_X,
+      width: stocksLeft + columnWidths.stocks + FLOW_STOCK_RIGHT_PADDING,
     };
   }, [columnWidths]);
   const baskets = useMemo(() => readValueChainBaskets(macroScope, macroScopeOptions), [macroScope, macroScopeOptions]);
@@ -2285,22 +2287,22 @@ export function MacroFlowMap({
   const flowColumnBoundaries = useMemo<Array<{ boundary: ColumnBoundary; left: number; label: string }>>(() => ([
     {
       boundary: 'regional-sector',
-      left: flowLayout.left.regional + columnWidths.regional + FLOW_COLUMN_GAP / 2,
+      left: flowLayout.left.regional + columnWidths.regional + FLOW_MACRO_COLUMN_GAP / 2,
       label: 'Regional Markets と Sectors の境界',
     },
     {
       boundary: 'sector-basket',
-      left: flowLayout.left.sectors + columnWidths.sectors + FLOW_COLUMN_GAP / 2,
+      left: flowLayout.left.sectors + columnWidths.sectors + FLOW_LINK_COLUMN_GAP / 2,
       label: 'Sectors と Themes の境界',
     },
     {
       boundary: 'basket-stock',
-      left: flowLayout.left.baskets + columnWidths.baskets + FLOW_COLUMN_GAP / 2,
+      left: flowLayout.left.baskets + columnWidths.baskets + FLOW_LINK_COLUMN_GAP / 2,
       label: 'Themes と Stocks の境界',
     },
     {
       boundary: 'stock-right',
-      left: flowLayout.left.stocks + columnWidths.stocks,
+      left: flowLayout.left.stocks + columnWidths.stocks + FLOW_STOCK_RIGHT_PADDING,
       label: 'Stocks right boundary',
     },
   ]), [columnWidths, flowLayout.left]);

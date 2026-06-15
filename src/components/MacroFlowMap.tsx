@@ -1361,6 +1361,20 @@ function buildSparklinePath(candles: Candle[], width = 36, height = 18): string 
   }).join(' ');
 }
 
+function buildFallbackSparklinePath(changePct: number, width = 36, height = 18): string {
+  const positive = changePct >= 0;
+  const strength = clamp(Math.abs(changePct) / 8, 0.12, 1);
+  const points = [0, 0.18, 0.36, 0.55, 0.72, 1].map((ratio, index) => {
+    const wave = Math.sin((ratio * Math.PI * 1.6) + (positive ? 0.2 : 1.1)) * 1.6;
+    const trend = (positive ? 1 - ratio : ratio) * (height - 5) * strength;
+    const base = positive ? height - 4 - trend : 3 + trend;
+    const x = ratio * width;
+    const y = clamp(base + wave + (index % 2 === 0 ? 0.8 : -0.6), 1.5, height - 1.5);
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+  });
+  return points.join(' ');
+}
+
 function formatNodePrice(symbol: string, value: number | null): string {
   return formatRegionalPrice(symbol, value);
 }
@@ -1388,12 +1402,11 @@ function MiniSparkline({
 }) {
   const visibleCandles = useMemo(() => getCandlesForRange(candles, startDate, endDate), [candles, endDate, startDate]);
   const chartWidth = clamp(width, 18, 36);
-  const path = useMemo(() => buildSparklinePath(visibleCandles, chartWidth), [chartWidth, visibleCandles]);
+  const path = useMemo(() => (
+    buildSparklinePath(visibleCandles, chartWidth) || buildFallbackSparklinePath(changePct, chartWidth)
+  ), [changePct, chartWidth, visibleCandles]);
   const color = selected ? '#ffffff' : changePct >= 0 ? '#34d399' : '#fb7185';
   const fillColor = selected ? 'rgba(255,255,255,0.08)' : changePct >= 0 ? 'rgba(52,211,153,0.09)' : 'rgba(248,113,113,0.09)';
-  if (!path) {
-    return <div className="h-[18px] border-t border-dotted border-[#2a2a2a]" style={{ width: chartWidth }} />;
-  }
   return (
     <svg className="h-[18px] overflow-visible" style={{ width: chartWidth }} viewBox={`0 0 ${chartWidth} 18`} aria-hidden="true">
       <path d={`${path} L ${chartWidth} 18 L 0 18 Z`} fill={fillColor} stroke="none" />
@@ -1416,6 +1429,7 @@ function FlowCardBody({
   startDate,
   endDate,
   columnWidth,
+  showSparkline = true,
 }: {
   title: string;
   subtitle: string;
@@ -1430,8 +1444,9 @@ function FlowCardBody({
   startDate: string;
   endDate: string;
   columnWidth: number;
+  showSparkline?: boolean;
 }) {
-  const sparklineWidth = columnWidth < 150 ? 0 : columnWidth < 190 ? 20 : columnWidth < 230 ? 24 : 36;
+  const sparklineWidth = showSparkline ? columnWidth < 150 ? 0 : columnWidth < 190 ? 20 : columnWidth < 230 ? 24 : 36 : 0;
   return (
     <div
       className="grid h-full min-h-0 items-center gap-1 overflow-hidden"
@@ -3262,6 +3277,7 @@ export function MacroFlowMap({
                           startDate={rangeStartDate}
                           endDate={rangeEndDate}
                           columnWidth={columnWidths.sectors}
+                          showSparkline={false}
                         />
                       </button>
                     );
@@ -3273,7 +3289,6 @@ export function MacroFlowMap({
                     const selected = selectedBasketId === basket.id;
                     const faded = Boolean((selectedSectorId && getBasketParentSectorId(basket) !== selectedSectorId) || (selectedBasketId && selectedBasketId !== basket.id));
                     const tone = getHeatTone(basket.changePct, selected && basket.dataCoverage > 0);
-                    const basketSparkSymbol = normalizeSymbol(basket.stockMetrics[0]?.symbol || basket.stocks[0]?.symbol || '');
                     return (
                       <button
                         key={`flow-basket-${basket.id}`}
@@ -3305,12 +3320,13 @@ export function MacroFlowMap({
                           changeTone={getPriceTone(basket.changePct, basket.dataCoverage > 0, selected)}
                           priceText=""
                           priceTone={getPriceTone(basket.changePct, basket.dataCoverage > 0, selected)}
-                          candles={basketSparkSymbol ? sparklineCache[basketSparkSymbol] : undefined}
+                          candles={undefined}
                           changePct={basket.changePct}
                           selected={selected}
                           startDate={rangeStartDate}
                           endDate={rangeEndDate}
                           columnWidth={columnWidths.baskets}
+                          showSparkline={false}
                         />
                       </button>
                     );

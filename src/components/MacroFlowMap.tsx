@@ -1152,6 +1152,86 @@ function dedupeStockMetrics(stocks: StockMetric[]): StockMetric[] {
   return Array.from(merged.values());
 }
 
+function normalizeBasketName(value: string): string {
+  return value.replace(/[\s\u3000]+/g, ' ').trim().toLowerCase();
+}
+
+function mergeDuplicateBasketMetrics(baskets: BasketMetric[]): BasketMetric[] {
+  const merged = new Map<string, BasketMetric>();
+  baskets.forEach((basket) => {
+    const parentSectorId = getBasketParentSectorId(basket);
+    const parentSectorName = getBasketParentSectorName(basket);
+    const key = `${parentSectorId}::${normalizeBasketName(basket.name)}`;
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, {
+        ...basket,
+        parentSectorId,
+        parentSectorNameJa: parentSectorName,
+        parentSectorNameEn: basket.parentSectorNameEn || parentSectorName,
+        sector: parentSectorName,
+        stockMetrics: basket.stockMetrics.map((stock) => ({
+          ...stock,
+          basketId: basket.id,
+          basketName: basket.name,
+          sector: parentSectorId,
+          sectorName: parentSectorName,
+        })),
+      });
+      return;
+    }
+
+    const stockMetrics = dedupeStockMetrics([
+      ...current.stockMetrics,
+      ...basket.stockMetrics,
+    ].map((stock) => ({
+      ...stock,
+      basketId: current.id,
+      basketName: current.name,
+      sector: parentSectorId,
+      sectorName: parentSectorName,
+    })));
+    const baseVolume = stockMetrics.reduce((sum, stock) => sum + stock.baseVolume, 0);
+    const nodeVolume = stockMetrics.reduce((sum, stock) => sum + stock.nodeVolume, 0);
+    const liveVolume = stockMetrics.reduce((sum, stock) => sum + (stock.hasLiveQuote ? stock.nodeVolume : 0), 0);
+    const changePct = liveVolume > 0
+      ? stockMetrics.reduce((sum, stock) => sum + (stock.hasLiveQuote ? stock.changePct * (stock.nodeVolume / liveVolume) : 0), 0)
+      : 0;
+    const adjustedStockMetrics = stockMetrics.map((stock) => ({
+      ...stock,
+      alpha: stock.hasLiveQuote ? stock.changePct - changePct : 0,
+    }));
+    merged.set(key, {
+      ...current,
+      sector: parentSectorName,
+      parentSectorId,
+      parentSectorNameJa: parentSectorName,
+      parentSectorNameEn: current.parentSectorNameEn || parentSectorName,
+      market: current.market === basket.market ? current.market : 'Mixed',
+      stocks: adjustedStockMetrics.map((stock) => ({
+        symbol: stock.symbol,
+        name: stock.name,
+        market: stock.market,
+        marketCap: stock.marketCap,
+        baseChangePct: stock.baseChangePct,
+      })),
+      stockMetrics: adjustedStockMetrics,
+      dataCoverage: adjustedStockMetrics.length > 0
+        ? adjustedStockMetrics.filter((stock) => stock.hasLiveQuote).length / adjustedStockMetrics.length
+        : 0,
+      baseVolume,
+      nodeVolume,
+      volumeExpansion: (nodeVolume / Math.max(1, baseVolume)) - 1,
+      changePct,
+      relativeReturn: 0,
+      marketCapWeight: 0,
+      score: current.score + basket.score,
+      flowValue: current.flowValue + basket.flowValue,
+    });
+  });
+  return Array.from(merged.values());
+}
+
 function getDateOffset(value: string): number {
   return Math.round((dateFromValue(value).getTime() - dateFromValue(FLOW_START_DATE).getTime()) / 86_400_000);
 }
@@ -1832,8 +1912,10 @@ export function MacroFlowMap({
       };
     });
 
+    const mergedInitialBasketMetrics = mergeDuplicateBasketMetrics(initialBasketMetrics);
+
     const sectorsByName = new Map<string, SectorMetric>();
-    initialBasketMetrics.forEach((basket) => {
+    mergedInitialBasketMetrics.forEach((basket) => {
       const parentSectorId = getBasketParentSectorId(basket);
       const parentSectorName = getBasketParentSectorName(basket);
       const current: SectorMetric = sectorsByName.get(parentSectorId) || {
@@ -1866,7 +1948,7 @@ export function MacroFlowMap({
     });
 
     const sectorDrafts = Array.from(sectorsByName.values());
-    const basketMetrics = initialBasketMetrics.map((basket): BasketMetric => {
+    const basketMetrics = mergedInitialBasketMetrics.map((basket): BasketMetric => {
       const sector = sectorsByName.get(getBasketParentSectorId(basket));
       const relativeReturn = basket.changePct - (sector?.changePct ?? 0);
       const marketCapWeight = basket.baseVolume / Math.max(1, sector?.baseVolume ?? basket.baseVolume);
@@ -1957,7 +2039,9 @@ export function MacroFlowMap({
   }, [metrics, searchQuery]);
 
   const orderedBaskets = useMemo(() => (
-    applyMetricSort<BasketMetric>(filteredMetrics.baskets, sortState.baskets, (basket) => basket.score)
+    sortState.baskets
+      ? applyMetricSort<BasketMetric>(filteredMetrics.baskets, sortState.baskets, (basket) => basket.changePct)
+      : applyMetricSort<BasketMetric>(filteredMetrics.baskets, null, (basket) => basket.score)
   ), [filteredMetrics.baskets, sortState.baskets]);
 
   const basketRank = useMemo(() => {
@@ -1966,7 +2050,7 @@ export function MacroFlowMap({
 
   const orderedSectors = useMemo(() => {
     if (sortState.sectors) {
-      return applyMetricSort<SectorMetric>(filteredMetrics.sectors, sortState.sectors, (sector) => sector.score);
+      return applyMetricSort<SectorMetric>(filteredMetrics.sectors, sortState.sectors, (sector) => sector.changePct);
     }
     if (sortState.baskets) {
       return [...filteredMetrics.sectors].sort((first, second) => {
@@ -1980,7 +2064,7 @@ export function MacroFlowMap({
 
   const orderedStocks = useMemo(() => {
     if (sortState.stocks) {
-      return applyMetricSort<StockMetric>(filteredMetrics.stocks, sortState.stocks, (stock) => stock.score);
+      return applyMetricSort<StockMetric>(filteredMetrics.stocks, sortState.stocks, (stock) => stock.changePct);
     }
     if (sortState.baskets) {
       return [...filteredMetrics.stocks].sort((first, second) => {
@@ -2002,7 +2086,7 @@ export function MacroFlowMap({
     const scopedStocks = dedupeStockMetrics(rawScopedStocks);
 
     if (sortState.stocks) {
-      return applyMetricSort<StockMetric>(scopedStocks, sortState.stocks, (stock) => stock.score);
+      return applyMetricSort<StockMetric>(scopedStocks, sortState.stocks, (stock) => stock.changePct);
     }
     if (selectedBasketId || selectedSectorId) {
       return applyMetricSort<StockMetric>(scopedStocks, null, (stock) => stock.score);

@@ -1089,3 +1089,38 @@ Fed資金流入推定
 └──────────────┴──────────────────────────────────────────────┘
 
 このVer 4.0を最終MVP仕様とし、リージョナルマーケットは独立表示、資金フローは **Sector → Theme → Stock** のみを可視化する。分析の中心は「イベント発生後の指定期間における資金伝播」であり、現在値表示ではなく時系列比較を主目的とする。
+# 2026-06-15 追記: ボトムアップ型セクター集計への設計変更
+
+## 最上位方針
+
+マクロ資金フロー画面の `Sectors` は、外部の米国セクターETFや国別ETFを親にした分類ではない。`Sectors` は、個別株の合計から作られるテーマバスケット群をさらに合計した、国籍フリーの独自親グループとして扱う。
+
+画面上の見た目は `Sectors -> Themes/Baskets -> Stocks` の左から右のフローを維持する。ただし、計算方向は逆であり、実態データは `Stocks -> Themes/Baskets -> Sectors` の順に右から左へロールアップする。
+
+## DB構造
+
+バスケット定義には、従来の `categoryId`, `laneId`, `segmentId` に加えて、以下を持てるようにする。
+
+- `parentSectorId`: 独自親セクターID。例: `GRP_SEMI_HARDWARE`
+- `parentSectorNameJa`: 画面表示用の日本語名。例: `半導体製造装置・インフラ`
+- `parentSectorNameEn`: 英語名。例: `Semiconductor Hardware & Equipment`
+- `market`: バスケットの主対象市場。例: `JP`, `US`, `GLOBAL`
+
+旧データに `parentSectorId` が存在しない場合は、既存の `categoryName` を独自セクター名として扱い、安定ハッシュから `GRP_*` のIDを自動生成する。米国ETFの `XLK`, `XLI`, `SPY` などへ自動変換してはならない。
+
+## 計算ロジック
+
+1. `Stock_Score = 期間中の株価騰落率 * (期間中の平均出来高 / 過去25日移動平均出来高)`
+2. `Basket_Return = Σ(Stock_Return * Stock_Market_Value) / Σ(Stock_Market_Value)`
+3. `Basket_Volume = Σ(Stock_Node_Volume)`
+4. `Sector_Return = Σ(Basket_Return * Basket_Volume) / Σ(Basket_Volume)`
+5. `Sector_Volume = Σ(Basket_Volume)`
+
+フロー線は `parentSectorId -> basketId -> stockSymbol` で接続する。これにより、1つの独自セクターから日本バスケットと米国バスケットへ分岐する表示を可能にする。
+
+## UI変更
+
+- `Sectors` カードにはETFコードやETF価格を表示しない。
+- `Sectors` の変動率は、所属バスケットのボトムアップ集計値だけを表示する。
+- `Sectors` のミニチャートは、所属銘柄の時系列を100基準に正規化した合成チャートとする。
+- `Macro` 補助列にETFセクター一覧を表示して、資金フローの親ノードのように見せてはならない。

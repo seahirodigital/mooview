@@ -64,6 +64,10 @@ interface MacroBasket {
   id: string;
   name: string;
   sector: string;
+  parentSectorId?: string;
+  parentSectorNameJa?: string;
+  parentSectorNameEn?: string;
+  market?: string;
   color: string;
   stocks: MacroStock[];
 }
@@ -72,6 +76,7 @@ interface StockMetric extends MacroStock {
   basketId: string;
   basketName: string;
   sector: string;
+  sectorName: string;
   hasLiveQuote: boolean;
   price: number | null;
   baseVolume: number;
@@ -171,6 +176,10 @@ interface ValueChainGroup {
   laneId: string;
   segmentId: string;
   name: string;
+  parentSectorId?: string;
+  parentSectorNameJa?: string;
+  parentSectorNameEn?: string;
+  market?: string;
   stocks: MacroStock[];
 }
 
@@ -276,8 +285,8 @@ const FLOW_ROW_GAP = 4;
 const FLOW_PANEL_PADDING_Y = 34;
 const FLOW_SECTION_LABEL_HEIGHT = 17;
 const FLOW_SECTION_GAP = 10;
-const FLOW_NODE_MIN_HEIGHT = 24;
-const FLOW_NODE_MAX_HEIGHT = 50;
+const FLOW_NODE_MIN_HEIGHT = 30;
+const FLOW_NODE_MAX_HEIGHT = 54;
 const FLOW_NODE_DEFAULT_WIDTH = {
   regional: 250,
   sectors: 280,
@@ -612,6 +621,43 @@ function getSectorFromCategory(categoryName: string): string {
   return categoryName || 'Information Technology';
 }
 
+function getParentSectorFromCategory(categoryName: string): string {
+  return categoryName?.trim() || 'Custom Sector';
+}
+
+function createStableHash(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36).toUpperCase();
+}
+
+function normalizeParentSectorName(value: string): string {
+  return value.replace(/[\s\u3000]+/g, ' ').trim();
+}
+
+function createParentSectorId(name: string, fallback = 'CUSTOM'): string {
+  const normalizedName = normalizeParentSectorName(name);
+  const ascii = normalizedName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return `GRP_${ascii || createStableHash(normalizedName || fallback)}`;
+}
+
+function getBasketParentSectorName(basket: Pick<MacroBasket, 'sector' | 'parentSectorNameJa' | 'parentSectorNameEn' | 'name'>): string {
+  return normalizeParentSectorName(
+    basket.parentSectorNameJa
+    || basket.parentSectorNameEn
+    || basket.sector
+    || basket.name
+    || 'Custom Sector'
+  );
+}
+
+function getBasketParentSectorId(basket: Pick<MacroBasket, 'id' | 'sector' | 'parentSectorId' | 'parentSectorNameJa' | 'parentSectorNameEn' | 'name'>): string {
+  const parentSectorName = getBasketParentSectorName(basket);
+  return createParentSectorId(parentSectorName, basket.parentSectorId?.trim() || basket.id || 'CUSTOM');
+}
+
 function sanitizeStoredStock(value: unknown): MacroStock | null {
   if (!value || typeof value !== 'object') return null;
   const source = value as Partial<MacroStock>;
@@ -728,14 +774,21 @@ function normalizeStoredChain(chain: StoredValueChain | null | undefined, fallba
     }))
     : [{ id: 'macro-category', name: 'Information Technology', lanes: [{ id: 'macro-lane', name: 'Default' }] }];
   const groups = Array.isArray(chain?.groups)
-    ? chain.groups.map((group, index) => ({
-      id: group.id || createValueChainId('group'),
-      categoryId: group.categoryId || categories[0].id,
-      laneId: group.laneId || categories[0].lanes[0].id,
-      segmentId: group.segmentId || stages[0].segments[0].id,
-      name: group.name || `Basket ${index + 1}`,
-      stocks: Array.isArray(group.stocks) ? group.stocks.map(normalizeChainStock).filter((stock) => stock.symbol) : [],
-    }))
+    ? chain.groups.map((group, index) => {
+      const groupRecord = group as unknown as ValueChainGroup & Record<string, unknown>;
+      return {
+        id: group.id || createValueChainId('group'),
+        categoryId: group.categoryId || categories[0].id,
+        laneId: group.laneId || categories[0].lanes[0].id,
+        segmentId: group.segmentId || stages[0].segments[0].id,
+        name: group.name || `Basket ${index + 1}`,
+        parentSectorId: group.parentSectorId || String(groupRecord.parent_sector_id || ''),
+        parentSectorNameJa: group.parentSectorNameJa || String(groupRecord.sector_name_ja || groupRecord.parentSectorName || ''),
+        parentSectorNameEn: group.parentSectorNameEn || String(groupRecord.sector_name_en || ''),
+        market: group.market,
+        stocks: Array.isArray(group.stocks) ? group.stocks.map(normalizeChainStock).filter((stock) => stock.symbol) : [],
+      };
+    })
     : [];
   return {
     name: chain?.name?.trim() || fallbackName,
@@ -758,12 +811,17 @@ function createChainFromBaskets(name: string, sourceBaskets: MacroBasket[]): Sto
     categories,
     groups: sourceBaskets.map((basket) => {
       const category = categories.find((item) => item.name === basket.sector) || categories[0];
+      const parentSectorName = getBasketParentSectorName(basket);
       return {
         id: basket.id || createValueChainId('group'),
         categoryId: category.id,
         laneId: category.lanes[0].id,
         segmentId: stage.segments[0].id,
         name: basket.name,
+        parentSectorId: getBasketParentSectorId(basket),
+        parentSectorNameJa: parentSectorName,
+        parentSectorNameEn: basket.parentSectorNameEn || parentSectorName,
+        market: basket.market,
         stocks: basket.stocks.map(normalizeChainStock),
       };
     }),
@@ -772,12 +830,14 @@ function createChainFromBaskets(name: string, sourceBaskets: MacroBasket[]): Sto
 
 function createValueChainCsv(chain: StoredValueChain): string {
   const normalized = normalizeStoredChain(chain);
-  const headers = ['chainName', 'stageId', 'stageName', 'segmentId', 'segmentName', 'categoryId', 'categoryName', 'laneId', 'laneName', 'groupId', 'groupName', 'symbol', 'name', 'market', 'marketCap', 'baseChangePct'];
+  const headers = ['chainName', 'stageId', 'stageName', 'segmentId', 'segmentName', 'categoryId', 'categoryName', 'laneId', 'laneName', 'groupId', 'groupName', 'parentSectorId', 'parentSectorNameJa', 'parentSectorNameEn', 'marketScope', 'symbol', 'name', 'market', 'marketCap', 'baseChangePct'];
   const rows = normalized.groups?.flatMap((group) => {
     const category = normalized.categories?.find((item) => item.id === group.categoryId) || normalized.categories?.[0];
     const lane = category?.lanes.find((item) => item.id === group.laneId) || category?.lanes[0];
     const stage = normalized.stages?.find((item) => item.segments.some((segment) => segment.id === group.segmentId)) || normalized.stages?.[0];
     const segment = stage?.segments.find((item) => item.id === group.segmentId) || stage?.segments[0];
+    const parentSectorName = group.parentSectorNameJa || category?.name || group.name;
+    const parentSectorId = group.parentSectorId || createParentSectorId(parentSectorName, group.id);
     const stocks = group.stocks.length > 0 ? group.stocks : [{ symbol: '', name: '', market: '', marketCap: 0, baseChangePct: 0 }];
     return stocks.map((stock) => [
       normalized.name || '',
@@ -791,6 +851,10 @@ function createValueChainCsv(chain: StoredValueChain): string {
       lane?.name || '',
       group.id,
       group.name,
+      parentSectorId,
+      parentSectorName,
+      group.parentSectorNameEn || parentSectorName,
+      group.market || '',
       stock.symbol,
       stock.name,
       stock.market,
@@ -856,6 +920,10 @@ function parseValueChainCsv(text: string, baseChain: StoredValueChain): StoredVa
       laneId,
       segmentId,
       name: row.groupName?.trim() || groupId,
+      parentSectorId: row.parentSectorId?.trim() || row.parent_sector_id?.trim() || '',
+      parentSectorNameJa: row.parentSectorNameJa?.trim() || row.sector_name_ja?.trim() || row.parentSectorName?.trim() || '',
+      parentSectorNameEn: row.parentSectorNameEn?.trim() || row.sector_name_en?.trim() || '',
+      market: row.marketScope?.trim() || '',
       stocks: [],
     };
     const rawSymbol = row.symbol?.trim() || '';
@@ -887,7 +955,7 @@ function createTemplateSpec(chain: StoredValueChain): string {
 - groups[].stocks[] は symbol, name, market, marketCap, baseChangePct を持つ。
 
 ## CSV
-chainName,stageId,stageName,segmentId,segmentName,categoryId,categoryName,laneId,laneName,groupId,groupName,symbol,name,market,marketCap,baseChangePct
+chainName,stageId,stageName,segmentId,segmentName,categoryId,categoryName,laneId,laneName,groupId,groupName,parentSectorId,parentSectorNameJa,parentSectorNameEn,marketScope,symbol,name,market,marketCap,baseChangePct
 
 ## 現在のDB
 - name: ${normalized.name}
@@ -929,10 +997,18 @@ function convertValueChainToBaskets(source: StoredValueChain | null | undefined)
         const stocks = (group.stocks || []).map(sanitizeStoredStock).filter((stock): stock is MacroStock => Boolean(stock));
         if (stocks.length === 0) return null;
         const categoryName = categoryNames.get(String(group.categoryId || '')) || '';
+        const parentSectorName = group.parentSectorNameJa?.trim()
+          || group.parentSectorNameEn?.trim()
+          || getParentSectorFromCategory(categoryName);
+        const parentSectorId = group.parentSectorId?.trim() || createParentSectorId(parentSectorName, String(group.id || `stored-basket-${index + 1}`));
         return {
           id: String(group.id || `stored-basket-${index + 1}`),
           name: String(group.name || `Basket ${index + 1}`),
-          sector: getSectorFromCategory(categoryName),
+          sector: parentSectorName,
+          parentSectorId,
+          parentSectorNameJa: parentSectorName,
+          parentSectorNameEn: group.parentSectorNameEn || parentSectorName,
+          market: group.market,
           color: getFlowPaletteColor(index),
           stocks,
         };
@@ -1041,6 +1117,37 @@ function applyMetricSort<T>(
     const value = getValue(first) - getValue(second);
     return direction === 'asc' ? value : -value;
   });
+}
+
+function dedupeStockMetrics(stocks: StockMetric[]): StockMetric[] {
+  const merged = new Map<string, StockMetric>();
+  stocks.forEach((stock) => {
+    const key = normalizeSymbol(stock.symbol);
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, stock);
+      return;
+    }
+    const currentWeight = Math.max(1, current.nodeVolume);
+    const stockWeight = Math.max(1, stock.nodeVolume);
+    const totalWeight = currentWeight + stockWeight;
+    merged.set(key, {
+      ...current,
+      basketName: current.basketName === stock.basketName ? current.basketName : `${current.basketName} / ${stock.basketName}`,
+      baseVolume: current.baseVolume + stock.baseVolume,
+      nodeVolume: current.nodeVolume + stock.nodeVolume,
+      flowValue: current.flowValue + stock.flowValue,
+      score: current.score + stock.score,
+      marketCap: current.marketCap + stock.marketCap,
+      hasLiveQuote: current.hasLiveQuote || stock.hasLiveQuote,
+      price: current.price ?? stock.price,
+      changePct: ((current.changePct * currentWeight) + (stock.changePct * stockWeight)) / totalWeight,
+      alpha: ((current.alpha * currentWeight) + (stock.alpha * stockWeight)) / totalWeight,
+      momentum: Math.max(current.momentum, stock.momentum),
+      volumeMultiplier: Math.max(current.volumeMultiplier, stock.volumeMultiplier),
+    });
+  });
+  return Array.from(merged.values());
 }
 
 function getDateOffset(value: string): number {
@@ -1210,6 +1317,34 @@ function getCandlesForRange(candles: Candle[] | undefined, startDate: string, en
   return candles.slice(-Math.min(24, candles.length));
 }
 
+function createRollupCandles(candleSets: Array<Candle[] | undefined>, startDate: string, endDate: string): Candle[] {
+  const rangedSets = candleSets
+    .map((candles) => getCandlesForRange(candles, startDate, endDate))
+    .filter((candles) => candles.length >= 2);
+  if (rangedSets.length === 0) return [];
+  const size = Math.min(48, ...rangedSets.map((candles) => candles.length));
+  if (size < 2) return [];
+  const alignedSets = rangedSets.map((candles) => candles.slice(-size));
+  return Array.from({ length: size }, (_, index) => {
+    const values = alignedSets.map((candles) => {
+      const base = Math.max(0.0001, candles[0].close);
+      return (candles[index].close / base) * 100;
+    });
+    const close = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const volume = alignedSets.reduce((sum, candles) => sum + (Number(candles[index].volume) || 0), 0);
+    const reference = alignedSets[0][index];
+    return {
+      time: reference.time,
+      timeStr: reference.timeStr,
+      open: close,
+      high: close,
+      low: close,
+      close,
+      volume,
+    };
+  });
+}
+
 function buildSparklinePath(candles: Candle[], width = 36, height = 18): string {
   if (candles.length < 2) return '';
   const values = candles.map((candle) => candle.close).filter((value) => Number.isFinite(value) && value > 0);
@@ -1297,14 +1432,14 @@ function FlowCardBody({
   const sparklineWidth = columnWidth < 190 ? 0 : columnWidth < 230 ? 24 : 36;
   return (
     <div
-      className="grid h-full items-center gap-1"
+      className="grid h-full min-h-0 items-center gap-1 overflow-hidden"
       style={{
         gridTemplateColumns: sparklineWidth > 0
-          ? `minmax(0,1fr) ${sparklineWidth + 4}px auto`
-          : 'minmax(0,1fr) auto',
+          ? `minmax(0,1fr) ${sparklineWidth + 4}px minmax(48px,auto)`
+          : 'minmax(0,1fr) minmax(48px,auto)',
       }}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 overflow-hidden">
         <div className={`truncate text-[10px] font-bold leading-tight ${monoTitle ? 'font-mono' : ''} ${selected ? 'text-white' : ''}`}>{title}</div>
         {subtitle && <div className={`mt-0.5 truncate text-[9px] leading-tight ${selected ? 'text-white' : 'text-gray-500'}`}>{subtitle}</div>}
       </div>
@@ -1313,9 +1448,9 @@ function FlowCardBody({
           <MiniSparkline candles={candles} changePct={changePct} selected={selected} startDate={startDate} endDate={endDate} width={sparklineWidth} />
         </div>
       )}
-      <div className="min-w-[54px] text-right">
-        <div className="font-mono text-[13px] font-bold leading-none" style={{ color: changeTone }}>{changeText}</div>
-        {priceText && <div className="mt-1 truncate font-mono text-[8px] font-normal leading-none" style={{ color: priceTone }}>{priceText}</div>}
+      <div className="min-w-[48px] overflow-hidden text-right">
+        <div className="truncate font-mono text-[13px] font-bold leading-tight" style={{ color: changeTone }}>{changeText}</div>
+        {priceText && <div className="mt-0.5 truncate font-mono text-[8px] font-normal leading-tight" style={{ color: priceTone }}>{priceText}</div>}
       </div>
     </div>
   );
@@ -1447,7 +1582,6 @@ export function MacroFlowMap({
   const macroQuoteSymbols = useMemo(() => Array.from(new Set([
     ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
     ...sectorEtfDefs.map((item) => normalizeSymbol(item.symbol)),
-    ...Object.values(SECTOR_SYMBOL_BY_NAME).map((item) => normalizeSymbol(item.symbol)),
     ...baskets.flatMap((basket) => basket.stocks.map((stock) => normalizeSymbol(stock.symbol))),
   ].filter(Boolean))), [baskets, sectorEtfDefs]);
   const macroQuoteSignature = macroQuoteSymbols.join('|');
@@ -1592,6 +1726,8 @@ export function MacroFlowMap({
   }>(() => {
     const isSingleDayWindow = rangeStartIndex === rangeEndIndex;
     const initialBasketMetrics = baskets.map((basket, basketIndex): BasketMetric => {
+      const parentSectorName = getBasketParentSectorName(basket);
+      const parentSectorId = getBasketParentSectorId(basket);
       const stockInputs = basket.stocks.map((stock) => {
         const live = quoteMap.get(normalizeSymbol(stock.symbol));
         const hasLiveQuote = Boolean(live);
@@ -1637,7 +1773,7 @@ export function MacroFlowMap({
       const stockMetrics = stockInputs.map(({ stock, hasLiveQuote, price, marketCap, changePct, nodeVolume: stockNodeVolume, volumeMultiplier, momentum }): StockMetric => {
         const alpha = hasLiveQuote ? changePct - basketChangePct : 0;
         const rawScore = hasLiveQuote
-          ? Math.max(0.12, alpha + 0.85) * Math.sqrt(Math.max(1, stockNodeVolume)) * volumeMultiplier * Math.max(0.16, momentum)
+          ? Math.max(0.01, Math.abs(changePct)) * Math.sqrt(Math.max(1, stockNodeVolume)) * volumeMultiplier * Math.max(0.16, momentum)
           : 0;
         return {
           ...stock,
@@ -1646,7 +1782,8 @@ export function MacroFlowMap({
           marketCap,
           basketId: basket.id,
           basketName: basket.name,
-          sector: basket.sector,
+          sector: parentSectorId,
+          sectorName: parentSectorName,
           baseVolume: marketCap,
           nodeVolume: stockNodeVolume,
           alpha,
@@ -1659,6 +1796,10 @@ export function MacroFlowMap({
       });
       return {
         ...basket,
+        sector: parentSectorName,
+        parentSectorId,
+        parentSectorNameJa: parentSectorName,
+        parentSectorNameEn: basket.parentSectorNameEn || parentSectorName,
         color: getFlowPaletteColor(basketIndex),
         dataCoverage,
         baseVolume,
@@ -1675,14 +1816,14 @@ export function MacroFlowMap({
 
     const sectorsByName = new Map<string, SectorMetric>();
     initialBasketMetrics.forEach((basket) => {
-      const sectorSymbol = SECTOR_SYMBOL_BY_NAME[basket.sector] || { symbol: 'SPY', displaySymbol: 'SPY' };
-      const sectorQuote = quoteMap.get(normalizeSymbol(sectorSymbol.symbol));
-      const current: SectorMetric = sectorsByName.get(basket.sector) || {
-        id: basket.sector,
-        name: basket.sector,
-        symbol: sectorSymbol.symbol,
-        displaySymbol: sectorSymbol.displaySymbol,
-        price: sectorQuote?.price ?? null,
+      const parentSectorId = getBasketParentSectorId(basket);
+      const parentSectorName = getBasketParentSectorName(basket);
+      const current: SectorMetric = sectorsByName.get(parentSectorId) || {
+        id: parentSectorId,
+        name: parentSectorName,
+        symbol: parentSectorId,
+        displaySymbol: 'Rollup',
+        price: null,
         dataCoverage: 0,
         baseVolume: 0,
         nodeVolume: 0,
@@ -1698,21 +1839,22 @@ export function MacroFlowMap({
       current.dataCoverage = current.baskets.length > 0
         ? current.baskets.reduce((sum, item) => sum + item.dataCoverage, 0) / current.baskets.length
         : 0;
+      const sectorReturnWeight = Math.max(1, current.baskets.reduce((sum, item) => sum + item.nodeVolume, 0));
       current.changePct = current.baskets.reduce((sum, item) => (
-        sum + item.changePct * (item.baseVolume / Math.max(1, current.baseVolume))
+        sum + item.changePct * (item.nodeVolume / sectorReturnWeight)
       ), 0);
       current.volumeExpansion = (current.nodeVolume / Math.max(1, current.baseVolume)) - 1;
-      sectorsByName.set(basket.sector, current);
+      sectorsByName.set(parentSectorId, current);
     });
 
     const sectorDrafts = Array.from(sectorsByName.values());
     const basketMetrics = initialBasketMetrics.map((basket): BasketMetric => {
-      const sector = sectorsByName.get(basket.sector);
+      const sector = sectorsByName.get(getBasketParentSectorId(basket));
       const relativeReturn = basket.changePct - (sector?.changePct ?? 0);
       const marketCapWeight = basket.baseVolume / Math.max(1, sector?.baseVolume ?? basket.baseVolume);
       const score = basket.dataCoverage > 0
-        ? Math.max(0.1, relativeReturn + 1.2)
-          * Math.max(0.02, basket.volumeExpansion + 0.05)
+        ? Math.max(0.01, Math.abs(relativeReturn))
+          * Math.max(0.02, Math.abs(basket.volumeExpansion) + 0.02)
           * Math.max(0.02, marketCapWeight)
           * 1000
         : 0;
@@ -1726,14 +1868,16 @@ export function MacroFlowMap({
 
     const basketsBySector = new Map<string, BasketMetric[]>();
     basketMetrics.forEach((basket) => {
-      const rows = basketsBySector.get(basket.sector) || [];
+      const parentSectorId = getBasketParentSectorId(basket);
+      const rows = basketsBySector.get(parentSectorId) || [];
       rows.push(basket);
-      basketsBySector.set(basket.sector, rows);
+      basketsBySector.set(parentSectorId, rows);
     });
 
     const allocatedBasketMetrics = basketMetrics.map((basket): BasketMetric => {
-      const sector = sectorsByName.get(basket.sector);
-      const siblings = basketsBySector.get(basket.sector) || [basket];
+      const parentSectorId = getBasketParentSectorId(basket);
+      const sector = sectorsByName.get(parentSectorId);
+      const siblings = basketsBySector.get(parentSectorId) || [basket];
       const siblingScoreTotal = siblings.reduce((sum, item) => sum + item.score, 0);
       const sectorExpansionVolume = Math.max(1, (sector?.nodeVolume ?? basket.nodeVolume) * Math.max(0.025, (sector?.volumeExpansion ?? 0) + 0.045));
       const allocatedFlow = sectorExpansionVolume * (basket.score / Math.max(1, siblingScoreTotal));
@@ -1750,7 +1894,7 @@ export function MacroFlowMap({
     });
 
     const sectors = sectorDrafts.map((sector): SectorMetric => {
-      const sectorBaskets = allocatedBasketMetrics.filter((basket) => basket.sector === sector.id);
+      const sectorBaskets = allocatedBasketMetrics.filter((basket) => getBasketParentSectorId(basket) === sector.id);
       const flowValue = sectorBaskets.reduce((sum, basket) => sum + basket.flowValue, 0);
       const score = sectorBaskets.reduce((sum, basket) => sum + basket.score, 0);
       return {
@@ -1789,7 +1933,7 @@ export function MacroFlowMap({
     const stocks = baskets.flatMap((basket) => basket.stockMetrics);
     const sectors = metrics.sectors.filter((sector) => (
       sector.name.toLowerCase().includes(query)
-      || baskets.some((basket) => basket.sector === sector.name)
+      || baskets.some((basket) => getBasketParentSectorId(basket) === sector.id || basket.sector === sector.name)
     ));
     return { sectors, baskets, stocks };
   }, [metrics, searchQuery]);
@@ -1832,11 +1976,12 @@ export function MacroFlowMap({
   }, [basketRank, filteredMetrics.stocks, sortState.baskets, sortState.stocks]);
 
   const visibleStocks = useMemo(() => {
-    const scopedStocks = selectedBasketId
+    const rawScopedStocks = selectedBasketId
       ? filteredMetrics.stocks.filter((stock) => stock.basketId === selectedBasketId)
       : selectedSectorId
         ? filteredMetrics.stocks.filter((stock) => stock.sector === selectedSectorId)
         : filteredMetrics.stocks;
+    const scopedStocks = dedupeStockMetrics(rawScopedStocks);
 
     if (sortState.stocks) {
       return applyMetricSort<StockMetric>(scopedStocks, sortState.stocks, (stock) => stock.score);
@@ -1884,7 +2029,7 @@ export function MacroFlowMap({
   const topStock = visibleStocks[0] ?? orderedStocks[0];
   const flowBaskets = useMemo(() => {
     const scoped = selectedSectorId
-      ? orderedBaskets.filter((basket) => basket.sector === selectedSectorId)
+      ? orderedBaskets.filter((basket) => getBasketParentSectorId(basket) === selectedSectorId)
       : orderedBaskets;
     return scoped.slice(0, selectedSectorId ? 18 : 14);
   }, [orderedBaskets, selectedSectorId]);
@@ -1945,7 +2090,11 @@ export function MacroFlowMap({
       });
   }, [quoteMap, rangeEndIndex, rangeStartIndex, regionalOrder]);
   const flowLayoutData = useMemo<{ nodes: FlowNode[]; sectionHeaders: FlowSectionHeader[] }>(() => {
-    const maxRegionalVolume = Math.max(1, ...regionalRows.map((region) => region.nodeVolume), ...sectorEtfRows.map((item) => item.nodeVolume));
+    const maxRegionalVolume = Math.max(
+      1,
+      ...sectorEtfRows.map((item) => item.nodeVolume),
+      ...regionalRows.map((region) => region.nodeVolume),
+    );
     const maxSectorVolume = Math.max(1, ...orderedSectors.map((sector) => sector.nodeVolume));
     const maxBasketVolume = Math.max(1, ...flowBaskets.map((basket) => basket.nodeVolume));
     const maxStockVolume = Math.max(1, ...flowStocks.map((stock) => stock.nodeVolume));
@@ -2026,11 +2175,12 @@ export function MacroFlowMap({
   const flowLinks = useMemo<FlowLink[]>(() => {
     const links: FlowLink[] = [];
     flowBaskets.forEach((basket) => {
-      if (selectedSectorId && basket.sector !== selectedSectorId) return;
-      const sectorId = `sector:${basket.sector}`;
+      const parentSectorId = getBasketParentSectorId(basket);
+      if (selectedSectorId && parentSectorId !== selectedSectorId) return;
+      const sectorId = `sector:${parentSectorId}`;
       const basketId = `basket:${basket.id}`;
       links.push({
-        id: `sector-basket:${basket.sector}:${basket.id}`,
+        id: `sector-basket:${parentSectorId}:${basket.id}`,
         sourceId: sectorId,
         targetId: basketId,
         sourceColumn: 'sectors',
@@ -2063,10 +2213,18 @@ export function MacroFlowMap({
   const sparklineSymbols = useMemo(() => Array.from(new Set([
     ...sectorEtfRows.map((item) => item.symbol),
     ...regionalRows.map((region) => region.symbol),
-    ...orderedSectors.map((sector) => sector.symbol),
     ...flowBaskets.map((basket) => basket.stockMetrics[0]?.symbol || basket.stocks[0]?.symbol || ''),
     ...flowStocks.map((stock) => stock.symbol),
+    ...orderedSectors.flatMap((sector) => sector.baskets.flatMap((basket) => basket.stockMetrics.map((stock) => stock.symbol))),
   ].map(normalizeSymbol).filter(Boolean))), [flowBaskets, flowStocks, orderedSectors, regionalRows, sectorEtfRows]);
+  const sectorRollupCandles = useMemo(() => {
+    const next: Record<string, Candle[]> = {};
+    orderedSectors.forEach((sector) => {
+      const candleSets = sector.baskets.flatMap((basket) => basket.stockMetrics.map((stock) => sparklineCache[normalizeSymbol(stock.symbol)]));
+      next[sector.id] = createRollupCandles(candleSets, rangeStartDate, rangeEndDate);
+    });
+    return next;
+  }, [orderedSectors, rangeEndDate, rangeStartDate, sparklineCache]);
   const maxLinkFlow = Math.max(1, ...flowLinks.map((link) => link.flowValue));
 
   useEffect(() => {
@@ -2209,14 +2367,18 @@ export function MacroFlowMap({
   };
 
   const getBasketGroupSector = (group: ValueChainGroup) => (
-    editableCategoryById.get(group.categoryId)?.name || 'Information Technology'
+    group.parentSectorNameJa
+      || group.parentSectorNameEn
+      || editableCategoryById.get(group.categoryId)?.name
+      || 'Custom Sector'
   );
 
   const openBasketEditor = (group?: ValueChainGroup) => {
+    const selectedSectorName = orderedSectors.find((sector) => sector.id === selectedSectorId)?.name;
     setBasketEditor({
       id: group?.id || null,
       name: group?.name || '',
-      sector: group ? getBasketGroupSector(group) : (selectedSectorId || editableBasketChain.categories?.[0]?.name || 'Information Technology'),
+      sector: group ? getBasketGroupSector(group) : (selectedSectorName || editableBasketChain.categories?.[0]?.name || 'Custom Sector'),
       stocksText: group ? stocksToText(group.stocks) : '',
     });
     setBasketDbImportDecision(null);
@@ -2239,12 +2401,16 @@ export function MacroFlowMap({
     };
     const lane = category.lanes[0] || { id: createValueChainId('lane'), name: 'Default' };
     const groupId = basketEditor.id || createValueChainId('group');
+    const parentSectorId = createParentSectorId(sectorName, groupId);
     const nextGroup: ValueChainGroup = {
       id: groupId,
       categoryId: category.id,
       laneId: lane.id,
       segmentId: segment.id,
       name,
+      parentSectorId,
+      parentSectorNameJa: sectorName,
+      parentSectorNameEn: sectorName,
       stocks: parseStocksText(basketEditor.stocksText),
     };
     const nextGroups = (base.groups || []).some((group) => group.id === groupId)
@@ -2335,7 +2501,7 @@ export function MacroFlowMap({
   const selectBasket = (basket: BasketMetric) => {
     setSelectedStockKey(null);
     setSelectedBasketId((current) => current === basket.id ? null : basket.id);
-    setSelectedSectorId(basket.sector);
+    setSelectedSectorId(getBasketParentSectorId(basket));
   };
 
   const openColorSettings = (target: ColorTarget) => {
@@ -2436,16 +2602,16 @@ export function MacroFlowMap({
   }, [sidePanelResizing]);
 
   useEffect(() => {
-    if (!sidePanelOpen || sidePanelMode !== 'chart') return undefined;
+    if (!sidePanelOpen) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setSidePanelOpen(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sidePanelMode, sidePanelOpen]);
+  }, [sidePanelOpen]);
 
   useEffect(() => {
-    if (!sidePanelOpen || sidePanelMode !== 'chart') return undefined;
+    if (!sidePanelOpen) return undefined;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target) return;
@@ -2454,7 +2620,7 @@ export function MacroFlowMap({
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [sidePanelMode, sidePanelOpen]);
+  }, [sidePanelOpen]);
 
   const renderPanelTitle = () => {
     if (sidePanelMode === 'chart') return 'チャート表示';
@@ -2764,7 +2930,7 @@ export function MacroFlowMap({
                     className={`w-full px-3 py-2.5 text-left transition ${
                       selectedBasketId === basket.id
                         ? 'bg-[#101820] ring-1 ring-inset ring-sky-700/70'
-                        : (selectedSectorId && basket.sector !== selectedSectorId) || (selectedBasketId && selectedBasketId !== basket.id)
+                        : (selectedSectorId && getBasketParentSectorId(basket) !== selectedSectorId) || (selectedBasketId && selectedBasketId !== basket.id)
                           ? 'opacity-45 hover:bg-[#101010]'
                           : 'hover:bg-[#101010]'
                     }`}
@@ -3083,12 +3249,12 @@ export function MacroFlowMap({
                       >
                         <FlowCardBody
                           title={sector.name}
-                          subtitle={sector.displaySymbol}
+                          subtitle=""
                           changeText={formatPctMaybe(sector.changePct, sector.dataCoverage > 0)}
                           changeTone={getPriceTone(sector.changePct, sector.dataCoverage > 0, selected)}
-                          priceText={formatNodePrice(sector.symbol, sector.price)}
+                          priceText=""
                           priceTone={getPriceTone(sector.changePct, sector.dataCoverage > 0, selected)}
-                          candles={sparklineCache[normalizeSymbol(sector.symbol)]}
+                          candles={sectorRollupCandles[sector.id]}
                           changePct={sector.changePct}
                           selected={selected}
                           startDate={rangeStartDate}
@@ -3103,7 +3269,7 @@ export function MacroFlowMap({
                     const node = flowNodeMap.get(`basket:${basket.id}`);
                     if (!node) return null;
                     const selected = selectedBasketId === basket.id;
-                    const faded = Boolean((selectedSectorId && basket.sector !== selectedSectorId) || (selectedBasketId && selectedBasketId !== basket.id));
+                    const faded = Boolean((selectedSectorId && getBasketParentSectorId(basket) !== selectedSectorId) || (selectedBasketId && selectedBasketId !== basket.id));
                     const tone = getHeatTone(basket.changePct, selected && basket.dataCoverage > 0);
                     const basketSparkSymbol = normalizeSymbol(basket.stockMetrics[0]?.symbol || basket.stocks[0]?.symbol || '');
                     return (

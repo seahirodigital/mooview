@@ -6,7 +6,7 @@ import re
 import threading
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +44,19 @@ KLINE_TYPES = {
     "1mo": (SubType.K_MON, KLType.K_MON),
 }
 
+KLINE_HISTORY_LOOKBACK_DAYS = {
+    "1m": 7,
+    "3m": 10,
+    "5m": 14,
+    "10m": 21,
+    "30m": 45,
+    "1h": 90,
+    "4h": 220,
+    "1d": 540,
+    "1w": 3650,
+    "1mo": 3650,
+}
+
 MARKET_TIMEZONES = {
     "US": "America/New_York",
     "HK": "Asia/Hong_Kong",
@@ -73,6 +86,22 @@ def normalize_symbol(raw_symbol: str) -> str:
         raise ValueError("銘柄コードを指定してください。")
     symbol = raw_value.upper()
 
+    direct_aliases = {
+        "US10Y": "IEF",
+        "US10Y.BD": "IEF",
+        "USDJPY": "YCS",
+        "USD/JPY": "YCS",
+        "XAUUSD": "GLD",
+        "GOLD/USD": "GLD",
+        "GOLDUSD": "GLD",
+        "DXY": "UUP",
+        "WTI": "USO",
+        "VIX": "VIXY",
+    }
+    if symbol in direct_aliases:
+        raw_value = direct_aliases[symbol]
+        symbol = raw_value.upper()
+
     suffix_parts = raw_value.split(".")
     if len(suffix_parts) >= 2:
         suffix_market = suffix_parts[-1].upper()
@@ -92,7 +121,7 @@ def normalize_symbol(raw_symbol: str) -> str:
         return f"JP.{symbol[:-2]}"
     if symbol.endswith(".JP"):
         return f"JP.{symbol[:-3]}"
-    if re.fullmatch(r"\d{3}[A-Z0-9]", symbol):
+    if re.fullmatch(r"\d{4}[A-Z]?", symbol) or re.fullmatch(r"\d{3}[A-Z0-9]", symbol):
         return f"JP.{symbol}"
     if symbol.isdigit() and len(symbol) == 5:
         return f"HK.{symbol}"
@@ -137,6 +166,54 @@ def market_timestamp(symbol: str, time_key: str) -> int:
     except pytz.AmbiguousTimeError:
         localized = timezone.localize(naive, is_dst=False)
     return int(localized.timestamp())
+
+
+def history_date_range(symbol: str, timeframe: str, count: int) -> Tuple[str, str]:
+    market = symbol.split(".", 1)[0]
+    timezone = pytz.timezone(MARKET_TIMEZONES.get(market, "UTC"))
+    end = datetime.now(timezone).date()
+    if timeframe == "1m":
+        lookback_days = max(2, math.ceil(count / 390 * 1.8) + 2)
+    elif timeframe == "3m":
+        lookback_days = max(3, math.ceil(count / 130 * 1.8) + 2)
+    elif timeframe == "5m":
+        lookback_days = max(4, math.ceil(count / 78 * 1.8) + 2)
+    elif timeframe == "10m":
+        lookback_days = max(5, math.ceil(count / 39 * 1.8) + 3)
+    elif timeframe == "30m":
+        lookback_days = max(8, math.ceil(count / 13 * 1.8) + 4)
+    elif timeframe == "1h":
+        lookback_days = max(10, math.ceil(count / 7 * 1.8) + 5)
+    elif timeframe == "4h":
+        lookback_days = max(30, count * 2)
+    elif timeframe == "1d":
+        lookback_days = max(10, math.ceil(count * 1.8))
+    elif timeframe == "1w":
+        lookback_days = max(365, count * 10)
+    elif timeframe == "1mo":
+        lookback_days = max(730, count * 45)
+    else:
+        lookback_days = KLINE_HISTORY_LOOKBACK_DAYS.get(timeframe, 365)
+    start = end - timedelta(days=lookback_days)
+    return start.isoformat(), end.isoformat()
+
+
+def dataframe_to_candles(symbol: str, data: Any) -> List[Dict[str, Any]]:
+    candles = []
+    for _, row in data.iterrows():
+        time_key = str(row.get("time_key", ""))
+        candles.append(
+            {
+                "time": market_timestamp(symbol, time_key),
+                "timeStr": time_key,
+                "open": as_float(row.get("open")),
+                "high": as_float(row.get("high")),
+                "low": as_float(row.get("low")),
+                "close": as_float(row.get("close")),
+                "volume": int(as_float(row.get("volume"))),
+            }
+        )
+    return candles
 
 
 class MoomooQuoteService:
@@ -546,6 +623,39 @@ class MoomooQuoteService:
         count = max(1, min(int(requested_count), 1000))
 
         with self._lock:
+            history_error: Optional[Exception] = None
+            try:
+                start, end = history_date_range(symbol, timeframe, count)
+                candles = []
+                page_req_key = None
+                for _ in range(24):
+                    ret, data, page_req_key = self._get_context().request_history_kline(
+                        symbol,
+                        start=start,
+                        end=end,
+                        ktype=kline_type,
+                        autype=AuType.QFQ,
+                        max_count=count,
+                        page_req_key=page_req_key,
+                    )
+                    if ret != RET_OK:
+                        raise RuntimeError(str(data))
+                    candles.extend(dataframe_to_candles(symbol, data))
+                    if not page_req_key:
+                        break
+                candles = candles[-count:]
+                if candles:
+                    return {
+                        "success": True,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "source": "history",
+                        "candles": candles,
+                    }
+                raise RuntimeError("history kline returned empty data")
+            except Exception as error:
+                history_error = error
+
             try:
                 self._subscribe(symbol, subtype)
                 ret, data = self._get_context().get_cur_kline(
@@ -557,29 +667,21 @@ class MoomooQuoteService:
                 if ret != RET_OK:
                     raise RuntimeError(str(data))
 
-                candles = []
-                for _, row in data.iterrows():
-                    time_key = str(row.get("time_key", ""))
-                    candles.append(
-                        {
-                            "time": market_timestamp(symbol, time_key),
-                            "timeStr": time_key,
-                            "open": as_float(row.get("open")),
-                            "high": as_float(row.get("high")),
-                            "low": as_float(row.get("low")),
-                            "close": as_float(row.get("close")),
-                            "volume": int(as_float(row.get("volume"))),
-                        }
-                    )
+                candles = dataframe_to_candles(symbol, data)
 
                 return {
                     "success": True,
                     "symbol": symbol,
                     "timeframe": timeframe,
+                    "source": "current",
                     "candles": candles,
                 }
             except Exception as error:
                 self._reset_context_on_connection_error(error)
+                if history_error:
+                    raise RuntimeError(
+                        f"{str(error)}; history fallback failed: {str(history_error)}"
+                    )
                 raise
 
     def close(self) -> None:

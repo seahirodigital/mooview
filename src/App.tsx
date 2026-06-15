@@ -26,6 +26,7 @@ import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
 import { ValueChainMap } from './components/ValueChainMap';
+import { MacroFlowMap } from './components/MacroFlowMap';
 import {
   calculateExpressionQuote,
   combineExpressionCandles,
@@ -47,7 +48,7 @@ type SidebarView = 'watchlist' | 'indicators' | 'settings';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
-type AppView = 'charts' | 'value-chain';
+type AppView = 'charts' | 'value-chain' | 'macro-flow';
 
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
@@ -74,7 +75,18 @@ const SYMBOL_NAME_ALIASES: Record<string, string> = {
   'APPLIED MATERIALS': 'AMAT',
   'LAM RESEARCH': 'LRCX',
   'KLA': 'KLAC',
+  US10Y: 'IEF',
+  'US10Y.BD': 'IEF',
+  USDJPY: 'YCS',
+  'USD/JPY': 'YCS',
+  XAUUSD: 'GLD',
+  'GOLD/USD': 'GLD',
+  GOLDUSD: 'GLD',
+  DXY: 'UUP',
+  WTI: 'USO',
+  VIX: 'VIXY',
 };
+const DIRECT_SYMBOL_INPUTS = new Set(['USD/JPY', 'GOLD/USD']);
 
 interface WatchlistSection {
   id: string;
@@ -483,7 +495,7 @@ function normalizeTickerSymbolForStorage(rawSymbol: string): string {
     return /^\d+$/.test(code) ? `HK.${code.padStart(5, '0')}` : `HK.${code}`;
   }
   if (upper.endsWith('.FX') || upper.endsWith('.BD')) return upper;
-  if (/^\d{3}[A-Z0-9]?$/.test(upper)) return `JP.${upper}`;
+  if (/^\d{3,5}[A-Z]?$/.test(upper)) return `JP.${upper}`;
   return upper;
 }
 
@@ -496,6 +508,7 @@ function normalizeStoredSymbolValue(rawSymbol: string): string {
 }
 
 function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpression | null {
+  if (DIRECT_SYMBOL_INPUTS.has(rawExpression.trim().toUpperCase())) return null;
   const expression = parseSymbolExpression(rawExpression);
   if (!expression) return null;
   const left = normalizeTickerSymbolForStorage(expression.left);
@@ -869,6 +882,8 @@ export default function App() {
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
+  const candleFetchPendingRef = useRef(false);
+  const forceCandleRefreshRef = useRef(false);
   const quoteFetchInFlightRef = useRef(false);
   const moomooRealTimeActiveRef = useRef(true);
   const [appView, setAppView] = useState<AppView>(() =>
@@ -1122,6 +1137,17 @@ export default function App() {
 
   // Real-time ticker price update counter/trigger
   const [tickTrigger, setTickTrigger] = useState(0);
+
+  useEffect(() => {
+    if (appView !== 'macro-flow') return;
+    forceCandleRefreshRef.current = true;
+    setValueChainChartState((current) => (
+      current.timeframe === '1d'
+        ? current
+        : { ...current, timeframe: '1d', zoomFactor: Math.max(current.zoomFactor, 8) }
+    ));
+    setTickTrigger((current) => current + 1);
+  }, [appView]);
 
   // Status message tracker for simulated API state
   const [networkLatency, setNetworkLatency] = useState(24);
@@ -1379,10 +1405,15 @@ export default function App() {
   // --- REAL MOOMOO DATA FETCH MECHANISM ---
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
-    if (!moomooRealTimeActive || candleFetchInFlightRef.current) return;
+    if (!moomooRealTimeActive) return;
+    if (candleFetchInFlightRef.current) {
+      candleFetchPendingRef.current = true;
+      return;
+    }
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
+      const forceRefresh = forceCandleRefreshRef.current;
       const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[] }>();
       const addCandleRequest = (rawSymbol: string, timeframe: Timeframe) => {
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
@@ -1414,10 +1445,11 @@ export default function App() {
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
         const cachedCandles = candlesCache[key];
         const lastFetchedAt = candleFetchTimestampsRef.current[key] ?? 0;
-        return !cachedCandles?.length || now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
+        return forceRefresh || !cachedCandles?.length || now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
       });
 
       if (requestsToFetch.length === 0) {
+        forceCandleRefreshRef.current = false;
         setMoomooStatus('connected');
         setMoomooError(null);
         return;
@@ -1524,6 +1556,12 @@ export default function App() {
         });
       } finally {
         candleFetchInFlightRef.current = false;
+        const shouldRefetch = candleFetchPendingRef.current;
+        candleFetchPendingRef.current = false;
+        forceCandleRefreshRef.current = false;
+        if (shouldRefetch) {
+          setTickTrigger((current) => current + 1);
+        }
       }
     };
 
@@ -3323,11 +3361,14 @@ export default function App() {
             </button>
             <button
               type="button"
-              className="w-full px-3 py-2.5 text-left flex items-center justify-between text-gray-600 cursor-not-allowed"
-              disabled
+              onClick={() => {
+                setAppView('macro-flow');
+                setWorkspaceMenuOpen(false);
+              }}
+              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'macro-flow' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
             >
-              <span>今後の予定</span>
-              <span className="text-[9px]">準備中</span>
+              <span>マクロ資金フロー</span>
+              {appView === 'macro-flow' && <span className="text-[9px]">表示中</span>}
             </button>
           </div>
         </div>
@@ -3343,6 +3384,25 @@ export default function App() {
           renderIndicatorSettings={renderValueChainIndicatorSettings}
           onOpenTickerInChart={openValueChainTickerInChart}
           onAddSymbolsToWatchlist={addSymbolsToActiveWatchlist}
+          onChartSymbolsChange={setValueChainChartSymbols}
+        />
+      ) : appView === 'macro-flow' ? (
+        <MacroFlowMap
+          tickers={liveTickerStats}
+          chartState={valueChainChartState}
+          onChartStateChange={setValueChainChartState}
+          chartTimeframe={valueChainChartState.timeframe}
+          onChartTimeframeChange={(timeframe) => {
+            forceCandleRefreshRef.current = true;
+            setValueChainChartState((current) => ({
+              ...current,
+              timeframe,
+              zoomFactor: timeframe === '1d' ? Math.max(current.zoomFactor, 8) : current.zoomFactor,
+            }));
+            setTickTrigger((current) => current + 1);
+          }}
+          renderTickerChart={renderValueChainTickerChart}
+          renderIndicatorSettings={renderValueChainIndicatorSettings}
           onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : (

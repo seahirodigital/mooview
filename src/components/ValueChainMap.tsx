@@ -375,6 +375,7 @@ const DEFAULT_VALUE_CHAIN: ValueChainData = {
 const STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
 const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
+const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
 const CHART_PANEL_WIDTH_STORAGE_KEY = 'mooview_value_chain_chart_panel_width';
 const STOCK_FONT_SIZE_STORAGE_KEY = 'mooview_value_chain_stock_font_size';
 const INDEX_GROUP_ID = 'g-index';
@@ -1199,6 +1200,7 @@ export function ValueChainMap({
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(chain));
+    window.dispatchEvent(new Event(VALUE_CHAIN_SYNC_EVENT));
     if (activeHistoryId) {
       setChainHistory((current) => current.map((entry) => (
         entry.id === activeHistoryId ? { ...entry, chain } : entry
@@ -1208,6 +1210,7 @@ export function ValueChainMap({
 
   useEffect(() => {
     localStorage.setItem(CHAIN_HISTORY_STORAGE_KEY, JSON.stringify(chainHistory));
+    window.dispatchEvent(new Event(VALUE_CHAIN_SYNC_EVENT));
   }, [chainHistory]);
 
   useEffect(() => {
@@ -1216,7 +1219,25 @@ export function ValueChainMap({
     } else {
       localStorage.removeItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY);
     }
+    window.dispatchEvent(new Event(VALUE_CHAIN_SYNC_EVENT));
   }, [activeHistoryId]);
+
+  useEffect(() => {
+    const syncHistoryFromStorage = () => {
+      const nextHistory = readStoredChainHistory();
+      setChainHistory((current) => (
+        JSON.stringify(current) === JSON.stringify(nextHistory) ? current : nextHistory
+      ));
+      const nextActiveHistoryId = readStoredActiveHistoryId();
+      setActiveHistoryId((current) => (current === nextActiveHistoryId ? current : nextActiveHistoryId));
+    };
+    window.addEventListener('storage', syncHistoryFromStorage);
+    window.addEventListener(VALUE_CHAIN_SYNC_EVENT, syncHistoryFromStorage);
+    return () => {
+      window.removeEventListener('storage', syncHistoryFromStorage);
+      window.removeEventListener(VALUE_CHAIN_SYNC_EVENT, syncHistoryFromStorage);
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(CHART_PANEL_WIDTH_STORAGE_KEY, String(chartSidebarWidth));

@@ -1300,7 +1300,8 @@ function getFlowNodeY(node: FlowNode): number {
 }
 
 function createFlowPath(sourceX: number, sourceY: number, targetX: number, targetY: number): string {
-  const controlDistance = Math.max(120, Math.abs(targetX - sourceX) * 0.48);
+  const distance = Math.max(1, targetX - sourceX);
+  const controlDistance = clamp(distance * 0.42, 12, Math.max(12, distance * 0.48));
   return `M ${sourceX} ${sourceY} C ${sourceX + controlDistance} ${sourceY}, ${targetX - controlDistance} ${targetY}, ${targetX} ${targetY}`;
 }
 

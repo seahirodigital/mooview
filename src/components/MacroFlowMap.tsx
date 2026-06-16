@@ -42,6 +42,8 @@ interface MacroQuote {
   price: number;
   changePct: number;
   marketCap?: number;
+  volume?: number;
+  dataDate?: string;
 }
 
 interface MacroQuoteResult {
@@ -49,8 +51,21 @@ interface MacroQuoteResult {
   symbol?: string;
   name?: string;
   price?: number;
+  open?: number;
+  previousClose?: number;
   changePct?: number;
   marketCap?: number;
+  volume?: number;
+  dataDate?: string;
+}
+
+interface SymbolSearchCandidate {
+  symbol: string;
+  code: string;
+  name: string;
+  nameEn: string;
+  market: string;
+  category: string;
 }
 
 interface MacroStock {
@@ -228,6 +243,24 @@ interface MacroImportDecisionState {
   sourceName: string;
 }
 
+interface StockEditModalState {
+  groupId: string;
+  originalSymbol: string;
+  symbol: string;
+  name: string;
+  market: string;
+  loading: boolean;
+  error: string | null;
+}
+
+interface StockContextMenuState {
+  x: number;
+  y: number;
+  groupId: string;
+  symbol: string;
+  label: string;
+}
+
 interface FlowLink {
   id: string;
   sourceId: string;
@@ -308,10 +341,10 @@ const REGIONAL_MARKET_DEFS: RegionalMarketDefinition[] = [
   { id: 'us-market', label: 'US market', displaySymbol: 'VT', symbol: 'VT', baseVolume: 65_200_000 },
   { id: 'jp-market', label: 'JP', displaySymbol: 'EWJ', symbol: 'EWJ', baseVolume: 8_100_000 },
   { id: 'eu-market', label: 'EU', displaySymbol: 'VGK', symbol: 'VGK', baseVolume: 11_800_000 },
-  { id: 'us10y', label: '米債', displaySymbol: 'US10Y', symbol: 'IEF', baseVolume: 42_000_000 },
-  { id: 'usd-jpy', label: '為替', displaySymbol: 'USD/JPY', symbol: 'YCS', baseVolume: 28_000_000 },
-  { id: 'gold', label: '金', displaySymbol: 'GOLD/USD', symbol: 'GLD', baseVolume: 18_000_000 },
-  { id: 'dxy', label: 'ドル指数', displaySymbol: 'DXY', symbol: 'UUP', baseVolume: 16_000_000 },
+  { id: 'us10y', label: '米債', displaySymbol: 'US10Y', symbol: '__UNSUPPORTED_US10Y__', baseVolume: 42_000_000 },
+  { id: 'usd-jpy', label: '為替', displaySymbol: 'USD/JPY', symbol: '__UNSUPPORTED_USDJPY__', baseVolume: 28_000_000 },
+  { id: 'gold', label: '金', displaySymbol: 'GOLD/USD', symbol: '__UNSUPPORTED_XAUUSD__', baseVolume: 18_000_000 },
+  { id: 'dxy', label: 'ドル指数', displaySymbol: 'DXY', symbol: '__UNSUPPORTED_DXY__', baseVolume: 16_000_000 },
   { id: 'wti', label: '原油', displaySymbol: 'WTI', symbol: 'USO', baseVolume: 15_000_000 },
   { id: 'vix', label: 'VIX', displaySymbol: 'VIX', symbol: 'VIXY', baseVolume: 12_000_000 },
 ];
@@ -547,6 +580,23 @@ function getBusinessWindowDays(startDate: string, endDate: string): number {
   return Math.abs(count);
 }
 
+function getBusinessDateValuesInWindow(startDate: string, endDate: string): string[] {
+  const safeStart = clampBusinessDateValue(startDate);
+  const safeEnd = clampBusinessDateValue(endDate);
+  if (safeStart === safeEnd) return [safeStart];
+  const direction = safeStart < safeEnd ? 1 : -1;
+  const dates: string[] = [];
+  let cursor = safeStart;
+  let guard = 0;
+  while (guard < 1000) {
+    if (isBusinessDateValue(cursor)) dates.push(cursor);
+    if (cursor === safeEnd) break;
+    cursor = addDateDays(cursor, direction);
+    guard += 1;
+  }
+  return direction > 0 ? dates : dates.reverse();
+}
+
 function getBusinessRangeDays(startDate: string, endDate: string): number {
   if (startDate === endDate) return 0;
   const direction = startDate < endDate ? 1 : -1;
@@ -589,13 +639,12 @@ function buildCalendarDays(month: string): Array<{ date: string; inMonth: boolea
   });
 }
 
-function dateSeed(value: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return ((hash >>> 0) % 10000) / 10000;
+function isLikelyTickerInput(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[A-Za-z]{1,6}$/.test(trimmed)
+    || /^[A-Za-z0-9._-]+\.(US|JP|HK|FX|BD)$/i.test(trimmed)
+    || /^\.[A-Za-z0-9._-]+\.(US|JP)$/i.test(trimmed)
+    || /^\d{3,5}[A-Za-z]?(\.T|\.JP)?$/i.test(trimmed);
 }
 
 function normalizeSymbol(symbol: string): string {
@@ -607,6 +656,10 @@ function normalizeSymbol(symbol: string): string {
   if (upper.endsWith('.T')) return `JP.${upper.slice(0, -2)}`;
   if (/^\d{3,5}[A-Z]?$/.test(upper)) return `JP.${upper}`;
   return upper;
+}
+
+function isUnsupportedDataSymbol(symbol: string): boolean {
+  return normalizeSymbol(symbol).startsWith('__UNSUPPORTED_');
 }
 
 function formatPct(value: number): string {
@@ -624,6 +677,21 @@ function formatFlow(value: number): string {
   if (value >= 1000) return `${(value / 1000).toFixed(1)}B`;
   if (value >= 10) return `${value.toFixed(0)}M`;
   return `${value.toFixed(1)}M`;
+}
+
+function formatStockPctMaybe(value: number, hasData: boolean): string {
+  if (!hasData || !Number.isFinite(value)) return '取得不可';
+  return formatPct(value);
+}
+
+function formatStockMarketCap(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '未取得';
+  return formatFlow(value);
+}
+
+function formatStockMetric(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '取得不可';
+  return formatFlow(value);
 }
 
 function formatTimeframeLabel(timeframe: Timeframe): string {
@@ -675,6 +743,7 @@ function createTickerQuote(ticker: MacroTickerStat): MacroQuote | null {
   const price = Number(ticker.currentPrice);
   const changePct = Number(ticker.computedChange);
   const marketCap = Number(ticker.marketCap);
+  const volume = Number((ticker as MacroTickerStat & { volume?: number }).volume);
   const hasPrice = Number.isFinite(price) && price > 0;
   const hasChange = Number.isFinite(changePct);
   const hasMarketCap = Number.isFinite(marketCap) && marketCap > 0;
@@ -684,6 +753,8 @@ function createTickerQuote(ticker: MacroTickerStat): MacroQuote | null {
     price: hasPrice ? price : 0,
     changePct: hasChange ? changePct : 0,
     marketCap: hasMarketCap ? marketCap : undefined,
+    volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
+    dataDate: FLOW_END_DATE,
   };
 }
 
@@ -691,11 +762,24 @@ function parseMacroQuoteResult(quote: MacroQuoteResult, fallbackSymbol: string):
   const price = Number(quote.price);
   if (!quote.success || !Number.isFinite(price) || price <= 0) return null;
   const marketCap = Number(quote.marketCap);
+  const volume = Number(quote.volume);
+  const quotedChangePct = Number(quote.changePct);
+  const previousClose = Number(quote.previousClose);
+  const open = Number(quote.open);
+  const changePct = Number.isFinite(quotedChangePct)
+    ? quotedChangePct
+    : Number.isFinite(previousClose) && previousClose > 0
+      ? ((price / previousClose) - 1) * 100
+      : Number.isFinite(open) && open > 0
+        ? ((price / open) - 1) * 100
+        : 0;
   return {
     name: quote.name || quote.symbol || fallbackSymbol,
     price,
-    changePct: Number.isFinite(Number(quote.changePct)) ? Number(quote.changePct) : 0,
+    changePct,
     marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined,
+    volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
+    dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
   };
 }
 
@@ -983,6 +1067,31 @@ function downloadText(filename: string, mimeType: string, text: string): void {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function searchMoomooCandidate(query: string): Promise<SymbolSearchCandidate | null> {
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const response = await fetch('/api/moomoo/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: trimmed, limit: 1 }),
+      signal: controller.signal,
+    });
+    const data = await response.json();
+    const candidates = Array.isArray(data.candidates)
+      ? data.candidates as SymbolSearchCandidate[]
+      : [];
+    return data.success && candidates.length > 0 ? candidates[0] : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 function parseValueChainJson(text: string): StoredValueChain | null {
@@ -1426,53 +1535,16 @@ function getFlowStrokeOpacity(ratio: number, active: boolean, muted: boolean): n
   return clamp(0.04 + ratio * 0.05, 0.04, 0.11);
 }
 
-function createLayerReturnPct(
-  baseChangePct: number,
-  symbol: string,
-  rangeStartDays: number,
-  rangeEndDays: number,
-  layer: 'sector' | 'basket' | 'stock',
-): number {
-  const elapsedDays = Math.max(0, rangeEndDays);
-  const windowDays = Math.max(1, rangeEndDays - rangeStartDays);
-  const timelineWeight = elapsedDays <= 0 ? 0 : Math.pow(elapsedDays / 30, 0.76);
-  const windowWeight = Math.sqrt(windowDays / 30);
-  const impulseSeed = dateSeed(`${symbol}-${layer}-event-impulse`);
-  const decaySeed = dateSeed(`${symbol}-${layer}-decay`);
-  const layerLead =
-    layer === 'sector'
-      ? Math.max(0.18, 1.18 - elapsedDays * 0.026)
-      : layer === 'basket'
-        ? 0.5 + Math.min(0.95, elapsedDays / 18)
-        : 0.34 + Math.min(1.1, elapsedDays / 25);
-  const eventImpulse = (1.2 + impulseSeed * 4.8) * timelineWeight * windowWeight * layerLead;
-  const noise = (decaySeed - 0.5) * (1.2 + timelineWeight * 2.4);
-  return clamp(baseChangePct * (0.35 + timelineWeight) + eventImpulse + noise, -12, 42);
-}
-
-function createFlowRate(changePct: number, symbol: string, rangeStartDays: number, rangeEndDays: number): number {
-  const windowDays = Math.max(1, rangeEndDays - rangeStartDays);
-  const persistence = 0.58 + dateSeed(`${symbol}-flow-persistence`) * 0.5;
-  const periodScale = Math.sqrt(windowDays / 30);
-  return clamp((changePct / 100) * persistence * periodScale, -0.28, 0.82);
+function createFlowRate(changePct: number): number {
+  return clamp(changePct / 100, -0.95, 10);
 }
 
 function createNodeVolume(baseVolume: number, flowRate: number): number {
   return Math.max(0, baseVolume * (1 + flowRate));
 }
 
-function createVolumeMultiplier(symbol: string, rangeStartDays: number, rangeEndDays: number): number {
-  const elapsedDays = Math.max(1, rangeEndDays);
-  const volumeShock = 0.72 + dateSeed(`${symbol}-${rangeStartDays}-${rangeEndDays}-volume`) * 1.75;
-  const eventBoost = elapsedDays <= 14 ? 1.14 : 0.96;
-  return clamp(volumeShock * eventBoost, 0.45, 3.2);
-}
-
-function createMomentum(changePct: number, symbol: string, rangeStartDays: number, rangeEndDays: number): number {
-  const elapsedDays = Math.max(1, rangeEndDays);
-  const windowDays = Math.max(1, rangeEndDays - rangeStartDays);
-  const persistence = 0.7 + dateSeed(`${symbol}-momentum`) * 0.85;
-  return clamp((Math.max(0, changePct) / 10) * persistence * Math.sqrt(windowDays / 7) * Math.sqrt(elapsedDays / 30), 0.12, 6.5);
+function createMomentum(changePct: number): number {
+  return Math.max(0.01, Math.abs(changePct) / 100);
 }
 
 function createNodeHeight(nodeVolume: number, maxNodeVolume: number): number {
@@ -1521,6 +1593,28 @@ function getCandleDateValue(candle: Candle): string {
   return new Date(candle.time * 1000).toISOString().slice(0, 10);
 }
 
+function getCandleDateTime(candle: Candle): number {
+  return dateFromValue(getCandleDateValue(candle)).getTime();
+}
+
+function getCandlesWithLatestQuote(candles: Candle[] | undefined, quote: MacroQuote | undefined, endDate: string): Candle[] | undefined {
+  if (!quote || endDate !== FLOW_END_DATE || !Number.isFinite(quote.price) || quote.price <= 0) return candles;
+  const quoteDate = quote.dataDate && quote.dataDate <= endDate ? quote.dataDate : endDate;
+  const liveCandle: Candle = {
+    time: Math.floor(dateFromValue(quoteDate).getTime() / 1000),
+    timeStr: `${quoteDate} 00:00:00`,
+    open: quote.price,
+    high: quote.price,
+    low: quote.price,
+    close: quote.price,
+    volume: quote.volume ?? 0,
+  };
+  return [
+    ...(candles || []).filter((candle) => getCandleDateValue(candle) !== quoteDate),
+    liveCandle,
+  ].sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+}
+
 function getCandlesForRange(candles: Candle[] | undefined, startDate: string, endDate: string): Candle[] {
   if (!candles || candles.length === 0) return [];
   const ranged = candles.filter((candle) => {
@@ -1537,20 +1631,94 @@ function getRangeCandleEndpoints(candles: Candle[] | undefined, startDate: strin
     .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
     .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
   if (sortedCandles.length < 2) return null;
-  const startCandle = sortedCandles.find((candle) => getCandleDateValue(candle) >= startDate)
-    || [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= startDate)
-    || sortedCandles[0];
   const endCandle = [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= endDate)
     || sortedCandles.find((candle) => getCandleDateValue(candle) >= endDate)
     || sortedCandles[sortedCandles.length - 1];
-  if (!startCandle || !endCandle || startCandle === endCandle) return null;
+  if (!endCandle) return null;
+  const endTime = getCandleDateTime(endCandle);
+  const startCandle = startDate === endDate
+    ? [...sortedCandles].reverse().find((candle) => getCandleDateTime(candle) < endTime)
+    : sortedCandles.find((candle) => getCandleDateValue(candle) >= startDate)
+      || [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= startDate)
+      || sortedCandles[0];
+  if (!startCandle || startCandle === endCandle) return null;
   return { start: startCandle, end: endCandle };
 }
 
+function getDailyChangePctFromCandle(candle: Candle, previousCandle?: Candle): number | null {
+  const previousClose = previousCandle?.close;
+  if (Number.isFinite(previousClose) && previousClose && previousClose > 0) {
+    return ((candle.close - previousClose) / previousClose) * 100;
+  }
+  if (Number.isFinite(candle.open) && candle.open > 0) {
+    return ((candle.close - candle.open) / candle.open) * 100;
+  }
+  return null;
+}
+
 function getRangeChangePctFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number | null {
-  const endpoints = getRangeCandleEndpoints(candles, startDate, endDate);
-  if (!endpoints) return null;
-  return ((endpoints.end.close - endpoints.start.close) / Math.max(0.0001, endpoints.start.close)) * 100;
+  if (!candles || candles.length === 0) return null;
+  const sortedCandles = [...candles]
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+    .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+  if (sortedCandles.length === 0) return null;
+
+  const endIndex = (() => {
+    let beforeOrSameIndex = -1;
+    for (let index = sortedCandles.length - 1; index >= 0; index -= 1) {
+      if (getCandleDateValue(sortedCandles[index]) <= endDate) {
+        beforeOrSameIndex = index;
+        break;
+      }
+    }
+    if (beforeOrSameIndex >= 0) return beforeOrSameIndex;
+    return sortedCandles.findIndex((candle) => getCandleDateValue(candle) >= endDate);
+  })();
+  if (endIndex < 0) return null;
+  const endCandle = sortedCandles[endIndex];
+
+  if (startDate === endDate) {
+    return getDailyChangePctFromCandle(endCandle, sortedCandles[endIndex - 1]);
+  }
+
+  let baseIndex = -1;
+  for (let index = endIndex - 1; index >= 0; index -= 1) {
+    if (getCandleDateValue(sortedCandles[index]) < startDate) {
+      baseIndex = index;
+      break;
+    }
+  }
+  const baseCandle = baseIndex >= 0
+    ? sortedCandles[baseIndex]
+    : sortedCandles.find((candle) => getCandleDateValue(candle) >= startDate);
+  if (!baseCandle || baseCandle === endCandle || baseCandle.close <= 0) return null;
+  return ((endCandle.close / baseCandle.close) - 1) * 100;
+}
+
+function getVolumeMultiplierFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number {
+  if (!candles || candles.length === 0) return 0;
+  const sortedCandles = [...candles]
+    .filter((candle) => Number.isFinite(Number(candle.volume)) && Number(candle.volume) > 0)
+    .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+  if (sortedCandles.length === 0) return 0;
+
+  const startIndex = Math.max(0, sortedCandles.findIndex((candle) => getCandleDateValue(candle) >= startDate));
+  let endIndex = -1;
+  for (let index = sortedCandles.length - 1; index >= 0; index -= 1) {
+    if (getCandleDateValue(sortedCandles[index]) <= endDate) {
+      endIndex = index;
+      break;
+    }
+  }
+  if (endIndex < startIndex) return 0;
+
+  const rangeCandles = sortedCandles.slice(startIndex, endIndex + 1);
+  const previousCandles = sortedCandles.slice(Math.max(0, startIndex - 25), startIndex);
+  const rangeAverageVolume = rangeCandles.reduce((sum, candle) => sum + Number(candle.volume), 0) / Math.max(1, rangeCandles.length);
+  if (previousCandles.length === 0) return 1;
+  const previousAverageVolume = previousCandles.reduce((sum, candle) => sum + Number(candle.volume), 0) / previousCandles.length;
+  if (!Number.isFinite(previousAverageVolume) || previousAverageVolume <= 0) return 1;
+  return clamp(rangeAverageVolume / previousAverageVolume, 0.01, 50);
 }
 
 function getRangeEndPriceFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number | null {
@@ -1559,8 +1727,41 @@ function getRangeEndPriceFromCandles(candles: Candle[] | undefined, startDate: s
 }
 
 function hasUsableRangeCandles(candles: Candle[] | undefined, startDate: string, endDate: string): boolean {
-  if (!candles || candles.length < 2) return false;
-  return getRangeCandleEndpoints(candles, startDate, endDate) !== null;
+  if (!candles || candles.length === 0) return false;
+  return getRangeChangePctFromCandles(candles, startDate, endDate) !== null;
+}
+
+function getPeriodChangePct(
+  candles: Candle[] | undefined,
+  startDate: string,
+  endDate: string,
+  latestChangePct?: number,
+): number | null {
+  const rangeChangePct = getRangeChangePctFromCandles(candles, startDate, endDate);
+  if (rangeChangePct !== null) return rangeChangePct;
+  if (startDate === endDate && endDate === FLOW_END_DATE && Number.isFinite(latestChangePct)) {
+    return Number(latestChangePct);
+  }
+  return null;
+}
+
+async function fetchMacroCandlesWithFallback(symbol: string): Promise<Candle[]> {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const candidates = new Set<string>([normalizedSymbol]);
+  if (!normalizedSymbol.startsWith('JP.') && !normalizedSymbol.startsWith('HK.') && !normalizedSymbol.includes('.')) {
+    candidates.add(`US.${normalizedSymbol}`);
+  }
+  for (const candidate of candidates) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const candles: Candle[] = [];
+        if (candles.length > 0) return candles;
+      } catch {
+        // 次の候補またはリトライへ進む
+      }
+    }
+  }
+  return [];
 }
 
 function createRollupCandles(candleSets: Array<Candle[] | undefined>, startDate: string, endDate: string): Candle[] {
@@ -1605,20 +1806,6 @@ function buildSparklinePath(candles: Candle[], width = 36, height = 18): string 
   }).join(' ');
 }
 
-function buildFallbackSparklinePath(changePct: number, width = 36, height = 18): string {
-  const positive = changePct >= 0;
-  const strength = clamp(Math.abs(changePct) / 8, 0.12, 1);
-  const points = [0, 0.18, 0.36, 0.55, 0.72, 1].map((ratio, index) => {
-    const wave = Math.sin((ratio * Math.PI * 1.6) + (positive ? 0.2 : 1.1)) * 1.6;
-    const trend = (positive ? 1 - ratio : ratio) * (height - 5) * strength;
-    const base = positive ? height - 4 - trend : 3 + trend;
-    const x = ratio * width;
-    const y = clamp(base + wave + (index % 2 === 0 ? 0.8 : -0.6), 1.5, height - 1.5);
-    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
-  });
-  return points.join(' ');
-}
-
 function formatNodePrice(symbol: string, value: number | null): string {
   return formatRegionalPrice(symbol, value);
 }
@@ -1646,15 +1833,19 @@ function MiniSparkline({
 }) {
   const visibleCandles = useMemo(() => getCandlesForRange(candles, startDate, endDate), [candles, endDate, startDate]);
   const chartWidth = clamp(width, 18, 36);
-  const path = useMemo(() => (
-    buildSparklinePath(visibleCandles, chartWidth) || buildFallbackSparklinePath(changePct, chartWidth)
-  ), [changePct, chartWidth, visibleCandles]);
+  const path = useMemo(() => buildSparklinePath(visibleCandles, chartWidth), [chartWidth, visibleCandles]);
   const color = selected ? '#ffffff' : changePct >= 0 ? '#34d399' : '#fb7185';
   const fillColor = selected ? 'rgba(255,255,255,0.08)' : changePct >= 0 ? 'rgba(52,211,153,0.09)' : 'rgba(248,113,113,0.09)';
   return (
     <svg className="h-[18px] overflow-visible" style={{ width: chartWidth }} viewBox={`0 0 ${chartWidth} 18`} aria-hidden="true">
-      <path d={`${path} L ${chartWidth} 18 L 0 18 Z`} fill={fillColor} stroke="none" />
-      <path d={path} fill="none" stroke={color} strokeWidth="1.15" strokeLinecap="round" strokeLinejoin="round" />
+      {path ? (
+        <>
+          <path d={`${path} L ${chartWidth} 18 L 0 18 Z`} fill={fillColor} stroke="none" />
+          <path d={path} fill="none" stroke={color} strokeWidth="1.15" strokeLinecap="round" strokeLinejoin="round" />
+        </>
+      ) : (
+        <path d={`M 0 9 L ${chartWidth} 9`} fill="none" stroke="#1f2937" strokeWidth="1" strokeDasharray="1.5 2.5" />
+      )}
     </svg>
   );
 }
@@ -1795,8 +1986,11 @@ export function MacroFlowMap({
   const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
   const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>({});
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
+  const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
+  const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
   const basketDbImportInputRef = useRef<HTMLInputElement | null>(null);
   const [basketEditor, setBasketEditor] = useState<BasketEditorState | null>(null);
+  const [stockEditModal, setStockEditModal] = useState<StockEditModalState | null>(null);
   const [basketDbImportDecision, setBasketDbImportDecision] = useState<MacroImportDecisionState | null>(null);
   const [basketDbExportMenuOpen, setBasketDbExportMenuOpen] = useState(false);
 
@@ -1853,7 +2047,7 @@ export function MacroFlowMap({
     ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
     ...sectorEtfDefs.map((item) => normalizeSymbol(item.symbol)),
     ...baskets.flatMap((basket) => basket.stocks.map((stock) => normalizeSymbol(stock.symbol))),
-  ].filter(Boolean))), [baskets, sectorEtfDefs]);
+  ].filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [baskets, sectorEtfDefs]);
   const macroQuoteSignature = macroQuoteSymbols.join('|');
   const tickerQuoteMap = useMemo(() => {
     const map = new Map<string, MacroQuote>();
@@ -1920,15 +2114,23 @@ export function MacroFlowMap({
   }, [basketDbExportMenuOpen]);
 
   useEffect(() => {
-    if (!basketEditor && !basketDbImportDecision) return undefined;
+    if (!stockContextMenu) return undefined;
+    const close = () => setStockContextMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [stockContextMenu]);
+
+  useEffect(() => {
+    if (!basketEditor && !basketDbImportDecision && !stockEditModal) return undefined;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setBasketEditor(null);
       setBasketDbImportDecision(null);
+      if (!stockEditModal?.loading) setStockEditModal(null);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [basketDbImportDecision, basketEditor]);
+  }, [basketDbImportDecision, basketEditor, stockEditModal]);
 
   useEffect(() => {
     if (!macroQuoteSignature) return undefined;
@@ -1940,27 +2142,69 @@ export function MacroFlowMap({
         const batchSize = 40;
         for (let index = 0; index < macroQuoteSymbols.length; index += batchSize) {
           const batch = macroQuoteSymbols.slice(index, index + batchSize);
-          const response = await fetch('/api/moomoo/quotes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbols: batch }),
-          });
-          const data = await response.json();
-          if (!response.ok || !data.success || !data.quotes) {
-            throw new Error(data.error || 'quotes fetch failed');
+          try {
+            const response = await fetch('/api/moomoo/quotes', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ symbols: batch }),
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success || !data.quotes) {
+              throw new Error(data.error || 'quotes fetch failed');
+            }
+            const resolvedSymbols = new Set<string>();
+            Object.entries(data.quotes as Record<string, MacroQuoteResult>).forEach(([key, quote]) => {
+              const requestKey = normalizeSymbol(String(key));
+              const quoteKey = normalizeSymbol(String(quote.symbol || ''));
+              const normalized = batch.includes(quoteKey) ? quoteKey : requestKey || quoteKey;
+              if (!normalized) return;
+              const parsed = parseMacroQuoteResult(quote, normalized);
+              if (parsed) {
+                nextQuotes[normalized] = parsed;
+                resolvedSymbols.add(normalized);
+              }
+            });
+            const missingSymbols = batch.filter((symbol) => !resolvedSymbols.has(symbol));
+            const singleResults = await Promise.all(missingSymbols.map(async (symbol) => {
+              try {
+                const response = await fetch('/api/moomoo/quote', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ symbol }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) return null;
+                return [symbol, parseMacroQuoteResult(data as MacroQuoteResult, symbol)] as const;
+              } catch {
+                return null;
+              }
+            }));
+            singleResults.forEach((result) => {
+              if (!result) return;
+              const [symbol, quote] = result;
+              if (quote) nextQuotes[symbol] = quote;
+            });
+          } catch {
+            const singleResults = await Promise.all(batch.map(async (symbol) => {
+              try {
+                const response = await fetch('/api/moomoo/quote', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ symbol }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) return null;
+                return [symbol, parseMacroQuoteResult(data as MacroQuoteResult, symbol)] as const;
+              } catch {
+                return null;
+              }
+            }));
+            singleResults.forEach((result) => {
+              if (!result) return;
+              const [symbol, quote] = result;
+              if (quote) nextQuotes[symbol] = quote;
+            });
           }
-          const resolvedSymbols = new Set<string>();
-          Object.entries(data.quotes as Record<string, MacroQuoteResult>).forEach(([key, quote]) => {
-            const requestKey = normalizeSymbol(String(key));
-            const quoteKey = normalizeSymbol(String(quote.symbol || ''));
-            const normalized = batch.includes(quoteKey) ? quoteKey : requestKey || quoteKey;
-            if (!normalized) return;
-            resolvedSymbols.add(normalized);
-            nextQuotes[normalized] = parseMacroQuoteResult(quote, normalized);
-          });
-          batch.forEach((symbol) => {
-            if (!resolvedSymbols.has(symbol)) nextQuotes[symbol] = null;
-          });
         }
         if (!cancelled) {
           setMacroQuoteCache((current) => ({ ...current, ...nextQuotes }));
@@ -1978,7 +2222,7 @@ export function MacroFlowMap({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [macroQuoteSignature, macroQuoteSymbols]);
+  }, [macroQuoteSignature, macroQuoteSymbols, quoteRefreshToken]);
 
   useEffect(() => {
     setRegionalOrder((current) => {
@@ -2011,23 +2255,27 @@ export function MacroFlowMap({
       const stockInputs = basket.stocks.map((stock) => {
         const normalizedSymbol = normalizeSymbol(stock.symbol);
         const live = quoteMap.get(normalizedSymbol);
-        const rangeCandles = sparklineCache[normalizedSymbol];
-        const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
         const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-        const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
-        const baseChange = live?.changePct ?? 0;
+        const changePct = getPeriodChangePct(
+          rangeCandles,
+          rangeStartDate,
+          rangeEndDate,
+          live?.changePct,
+        );
+        const hasLiveQuote = changePct !== null;
         const marketCap = live?.marketCap ?? stock.marketCap;
-        const changePct = rangeChangePct ?? (live ? baseChange : 0);
-        const flowRate = createFlowRate(changePct, stock.symbol, rangeStartIndex, rangeEndIndex);
-        const nodeVolume = createNodeVolume(marketCap, flowRate);
-        const volumeMultiplier = createVolumeMultiplier(stock.symbol, rangeStartIndex, rangeEndIndex);
-        const momentum = createMomentum(changePct, stock.symbol, rangeStartIndex, rangeEndIndex);
+        const apiChangePct = changePct ?? 0;
+        const flowRate = hasLiveQuote ? createFlowRate(apiChangePct) : 0;
+        const nodeVolume = hasLiveQuote ? createNodeVolume(marketCap, flowRate) : 0;
+        const volumeMultiplier = hasLiveQuote ? getVolumeMultiplierFromCandles(rangeCandles, rangeStartDate, rangeEndDate) : 0;
+        const momentum = hasLiveQuote ? createMomentum(apiChangePct) : 0;
         return {
           stock,
           hasLiveQuote,
           price: rangeEndPrice ?? live?.price ?? null,
           marketCap,
-          changePct,
+          changePct: apiChangePct,
           nodeVolume,
           volumeMultiplier,
           momentum,
@@ -2044,12 +2292,12 @@ export function MacroFlowMap({
         ? stockInputs.filter((input) => input.hasLiveQuote).length / stockInputs.length
         : 0;
       const basketChangePct = dataCoverage > 0 ? weightedStockChange : 0;
-      const basketFlowRate = dataCoverage > 0 ? createFlowRate(basketChangePct, basket.id, rangeStartIndex, rangeEndIndex) : 0;
+      const basketFlowRate = dataCoverage > 0 ? createFlowRate(basketChangePct) : 0;
       const nodeVolume = createNodeVolume(baseVolume, basketFlowRate);
       const stockMetrics = stockInputs.map(({ stock, hasLiveQuote, price, marketCap, changePct, nodeVolume: stockNodeVolume, volumeMultiplier, momentum }): StockMetric => {
         const alpha = hasLiveQuote ? changePct - basketChangePct : 0;
         const rawScore = hasLiveQuote
-          ? Math.max(0.01, Math.abs(changePct)) * Math.sqrt(Math.max(1, stockNodeVolume)) * volumeMultiplier * Math.max(0.16, momentum)
+          ? Math.max(0.01, Math.abs(alpha)) * Math.sqrt(Math.max(1, stockNodeVolume)) * Math.max(0.01, volumeMultiplier) * Math.max(0.01, momentum)
           : 0;
         return {
           ...stock,
@@ -2349,12 +2597,11 @@ export function MacroFlowMap({
     return orderedDefinitions.map((item) => {
       const normalizedSymbol = normalizeSymbol(item.symbol);
       const live = quoteMap.get(normalizedSymbol);
-      const rangeCandles = sparklineCache[normalizedSymbol];
-      const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+      const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
       const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-      const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
-      const baseChange = live?.changePct ?? 0;
-      const changePct = rangeChangePct ?? (live ? baseChange : 0);
+      const periodChangePct = getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
+      const hasLiveQuote = periodChangePct !== null;
+      const changePct = periodChangePct ?? 0;
       return {
         id: item.id,
         label: item.label,
@@ -2364,11 +2611,11 @@ export function MacroFlowMap({
         changePct,
         hasLiveQuote,
         nodeVolume: hasLiveQuote
-          ? createNodeVolume(item.baseVolume, createFlowRate(changePct, item.symbol, rangeStartIndex, rangeEndIndex))
+          ? createNodeVolume(item.baseVolume, createFlowRate(changePct))
           : 0,
       };
     });
-  }, [quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, sectorEtfDefs, sectorEtfOrder, sparklineCache]);
+  }, [quoteMap, rangeEndDate, rangeStartDate, sectorEtfDefs, sectorEtfOrder, sparklineCache]);
   const regionalRows = useMemo<RegionalMarketMetric[]>(() => {
     const definitionMap = new Map(REGIONAL_MARKET_DEFS.map((region) => [region.id, region]));
     return regionalOrder
@@ -2377,12 +2624,11 @@ export function MacroFlowMap({
       .map((region) => {
         const normalizedSymbol = normalizeSymbol(region.symbol);
         const live = quoteMap.get(normalizedSymbol);
-        const rangeCandles = sparklineCache[normalizedSymbol];
-        const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
         const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-        const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
-        const baseChange = live?.changePct ?? 0;
-        const changePct = rangeChangePct ?? (live ? baseChange : 0);
+        const periodChangePct = getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
+        const hasLiveQuote = periodChangePct !== null;
+        const changePct = periodChangePct ?? 0;
         return {
           id: region.id,
           label: REGIONAL_LABELS[region.id] || region.label,
@@ -2392,11 +2638,11 @@ export function MacroFlowMap({
           changePct,
           hasLiveQuote,
           nodeVolume: hasLiveQuote
-            ? createNodeVolume(region.baseVolume, createFlowRate(changePct, region.symbol, rangeStartIndex, rangeEndIndex))
+            ? createNodeVolume(region.baseVolume, createFlowRate(changePct))
             : 0,
         };
       });
-  }, [quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, regionalOrder, sparklineCache]);
+  }, [quoteMap, rangeEndDate, rangeStartDate, regionalOrder, sparklineCache]);
   const flowLayoutData = useMemo<{ nodes: FlowNode[]; sectionHeaders: FlowSectionHeader[] }>(() => {
     const maxRegionalVolume = Math.max(
       1,
@@ -2512,7 +2758,7 @@ export function MacroFlowMap({
           score: stock.score,
           changePct: stock.changePct,
           color: getHeatTone(stock.changePct, true).stroke,
-          label: `Alpha ${formatPctMaybe(stock.alpha, stock.hasLiveQuote)} x Volume ${formatFlow(stock.nodeVolume)} x Momentum ${stock.momentum.toFixed(2)}`,
+          label: `Alpha ${formatStockPctMaybe(stock.alpha, stock.hasLiveQuote)} x Volume ${formatStockMetric(stock.nodeVolume)} x Momentum ${stock.momentum.toFixed(2)}`,
         });
       });
     });
@@ -2524,7 +2770,8 @@ export function MacroFlowMap({
     ...flowBaskets.map((basket) => basket.stockMetrics[0]?.symbol || basket.stocks[0]?.symbol || ''),
     ...flowStocks.map((stock) => stock.symbol),
     ...orderedSectors.flatMap((sector) => sector.baskets.flatMap((basket) => basket.stockMetrics.map((stock) => stock.symbol))),
-  ].map(normalizeSymbol).filter(Boolean))), [flowBaskets, flowStocks, orderedSectors, regionalRows, sectorEtfRows]);
+  ].map(normalizeSymbol).filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [flowBaskets, flowStocks, orderedSectors, regionalRows, sectorEtfRows]);
+  const sparklineSymbolSignature = sparklineSymbols.join('|');
   const sectorRollupCandles = useMemo(() => {
     const next: Record<string, Candle[]> = {};
     orderedSectors.forEach((sector) => {
@@ -2536,43 +2783,55 @@ export function MacroFlowMap({
   const maxLinkFlow = Math.max(1, ...flowLinks.map((link) => link.flowValue));
 
   useEffect(() => {
-    const missingSymbols = sparklineSymbols.filter((symbol) => {
-      const fetchKey = `${symbol}:${rangeStartDate}:${rangeEndDate}`;
-      return !sparklineFetchKeysRef.current.has(fetchKey)
-        && !hasUsableRangeCandles(sparklineCache[symbol], rangeStartDate, rangeEndDate);
-    });
+    sparklineFetchKeysRef.current.clear();
+  }, [rangeEndDate, rangeStartDate, sparklineSymbolSignature]);
+
+  useEffect(() => {
+    const missingSymbols = sparklineSymbols.filter((symbol) => (
+      !hasUsableRangeCandles(sparklineCache[symbol], rangeStartDate, rangeEndDate)
+    ));
     if (missingSymbols.length === 0) return undefined;
     let cancelled = false;
 
     const loadSparklines = async () => {
-      const next: Record<string, Candle[]> = {};
       const batchSize = 6;
       for (let index = 0; index < missingSymbols.length; index += batchSize) {
         const batch = missingSymbols.slice(index, index + batchSize);
         const results = await Promise.all(batch.map(async (symbol) => {
-          sparklineFetchKeysRef.current.add(`${symbol}:${rangeStartDate}:${rangeEndDate}`);
-          try {
-            const response = await fetch('/api/moomoo/kline', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ symbol, timeframe: '1d', reqNum: 260 }),
-            });
-            const data = await response.json();
-            const candles = Array.isArray(data.candles)
-              ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
-              : [];
-            return [symbol, data.success ? candles : []] as const;
-          } catch {
-            return [symbol, []] as const;
+          const fetchKey = `${symbol}:${rangeStartDate}:${rangeEndDate}`;
+          sparklineFetchKeysRef.current.add(fetchKey);
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              const response = await fetch('/api/moomoo/kline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol, timeframe: '1d', reqNum: 260 }),
+              });
+              const data = await response.json();
+              const candles = Array.isArray(data.candles)
+                ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+                : [];
+              if (response.ok && data.success && candles.length > 0) {
+                sparklineFetchKeysRef.current.delete(fetchKey);
+                return [symbol, candles] as const;
+              }
+            } catch {
+              // 一時的な502や接続失敗は次の試行に任せる
+            }
           }
+          sparklineFetchKeysRef.current.delete(fetchKey);
+          return null;
         }));
-        results.forEach(([symbol, candles]) => {
+        const next: Record<string, Candle[]> = {};
+        results.forEach((result) => {
+          if (!result) return;
+          const [symbol, candles] = result;
           next[symbol] = candles;
         });
+        if (!cancelled && Object.keys(next).length > 0) {
+          setSparklineCache((current) => ({ ...current, ...next }));
+        }
         if (cancelled) return;
-      }
-      if (!cancelled) {
-        setSparklineCache((current) => ({ ...current, ...next }));
       }
     };
 
@@ -2580,7 +2839,7 @@ export function MacroFlowMap({
     return () => {
       cancelled = true;
     };
-  }, [rangeEndDate, rangeStartDate, sparklineCache, sparklineSymbols]);
+  }, [rangeEndDate, rangeStartDate, sparklineCache, sparklineSymbolSignature, sparklineSymbols]);
 
   const flowSvgHeight = Math.max(
     460,
@@ -2745,6 +3004,178 @@ export function MacroFlowMap({
       groups: (base.groups || []).filter((group) => group.id !== groupId),
     }, selectedMacroScopeOption?.historyId ? 'replace-current' : 'new-history');
     if (selectedBasketId === groupId) setSelectedBasketId(null);
+  };
+
+  const findEditableStock = (groupId: string, symbol: string): MacroStock | null => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const group = editableBasketChain.groups?.find((item) => item.id === groupId);
+    return group?.stocks.find((stock) => normalizeSymbol(stock.symbol) === normalizedSymbol) ?? null;
+  };
+
+  const clearStockDataCache = (symbols: string[]) => {
+    const normalizedSymbols = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+    if (normalizedSymbols.length === 0) return;
+    setMacroQuoteCache((current) => {
+      const next = { ...current };
+      normalizedSymbols.forEach((symbol) => {
+        delete next[symbol];
+      });
+      return next;
+    });
+    setSparklineCache((current) => {
+      const next = { ...current };
+      normalizedSymbols.forEach((symbol) => {
+        delete next[symbol];
+      });
+      return next;
+    });
+    sparklineFetchKeysRef.current.clear();
+    setQuoteRefreshToken((value) => value + 1);
+  };
+
+  const fetchResolvedStockQuote = async (symbol: string): Promise<{ symbol: string; quote: MacroQuote } | null> => {
+    try {
+      const response = await fetch('/api/moomoo/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol }),
+      });
+      const data = await response.json();
+      const resolvedSymbol = normalizeSymbol(String(data.symbol || symbol));
+      const quote = parseMacroQuoteResult(data as MacroQuoteResult, resolvedSymbol || symbol);
+      if (!response.ok || !quote) return null;
+      return { symbol: resolvedSymbol || normalizeSymbol(symbol), quote };
+    } catch {
+      return null;
+    }
+  };
+
+  const openStockEditModal = (groupId: string, symbol: string) => {
+    const stock = findEditableStock(groupId, symbol);
+    if (!stock) return;
+    setStockEditModal({
+      groupId,
+      originalSymbol: stock.symbol,
+      symbol: stock.symbol,
+      name: stock.name,
+      market: stock.market || (stock.symbol.startsWith('JP.') ? 'JP' : 'US'),
+      loading: false,
+      error: null,
+    });
+  };
+
+  const resolveStockInput = async (
+    rawSymbol: string,
+    rawName: string,
+    rawMarket: string,
+    fallbackStock: MacroStock | null,
+  ): Promise<MacroStock> => {
+    const cleanSymbolInput = rawSymbol.trim();
+    const cleanNameInput = rawName.trim();
+    const symbolLooksLikeCode = isLikelyTickerInput(cleanSymbolInput);
+    let symbol = symbolLooksLikeCode ? normalizeSymbol(cleanSymbolInput) : '';
+    let name = cleanNameInput;
+    let market = rawMarket.trim().toUpperCase();
+    let quoteResult = symbol ? await fetchResolvedStockQuote(symbol) : null;
+    let candidate: SymbolSearchCandidate | null = null;
+
+    if (!quoteResult) {
+      const searchQueries = Array.from(new Set([cleanNameInput, cleanSymbolInput].filter(Boolean)));
+      for (const query of searchQueries) {
+        candidate = await searchMoomooCandidate(query);
+        const candidateSymbol = normalizeSymbol(candidate?.symbol || candidate?.code || '');
+        if (!candidateSymbol || candidateSymbol === symbol) continue;
+        const candidateQuote = await fetchResolvedStockQuote(candidateSymbol);
+        if (candidateQuote) {
+          symbol = candidateQuote.symbol;
+          quoteResult = candidateQuote;
+          break;
+        }
+        if (!symbol) {
+          symbol = candidateSymbol;
+        }
+        if (!name && candidate) {
+          name = candidate.name || candidate.nameEn || candidate.code || candidateSymbol;
+        }
+        if (!market && candidate?.market) {
+          market = candidate.market;
+        }
+      }
+    }
+
+    if (!symbol) {
+      throw new Error('銘柄コード、または検索できる銘柄名を入力してください。');
+    }
+
+    const quote = quoteResult?.quote;
+    const quoteSymbol = quoteResult?.symbol ? normalizeSymbol(quoteResult.symbol) : symbol;
+    const resolvedSymbol = quoteSymbol || symbol;
+    const resolvedName = name || quote?.name || candidate?.name || candidate?.nameEn || fallbackStock?.name || resolvedSymbol;
+    const resolvedMarket = market || candidate?.market || (resolvedSymbol.startsWith('JP.') ? 'JP' : 'US');
+    return normalizeChainStock({
+      symbol: resolvedSymbol,
+      name: resolvedName,
+      market: resolvedMarket,
+      marketCap: quote?.marketCap ?? fallbackStock?.marketCap ?? 0,
+      baseChangePct: quote?.changePct ?? fallbackStock?.baseChangePct ?? 0,
+    });
+  };
+
+  const submitStockEdit = async () => {
+    if (!stockEditModal || stockEditModal.loading) return;
+    const modal = stockEditModal;
+    const fallbackStock = findEditableStock(modal.groupId, modal.originalSymbol);
+    setStockEditModal({ ...modal, loading: true, error: null });
+    try {
+      const stock = await resolveStockInput(modal.symbol, modal.name, modal.market, fallbackStock);
+      const base = normalizeStoredChain(editableBasketChain, editableBasketChain.name || 'マクロ全体');
+      const nextGroups = (base.groups || []).map((group) => {
+        if (group.id !== modal.groupId) return group;
+        const nextStocks = group.stocks.map((item) => (
+          normalizeSymbol(item.symbol) === normalizeSymbol(modal.originalSymbol) ? stock : item
+        ));
+        return { ...group, stocks: nextStocks };
+      });
+      persistBasketDbChain({
+        ...base,
+        groups: nextGroups,
+      }, selectedMacroScopeOption?.historyId ? 'replace-current' : 'new-history');
+      clearStockDataCache([modal.originalSymbol, modal.symbol, stock.symbol]);
+      const nextStockKey = `${modal.groupId}:${normalizeSymbol(stock.symbol)}`;
+      setSelectedStockKey(nextStockKey);
+      setActiveSymbol(stock.symbol);
+      setStockEditModal(null);
+    } catch (error) {
+      setStockEditModal({
+        ...modal,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const fillStockFromSearch = async () => {
+    if (!stockEditModal || stockEditModal.loading) return;
+    const modal = stockEditModal;
+    const fallbackStock = findEditableStock(modal.groupId, modal.originalSymbol);
+    setStockEditModal({ ...modal, loading: true, error: null });
+    try {
+      const stock = await resolveStockInput(modal.symbol, modal.name, modal.market, fallbackStock);
+      setStockEditModal({
+        ...modal,
+        symbol: stock.symbol,
+        name: stock.name,
+        market: stock.market,
+        loading: false,
+        error: null,
+      });
+    } catch (error) {
+      setStockEditModal({
+        ...modal,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   };
 
   const handleBasketDbImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -3356,8 +3787,8 @@ export function MacroFlowMap({
                   const japanese = isJapanStock(stock.symbol);
                   const primary = japanese ? stock.name : formatStockCode(stock.symbol);
                   const secondary = japanese
-                    ? `${formatStockCode(stock.symbol)}  ${formatFlow(stock.marketCap)}`
-                    : `${stock.name}  ${formatFlow(stock.marketCap)}`;
+                    ? `${formatStockCode(stock.symbol)}  ${formatStockMarketCap(stock.marketCap)}`
+                    : `${stock.name}  ${formatStockMarketCap(stock.marketCap)}`;
                   return (
                     <button
                       key={`${stock.basketId}-${stock.symbol}`}
@@ -3369,11 +3800,22 @@ export function MacroFlowMap({
                         setSelectedBasketId(stock.basketId);
                       }}
                       onDoubleClick={() => openChartForStock(stock)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setStockContextMenu({
+                          x: event.clientX,
+                          y: event.clientY,
+                          groupId: stock.basketId,
+                          symbol: stock.symbol,
+                          label: stock.name,
+                        });
+                      }}
                       className={`w-full px-3 py-2 text-left transition ${selected ? 'bg-sky-950/20 ring-1 ring-inset ring-sky-700/60' : 'hover:bg-[#101010]'}`}
                     >
                       <div className="flex items-center justify-between gap-3">
                         <span className={`min-w-0 truncate text-[11px] font-bold ${japanese ? '' : 'font-mono'} ${selected ? 'text-white' : 'text-gray-100'}`}>{index + 1}. {primary}</span>
-                        <span className={`font-mono text-[10px] ${selected ? 'text-white' : !stock.hasLiveQuote ? 'text-gray-500' : stock.changePct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatPctMaybe(stock.changePct, stock.hasLiveQuote)}</span>
+                        <span className={`font-mono text-[10px] ${selected ? 'text-white' : !stock.hasLiveQuote ? 'text-gray-500' : stock.changePct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatStockPctMaybe(stock.changePct, stock.hasLiveQuote)}</span>
                       </div>
                       <div className={`mt-1 text-[9px] ${selected ? 'text-white' : 'text-gray-500'}`}>
                         <span className="block truncate">{secondary}</span>
@@ -3729,8 +4171,8 @@ export function MacroFlowMap({
                     const japanese = isJapanStock(stock.symbol);
                     const primary = japanese ? stock.name : formatStockCode(stock.symbol);
                     const secondary = japanese
-                      ? `${formatStockCode(stock.symbol)}  ${formatFlow(stock.marketCap)}`
-                      : `${stock.name}  ${formatFlow(stock.marketCap)}`;
+                      ? `${formatStockCode(stock.symbol)}  ${formatStockMarketCap(stock.marketCap)}`
+                      : `${stock.name}  ${formatStockMarketCap(stock.marketCap)}`;
                     return (
                       <button
                         key={`flow-stock-${stock.basketId}-${stock.symbol}`}
@@ -3746,7 +4188,18 @@ export function MacroFlowMap({
                         onDoubleClick={() => openChartForStock(stock)}
                         onDragStart={(event) => beginStockDrag(event, stock.symbol)}
                         onDragEnd={() => setDraggingStockSymbol(null)}
-                        title={`${stock.symbol} ${stock.name}\nVol ${formatFlow(stock.nodeVolume)}\nFlow ${formatFlow(stock.flowValue)}\nAlpha ${formatPctMaybe(stock.alpha, stock.hasLiveQuote)}\nMomentum ${stock.momentum.toFixed(2)}`}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setStockContextMenu({
+                            x: event.clientX,
+                            y: event.clientY,
+                            groupId: stock.basketId,
+                            symbol: stock.symbol,
+                            label: stock.name,
+                          });
+                        }}
+                        title={`${stock.symbol} ${stock.name}\nVol ${formatStockMetric(stock.nodeVolume)}\nFlow ${formatStockMetric(stock.flowValue)}\nAlpha ${formatStockPctMaybe(stock.alpha, stock.hasLiveQuote)}\nMomentum ${stock.momentum.toFixed(2)}`}
                         className={`absolute overflow-hidden border px-1 py-0.5 text-left transition ${
                           selected
                             ? 'text-white shadow-[0_0_14px_rgba(22,163,74,0.22)]'
@@ -3769,7 +4222,7 @@ export function MacroFlowMap({
                         <FlowCardBody
                           title={primary}
                           subtitle={secondary}
-                          changeText={formatPctMaybe(stock.changePct, stock.hasLiveQuote)}
+                          changeText={formatStockPctMaybe(stock.changePct, stock.hasLiveQuote)}
                           changeTone={getPriceTone(stock.changePct, stock.hasLiveQuote, selected)}
                           priceText={formatNodePrice(stock.symbol, stock.price)}
                           priceTone={getPriceTone(stock.changePct, stock.hasLiveQuote, selected)}
@@ -3790,6 +4243,135 @@ export function MacroFlowMap({
           </section>
         </div>
       </div>
+
+      {stockContextMenu && (
+        <div
+          className="fixed z-[95] w-44 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+          style={{ left: stockContextMenu.x, top: stockContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              openStockEditModal(stockContextMenu.groupId, stockContextMenu.symbol);
+              setStockContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            銘柄編集
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const stock = visibleStocks.find((item) => (
+                item.basketId === stockContextMenu.groupId
+                && normalizeSymbol(item.symbol) === normalizeSymbol(stockContextMenu.symbol)
+              ));
+              if (stock) openChartForStock(stock);
+              setStockContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <ChartNoAxesCombined className="h-3.5 w-3.5" />
+            チャート表示
+          </button>
+        </div>
+      )}
+
+      {stockEditModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 px-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !stockEditModal.loading) setStockEditModal(null);
+          }}
+        >
+          <form
+            className="w-full max-w-md border border-[#343434] bg-[#080808] shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitStockEdit();
+            }}
+          >
+            <div className="flex h-10 items-center justify-between border-b border-[#242424] px-3">
+              <div className="text-xs font-bold text-white">銘柄編集</div>
+              <button
+                type="button"
+                onClick={() => setStockEditModal(null)}
+                disabled={stockEditModal.loading}
+                className="flex h-7 w-7 items-center justify-center text-gray-400 hover:text-white disabled:opacity-40"
+                aria-label="銘柄編集を閉じる"
+                title="閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3 p-3">
+              <label className="block text-[10px] text-gray-500">
+                ティッカーコードまたは銘柄名
+                <input
+                  value={stockEditModal.symbol}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, symbol: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full border border-[#303030] bg-[#101010] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="ASML / AMAT / Samsung"
+                  autoFocus
+                />
+              </label>
+              <label className="block text-[10px] text-gray-500">
+                銘柄名
+                <input
+                  value={stockEditModal.name}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, name: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full border border-[#303030] bg-[#101010] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="Applied Materials"
+                />
+              </label>
+              <label className="block text-[10px] text-gray-500">
+                市場
+                <input
+                  value={stockEditModal.market}
+                  onChange={(event) => setStockEditModal((current) => current ? { ...current, market: event.target.value, error: null } : current)}
+                  className="mt-1 h-9 w-full border border-[#303030] bg-[#101010] px-2 text-sm text-white outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  placeholder="US / JP / HK"
+                />
+              </label>
+              {stockEditModal.error && (
+                <div className="border border-red-900/70 bg-red-950/20 px-2 py-1.5 text-[10px] text-red-200">
+                  {stockEditModal.error}
+                </div>
+              )}
+            </div>
+            <div className="flex h-11 items-center justify-between gap-2 border-t border-[#242424] px-3">
+              <button
+                type="button"
+                onClick={() => void fillStockFromSearch()}
+                disabled={stockEditModal.loading}
+                className="h-7 border border-[#303030] bg-[#101010] px-3 text-[11px] text-gray-300 hover:bg-[#171717] hover:text-white disabled:opacity-40"
+              >
+                {stockEditModal.loading ? '検索中' : '補完'}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStockEditModal(null)}
+                  disabled={stockEditModal.loading}
+                  className="h-7 border border-[#303030] bg-[#101010] px-3 text-[11px] text-gray-300 hover:bg-[#171717] hover:text-white disabled:opacity-40"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  disabled={stockEditModal.loading}
+                  className="h-7 border border-emerald-700 bg-emerald-600 px-3 text-[11px] font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div
         data-macro-chart-panel="true"

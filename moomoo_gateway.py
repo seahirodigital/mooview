@@ -216,6 +216,52 @@ def dataframe_to_candles(symbol: str, data: Any) -> List[Dict[str, Any]]:
     return candles
 
 
+def previous_business_date(date_value: str) -> str:
+    current = datetime.strptime(date_value, "%Y-%m-%d").date()
+    current -= timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current.isoformat()
+
+
+def quote_to_fallback_candles(symbol: str, quote: Dict[str, Any]) -> List[Dict[str, Any]]:
+    price = as_float(quote.get("price"))
+    if price <= 0:
+        return []
+    quote_date = str(quote.get("dataDate", "") or datetime.now().date().isoformat())[:10]
+    reference_close = first_optional_float(
+        quote,
+        [
+            "previousClose",
+            "open",
+        ],
+    )
+    if reference_close is None or reference_close <= 0:
+        reference_close = price
+    previous_date = previous_business_date(quote_date)
+    volume = int(as_float(quote.get("volume")))
+    return [
+        {
+            "time": market_timestamp(symbol, f"{previous_date} 00:00:00"),
+            "timeStr": f"{previous_date} 00:00:00",
+            "open": reference_close,
+            "high": reference_close,
+            "low": reference_close,
+            "close": reference_close,
+            "volume": 0,
+        },
+        {
+            "time": market_timestamp(symbol, f"{quote_date} 00:00:00"),
+            "timeStr": f"{quote_date} 00:00:00",
+            "open": reference_close,
+            "high": max(reference_close, price),
+            "low": min(reference_close, price),
+            "close": price,
+            "volume": volume,
+        },
+    ]
+
+
 class MoomooQuoteService:
     def __init__(self) -> None:
         self._context: Optional[OpenQuoteContext] = None
@@ -223,6 +269,7 @@ class MoomooQuoteService:
         self._lock = threading.RLock()
         self._jp_symbols: Optional[List[Dict[str, str]]] = None
         self._jp_english_names: Optional[Dict[str, str]] = None
+        self._us_symbols: Optional[List[Dict[str, str]]] = None
         self._quote_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
     def _get_context(self) -> OpenQuoteContext:
@@ -412,11 +459,25 @@ class MoomooQuoteService:
 
         ret, data = self._get_context().get_market_snapshot(unresolved)
         if ret == RET_OK:
+            resolved = set()
             for _, row in data.iterrows():
                 quote = self._quote_from_row(row)
                 symbol = str(quote["symbol"])
                 self._quote_cache[symbol] = (time.monotonic(), quote)
                 results[symbol] = quote
+                resolved.add(symbol)
+            missing = [symbol for symbol in unresolved if symbol not in resolved]
+            for symbol in missing:
+                try:
+                    results[symbol] = self._quote_locked(symbol)
+                except Exception as error:
+                    failure = {
+                        "success": False,
+                        "symbol": symbol,
+                        "error": str(error),
+                    }
+                    self._quote_cache[symbol] = (time.monotonic(), failure)
+                    results[symbol] = failure
             return
 
         error_message = str(data)
@@ -459,6 +520,33 @@ class MoomooQuoteService:
             }
         return self._jp_english_names
 
+    def _load_us_symbols(self) -> List[Dict[str, str]]:
+        if self._us_symbols is None:
+            ret, data = self._get_context().get_stock_basicinfo(
+                Market.US,
+                SecurityType.STOCK,
+            )
+            if ret != RET_OK:
+                raise RuntimeError(str(data))
+            symbols = []
+            for _, row in data.iterrows():
+                raw_code = str(row.get("code", "")).strip()
+                if not raw_code:
+                    continue
+                symbol = normalize_symbol(raw_code)
+                code = symbol.split(".", 1)[1] if "." in symbol else symbol
+                symbols.append(
+                    {
+                        "symbol": symbol,
+                        "code": code,
+                        "name": str(row.get("name", code)),
+                        "market": "US",
+                        "category": str(row.get("stock_type", "")),
+                    }
+                )
+            self._us_symbols = symbols
+        return self._us_symbols
+
     def search(self, raw_query: str, limit: int = 8) -> Dict[str, Any]:
         query = raw_query.strip()
         if not query:
@@ -469,20 +557,34 @@ class MoomooQuoteService:
 
         with self._lock:
             jp_symbols = self._load_jp_symbols()
-            english_names = self._load_jp_english_names()
+            try:
+                english_names = self._load_jp_english_names()
+            except Exception:
+                english_names = {}
+            try:
+                us_symbols = self._load_us_symbols()
+            except Exception:
+                us_symbols = []
             candidates = []
 
-            if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", query):
-                symbol = normalize_symbol(query)
+            def add_candidate(
+                score: int,
+                symbol: str,
+                code: str,
+                name: str,
+                name_en: str,
+                market: str,
+                category: str,
+            ) -> None:
                 candidates.append(
                     {
-                        "score": -1,
+                        "score": score,
                         "symbol": symbol,
-                        "code": symbol.split(".", 1)[1],
-                        "name": query.upper(),
-                        "nameEn": query.upper(),
-                        "market": symbol.split(".", 1)[0],
-                        "category": "DIRECT",
+                        "code": code,
+                        "name": name,
+                        "nameEn": name_en,
+                        "market": market,
+                        "category": category,
                     }
                 )
 
@@ -499,7 +601,9 @@ class MoomooQuoteService:
                 ]
 
                 score = None
-                if normalized_query in searchable_values:
+                if normalized_query in searchable_values[:2]:
+                    score = -2
+                elif normalized_query in searchable_values:
                     score = 0
                 elif any(
                     value.startswith(normalized_query)
@@ -510,17 +614,62 @@ class MoomooQuoteService:
                     score = 2
 
                 if score is not None:
-                    candidates.append(
-                        {
-                            "score": score,
-                            "symbol": symbol,
-                            "code": code,
-                            "name": japanese_name,
-                            "nameEn": english_name,
-                            "market": "JP",
-                            "category": str(item.get("category", "")),
-                        }
+                    add_candidate(
+                        score,
+                        symbol,
+                        code,
+                        japanese_name,
+                        english_name,
+                        "JP",
+                        str(item.get("category", "")),
                     )
+
+            for item in us_symbols:
+                symbol = str(item["symbol"])
+                code = str(item["code"])
+                name = str(item["name"])
+                searchable_values = [
+                    normalize_search_text(code),
+                    normalize_search_text(symbol),
+                    normalize_search_text(name),
+                ]
+
+                score = None
+                if normalized_query in searchable_values[:2]:
+                    score = -2
+                elif normalized_query in searchable_values:
+                    score = 0
+                elif any(
+                    value.startswith(normalized_query)
+                    for value in searchable_values
+                ):
+                    score = 1
+                elif any(normalized_query in value for value in searchable_values):
+                    score = 2
+
+                if score is not None:
+                    add_candidate(
+                        score,
+                        symbol,
+                        code,
+                        name,
+                        name,
+                        "US",
+                        str(item.get("category", "")),
+                    )
+
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", query):
+                symbol = normalize_symbol(query)
+                code = symbol.split(".", 1)[1] if "." in symbol else symbol
+                add_candidate(
+                    3,
+                    symbol,
+                    code,
+                    query.upper(),
+                    query.upper(),
+                    symbol.split(".", 1)[0] if "." in symbol else "US",
+                    "DIRECT",
+                )
 
             candidates.sort(
                 key=lambda item: (
@@ -530,24 +679,15 @@ class MoomooQuoteService:
                 )
             )
 
-            if not candidates and re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9._-]*",
-                query,
-            ):
-                symbol = normalize_symbol(query)
-                candidates.append(
-                    {
-                        "score": 0,
-                        "symbol": symbol,
-                        "code": symbol.split(".", 1)[1],
-                        "name": query.upper(),
-                        "nameEn": query.upper(),
-                        "market": symbol.split(".", 1)[0],
-                        "category": "",
-                    }
-                )
-
-            trimmed = candidates[:result_limit]
+            deduped = []
+            seen_symbols = set()
+            for item in candidates:
+                symbol = str(item["symbol"])
+                if symbol in seen_symbols:
+                    continue
+                seen_symbols.add(symbol)
+                deduped.append(item)
+            trimmed = deduped[:result_limit]
             for item in trimmed:
                 item.pop("score", None)
 
@@ -678,6 +818,19 @@ class MoomooQuoteService:
                 }
             except Exception as error:
                 self._reset_context_on_connection_error(error)
+                try:
+                    quote = self._quote_locked(symbol)
+                    candles = quote_to_fallback_candles(symbol, quote)
+                    if candles:
+                        return {
+                            "success": True,
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "source": "quote-fallback",
+                            "candles": candles,
+                        }
+                except Exception:
+                    pass
                 if history_error:
                     raise RuntimeError(
                         f"{str(error)}; history fallback failed: {str(history_error)}"

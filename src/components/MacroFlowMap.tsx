@@ -274,9 +274,9 @@ const FLOW_START_DATE = '2026-06-10';
 const FLOW_END_DATE = getTodayDateValue();
 const FLOW_MIN_DATE = getDateValueDaysAgo(365);
 const DEFAULT_RANGE_DAYS = 5;
-const FLOW_DEFAULT_START_DATE = getDateValueDaysAgo(DEFAULT_RANGE_DAYS);
+const FLOW_DEFAULT_START_DATE = getBusinessDateValueDaysAgo(DEFAULT_RANGE_DAYS);
 const FLOW_EVENT_DATE = '2026-06-10';
-const CALENDAR_WEEK_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const CALENDAR_WEEK_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
 const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
@@ -466,14 +466,100 @@ function getDateValueDaysAgo(days: number): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
+function getDateValueDaysBefore(baseDate: string, days: number): string {
+  const date = dateFromValue(baseDate);
+  date.setDate(date.getDate() - days);
+  return formatDateValue(date);
+}
+
 function formatDateValue(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function addDateDays(value: string, days: number): string {
+  const date = dateFromValue(value);
+  date.setDate(date.getDate() + days);
+  return formatDateValue(date);
+}
+
+function isBusinessDateValue(value: string): boolean {
+  const day = dateFromValue(value).getDay();
+  return day >= 1 && day <= 5;
 }
 
 function clampDateValue(value: string): string {
   if (value < FLOW_MIN_DATE) return FLOW_MIN_DATE;
   if (value > FLOW_END_DATE) return FLOW_END_DATE;
   return value;
+}
+
+function clampBusinessDateValue(value: string): string {
+  const clamped = clampDateValue(value);
+  if (isBusinessDateValue(clamped)) return clamped;
+
+  let previous = clamped;
+  for (let index = 0; index < 7; index += 1) {
+    previous = addDateDays(previous, -1);
+    if (previous >= FLOW_MIN_DATE && isBusinessDateValue(previous)) return previous;
+  }
+
+  let next = clamped;
+  for (let index = 0; index < 7; index += 1) {
+    next = addDateDays(next, 1);
+    if (next <= FLOW_END_DATE && isBusinessDateValue(next)) return next;
+  }
+
+  return clamped;
+}
+
+function addBusinessDays(value: string, days: number): string {
+  if (days === 0) return clampBusinessDateValue(value);
+  const direction = days > 0 ? 1 : -1;
+  let remaining = Math.abs(days);
+  let cursor = clampBusinessDateValue(value);
+  let guard = 0;
+  while (remaining > 0 && guard < 1000) {
+    cursor = addDateDays(cursor, direction);
+    if (isBusinessDateValue(cursor)) remaining -= 1;
+    guard += 1;
+  }
+  return clampBusinessDateValue(cursor);
+}
+
+function getBusinessDateValueDaysAgo(days: number, baseDate = FLOW_END_DATE): string {
+  if (days <= 1) return clampBusinessDateValue(baseDate);
+  return addBusinessDays(baseDate, -(days - 1));
+}
+
+function getBusinessWindowDays(startDate: string, endDate: string): number {
+  const safeStart = clampBusinessDateValue(startDate);
+  const safeEnd = clampBusinessDateValue(endDate);
+  if (safeStart === safeEnd) return 0;
+  const direction = safeStart < safeEnd ? 1 : -1;
+  let cursor = safeStart;
+  let count = isBusinessDateValue(cursor) ? direction : 0;
+  let guard = 0;
+  while (cursor !== safeEnd && guard < 1000) {
+    cursor = addDateDays(cursor, direction);
+    if (isBusinessDateValue(cursor)) count += direction;
+    guard += 1;
+  }
+  return Math.abs(count);
+}
+
+function getBusinessRangeDays(startDate: string, endDate: string): number {
+  if (startDate === endDate) return 0;
+  const direction = startDate < endDate ? 1 : -1;
+  let cursor = clampBusinessDateValue(startDate);
+  const target = clampBusinessDateValue(endDate);
+  let count = 0;
+  let guard = 0;
+  while (cursor !== target && guard < 1000) {
+    cursor = addDateDays(cursor, direction);
+    if (isBusinessDateValue(cursor)) count += direction;
+    guard += 1;
+  }
+  return count;
 }
 
 function shiftCalendarMonth(month: string, delta: number): string {
@@ -490,7 +576,8 @@ function formatCalendarMonthLabel(month: string): string {
 function buildCalendarDays(month: string): Array<{ date: string; inMonth: boolean }> {
   const firstDay = new Date(`${month}-01T12:00:00`);
   const start = new Date(firstDay);
-  start.setDate(firstDay.getDate() - firstDay.getDay());
+  const mondayOffset = (firstDay.getDay() + 6) % 7;
+  start.setDate(firstDay.getDate() - mondayOffset);
   return Array.from({ length: 42 }, (_, index) => {
     const date = new Date(start);
     date.setDate(start.getDate() + index);
@@ -1255,26 +1342,51 @@ function getDateOffset(value: string): number {
   return Math.round((dateFromValue(value).getTime() - dateFromValue(FLOW_START_DATE).getTime()) / 86_400_000);
 }
 
-function getTimelineDateOffset(value: string): number {
-  return Math.round((dateFromValue(value).getTime() - dateFromValue(FLOW_MIN_DATE).getTime()) / 86_400_000);
+function getTimelineDateOffset(value: string, startDate = FLOW_MIN_DATE): number {
+  return Math.round((dateFromValue(value).getTime() - dateFromValue(startDate).getTime()) / 86_400_000);
 }
 
-function getTotalRangeDays(): number {
-  return Math.max(1, getTimelineDateOffset(FLOW_END_DATE));
+function getBusinessTimelineDateOffset(value: string, startDate = FLOW_MIN_DATE): number {
+  return getBusinessRangeDays(startDate, value);
 }
 
-function dateFromOffset(offset: number): string {
-  const date = dateFromValue(FLOW_MIN_DATE);
-  date.setDate(date.getDate() + Math.round(clamp(offset, 0, getTotalRangeDays())));
+function getTotalRangeDays(startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): number {
+  return Math.max(1, getTimelineDateOffset(endDate, startDate));
+}
+
+function getTotalBusinessRangeDays(startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): number {
+  return Math.max(1, getBusinessTimelineDateOffset(endDate, startDate));
+}
+
+function dateFromOffset(offset: number, startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): string {
+  const date = dateFromValue(startDate);
+  date.setDate(date.getDate() + Math.round(clamp(offset, 0, getTotalRangeDays(startDate, endDate))));
   return formatDateValue(date);
 }
 
-function getRangeProgressPct(value: string): number {
-  return (clamp(getTimelineDateOffset(value), 0, getTotalRangeDays()) / getTotalRangeDays()) * 100;
+function businessDateFromOffset(offset: number, startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): string {
+  const totalDays = getTotalBusinessRangeDays(startDate, endDate);
+  return addBusinessDays(startDate, Math.round(clamp(offset, 0, totalDays)));
+}
+
+function getRangeProgressPct(value: string, startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): number {
+  const totalDays = getTotalRangeDays(startDate, endDate);
+  return (clamp(getTimelineDateOffset(value, startDate), 0, totalDays) / totalDays) * 100;
+}
+
+function getBusinessRangeProgressPct(value: string, startDate = FLOW_MIN_DATE, endDate = FLOW_END_DATE): number {
+  const totalDays = getTotalBusinessRangeDays(startDate, endDate);
+  return (clamp(getBusinessTimelineDateOffset(value, startDate), 0, totalDays) / totalDays) * 100;
 }
 
 function getRangeWindowDays(startDate: string, endDate: string): number {
-  return Math.max(0, Math.round((dateFromValue(endDate).getTime() - dateFromValue(startDate).getTime()) / 86_400_000));
+  return getBusinessWindowDays(startDate, endDate);
+}
+
+function getSliderStartDate(rangeStartDate: string): string {
+  const defaultSliderStart = getBusinessDateValueDaysAgo(DEFAULT_RANGE_DAYS * 2, FLOW_END_DATE);
+  const startDate = rangeStartDate < defaultSliderStart ? rangeStartDate : defaultSliderStart;
+  return clampBusinessDateValue(startDate < FLOW_MIN_DATE ? FLOW_MIN_DATE : startDate);
 }
 
 function getHeatTone(value: number, selected = false): { fill: string; border: string; text: string; stroke: string } {
@@ -1417,6 +1529,38 @@ function getCandlesForRange(candles: Candle[] | undefined, startDate: string, en
   });
   if (ranged.length >= 2) return ranged;
   return candles.slice(-Math.min(24, candles.length));
+}
+
+function getRangeCandleEndpoints(candles: Candle[] | undefined, startDate: string, endDate: string): { start: Candle; end: Candle } | null {
+  if (!candles || candles.length < 2) return null;
+  const sortedCandles = [...candles]
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+    .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+  if (sortedCandles.length < 2) return null;
+  const startCandle = sortedCandles.find((candle) => getCandleDateValue(candle) >= startDate)
+    || [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= startDate)
+    || sortedCandles[0];
+  const endCandle = [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= endDate)
+    || sortedCandles.find((candle) => getCandleDateValue(candle) >= endDate)
+    || sortedCandles[sortedCandles.length - 1];
+  if (!startCandle || !endCandle || startCandle === endCandle) return null;
+  return { start: startCandle, end: endCandle };
+}
+
+function getRangeChangePctFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number | null {
+  const endpoints = getRangeCandleEndpoints(candles, startDate, endDate);
+  if (!endpoints) return null;
+  return ((endpoints.end.close - endpoints.start.close) / Math.max(0.0001, endpoints.start.close)) * 100;
+}
+
+function getRangeEndPriceFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number | null {
+  const endpoints = getRangeCandleEndpoints(candles, startDate, endDate);
+  return endpoints?.end.close ?? null;
+}
+
+function hasUsableRangeCandles(candles: Candle[] | undefined, startDate: string, endDate: string): boolean {
+  if (!candles || candles.length < 2) return false;
+  return getRangeCandleEndpoints(candles, startDate, endDate) !== null;
 }
 
 function createRollupCandles(candleSets: Array<Candle[] | undefined>, startDate: string, endDate: string): Candle[] {
@@ -1614,6 +1758,7 @@ export function MacroFlowMap({
   onChartSymbolsChange,
 }: MacroFlowMapProps) {
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
+  const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const [macroScopeOptions, setMacroScopeOptions] = useState<MacroScopeOption[]>(() => readSyncedMacroScopeOptions());
   const [rangeStartDate, setRangeStartDate] = useState(FLOW_DEFAULT_START_DATE);
   const [rangeEndDate, setRangeEndDate] = useState(FLOW_END_DATE);
@@ -1644,6 +1789,10 @@ export function MacroFlowMap({
   });
   const [regionalOrder, setRegionalOrder] = useState(() => REGIONAL_MARKET_DEFS.map((region) => region.id));
   const [draggingRegionalId, setDraggingRegionalId] = useState<string | null>(null);
+  const [sectorEtfOrder, setSectorEtfOrder] = useState<string[]>([]);
+  const [draggingSectorEtfId, setDraggingSectorEtfId] = useState<string | null>(null);
+  const [draggingStockSymbol, setDraggingStockSymbol] = useState<string | null>(null);
+  const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
   const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>({});
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
   const basketDbImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -1652,14 +1801,16 @@ export function MacroFlowMap({
   const [basketDbExportMenuOpen, setBasketDbExportMenuOpen] = useState(false);
 
   const selectedDate = rangeEndDate;
-  const timelineStartIndex = clamp(getTimelineDateOffset(rangeStartDate), 0, getTotalRangeDays());
-  const timelineEndIndex = clamp(getTimelineDateOffset(rangeEndDate), 0, getTotalRangeDays());
-  const rangeStartIndex = clamp(getDateOffset(rangeStartDate), 0, getTotalRangeDays());
-  const rangeEndIndex = clamp(getDateOffset(rangeEndDate), 0, getTotalRangeDays());
+  const sliderStartDate = getSliderStartDate(rangeStartDate);
+  const sliderTotalDays = getTotalBusinessRangeDays(sliderStartDate, FLOW_END_DATE);
+  const timelineStartIndex = clamp(getBusinessTimelineDateOffset(rangeStartDate, sliderStartDate), 0, sliderTotalDays);
+  const timelineEndIndex = clamp(getBusinessTimelineDateOffset(rangeEndDate, sliderStartDate), 0, sliderTotalDays);
   const activeWindowDays = getRangeWindowDays(rangeStartDate, rangeEndDate);
   const cumulativeDays = activeWindowDays;
-  const rangeStartPct = getRangeProgressPct(rangeStartDate);
-  const rangeEndPct = getRangeProgressPct(rangeEndDate);
+  const rangeStartIndex = 0;
+  const rangeEndIndex = Math.max(1, activeWindowDays);
+  const rangeStartPct = getBusinessRangeProgressPct(rangeStartDate, sliderStartDate, FLOW_END_DATE);
+  const rangeEndPct = getBusinessRangeProgressPct(rangeEndDate, sliderStartDate, FLOW_END_DATE);
   const [columnWidths, setColumnWidths] = useState<Record<FlowColumnKey, number>>({
     regional: FLOW_NODE_DEFAULT_WIDTH.regional,
     sectors: FLOW_NODE_DEFAULT_WIDTH.sectors,
@@ -1838,25 +1989,35 @@ export function MacroFlowMap({
     });
   }, []);
 
+  useEffect(() => {
+    setSectorEtfOrder((current) => {
+      const ids = sectorEtfDefs.map((item) => item.id);
+      const knownIds = new Set(ids);
+      const preserved = current.filter((id) => knownIds.has(id));
+      const additions = ids.filter((id) => !preserved.includes(id));
+      if (preserved.length === current.length && additions.length === 0) return current;
+      return [...preserved, ...additions];
+    });
+  }, [sectorEtfDefs]);
+
   const metrics = useMemo<{
     baskets: BasketMetric[];
     sectors: SectorMetric[];
     stocks: StockMetric[];
   }>(() => {
-    const isSingleDayWindow = rangeStartIndex === rangeEndIndex;
     const initialBasketMetrics = baskets.map((basket, basketIndex): BasketMetric => {
       const parentSectorName = getBasketParentSectorName(basket);
       const parentSectorId = getBasketParentSectorId(basket);
       const stockInputs = basket.stocks.map((stock) => {
-        const live = quoteMap.get(normalizeSymbol(stock.symbol));
-        const hasLiveQuote = Boolean(live);
+        const normalizedSymbol = normalizeSymbol(stock.symbol);
+        const live = quoteMap.get(normalizedSymbol);
+        const rangeCandles = sparklineCache[normalizedSymbol];
+        const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
         const baseChange = live?.changePct ?? 0;
         const marketCap = live?.marketCap ?? stock.marketCap;
-        const changePct = hasLiveQuote
-          ? isSingleDayWindow
-            ? baseChange
-            : createLayerReturnPct(baseChange, stock.symbol, rangeStartIndex, rangeEndIndex, 'stock')
-          : 0;
+        const changePct = rangeChangePct ?? (live ? baseChange : 0);
         const flowRate = createFlowRate(changePct, stock.symbol, rangeStartIndex, rangeEndIndex);
         const nodeVolume = createNodeVolume(marketCap, flowRate);
         const volumeMultiplier = createVolumeMultiplier(stock.symbol, rangeStartIndex, rangeEndIndex);
@@ -1864,7 +2025,7 @@ export function MacroFlowMap({
         return {
           stock,
           hasLiveQuote,
-          price: live?.price ?? null,
+          price: rangeEndPrice ?? live?.price ?? null,
           marketCap,
           changePct,
           nodeVolume,
@@ -1882,11 +2043,7 @@ export function MacroFlowMap({
       const dataCoverage = stockInputs.length > 0
         ? stockInputs.filter((input) => input.hasLiveQuote).length / stockInputs.length
         : 0;
-      const basketChangePct = dataCoverage > 0
-        ? isSingleDayWindow
-          ? weightedStockChange
-          : createLayerReturnPct(weightedStockChange, basket.id, rangeStartIndex, rangeEndIndex, 'basket')
-        : 0;
+      const basketChangePct = dataCoverage > 0 ? weightedStockChange : 0;
       const basketFlowRate = dataCoverage > 0 ? createFlowRate(basketChangePct, basket.id, rangeStartIndex, rangeEndIndex) : 0;
       const nodeVolume = createNodeVolume(baseVolume, basketFlowRate);
       const stockMetrics = stockInputs.map(({ stock, hasLiveQuote, price, marketCap, changePct, nodeVolume: stockNodeVolume, volumeMultiplier, momentum }): StockMetric => {
@@ -2031,7 +2188,7 @@ export function MacroFlowMap({
       sectors,
       stocks: allocatedBasketMetrics.flatMap((basket) => basket.stockMetrics),
     };
-  }, [baskets, quoteMap, rangeEndIndex, rangeStartIndex]);
+  }, [baskets, quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, sparklineCache]);
 
   const filteredMetrics = useMemo<{
     baskets: BasketMetric[];
@@ -2160,9 +2317,18 @@ export function MacroFlowMap({
   }, [activeSymbol, sectorEtfDefs, stockOptions]);
 
   useEffect(() => {
-    const symbols = Array.from(new Set([activeSymbol, ...visibleStocks.slice(0, 6).map((stock) => stock.symbol)].map(normalizeSymbol).filter(Boolean)));
+    const activeNormalized = normalizeSymbol(activeSymbol);
+    setChartComparisonSymbols((current) => current.filter((symbol) => normalizeSymbol(symbol) !== activeNormalized));
+  }, [activeSymbol]);
+
+  useEffect(() => {
+    const symbols = Array.from(new Set([
+      activeSymbol,
+      ...chartComparisonSymbols,
+      ...visibleStocks.slice(0, 6).map((stock) => stock.symbol),
+    ].map(normalizeSymbol).filter(Boolean)));
     onChartSymbolsChange(symbols);
-  }, [activeSymbol, onChartSymbolsChange, visibleStocks]);
+  }, [activeSymbol, chartComparisonSymbols, onChartSymbolsChange, visibleStocks]);
 
   const topBasket = orderedBaskets[0];
   const topSector = orderedSectors[0];
@@ -2176,22 +2342,25 @@ export function MacroFlowMap({
   const flowStocks = useMemo(() => visibleStocks.slice(0, selectedBasketId ? 24 : 18), [selectedBasketId, visibleStocks]);
   const visibleStockKeys = useMemo(() => new Set(flowStocks.map((stock) => `${stock.basketId}:${stock.symbol}`)), [flowStocks]);
   const sectorEtfRows = useMemo<SectorEtfMetric[]>(() => {
-    const isSingleDayWindow = rangeStartIndex === rangeEndIndex;
-    return sectorEtfDefs.map((item) => {
-      const live = quoteMap.get(normalizeSymbol(item.symbol));
-      const hasLiveQuote = Boolean(live);
+    const definitionMap = new Map(sectorEtfDefs.map((item) => [item.id, item]));
+    const orderedDefinitions = (sectorEtfOrder.length > 0 ? sectorEtfOrder : sectorEtfDefs.map((item) => item.id))
+      .map((id) => definitionMap.get(id))
+      .filter((item): item is typeof sectorEtfDefs[number] => Boolean(item));
+    return orderedDefinitions.map((item) => {
+      const normalizedSymbol = normalizeSymbol(item.symbol);
+      const live = quoteMap.get(normalizedSymbol);
+      const rangeCandles = sparklineCache[normalizedSymbol];
+      const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+      const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+      const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
       const baseChange = live?.changePct ?? 0;
-      const changePct = hasLiveQuote
-        ? isSingleDayWindow
-          ? baseChange
-          : createLayerReturnPct(baseChange, item.symbol, rangeStartIndex, rangeEndIndex, 'sector')
-        : 0;
+      const changePct = rangeChangePct ?? (live ? baseChange : 0);
       return {
         id: item.id,
         label: item.label,
         displaySymbol: item.displaySymbol,
         symbol: item.symbol,
-        price: live?.price ?? null,
+        price: rangeEndPrice ?? live?.price ?? null,
         changePct,
         hasLiveQuote,
         nodeVolume: hasLiveQuote
@@ -2199,28 +2368,27 @@ export function MacroFlowMap({
           : 0,
       };
     });
-  }, [quoteMap, rangeEndIndex, rangeStartIndex, sectorEtfDefs]);
+  }, [quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, sectorEtfDefs, sectorEtfOrder, sparklineCache]);
   const regionalRows = useMemo<RegionalMarketMetric[]>(() => {
-    const isSingleDayWindow = rangeStartIndex === rangeEndIndex;
     const definitionMap = new Map(REGIONAL_MARKET_DEFS.map((region) => [region.id, region]));
     return regionalOrder
       .map((id) => definitionMap.get(id))
       .filter((region): region is typeof REGIONAL_MARKET_DEFS[number] => Boolean(region))
       .map((region) => {
-        const live = quoteMap.get(normalizeSymbol(region.symbol));
-        const hasLiveQuote = Boolean(live);
+        const normalizedSymbol = normalizeSymbol(region.symbol);
+        const live = quoteMap.get(normalizedSymbol);
+        const rangeCandles = sparklineCache[normalizedSymbol];
+        const rangeChangePct = getRangeChangePctFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
+        const hasLiveQuote = Boolean(live) || rangeChangePct !== null;
         const baseChange = live?.changePct ?? 0;
-        const changePct = hasLiveQuote
-          ? isSingleDayWindow
-            ? baseChange
-            : createLayerReturnPct(baseChange, region.symbol, rangeStartIndex, rangeEndIndex, 'sector')
-          : 0;
+        const changePct = rangeChangePct ?? (live ? baseChange : 0);
         return {
           id: region.id,
           label: REGIONAL_LABELS[region.id] || region.label,
           displaySymbol: region.displaySymbol,
           symbol: region.symbol,
-          price: live?.price ?? null,
+          price: rangeEndPrice ?? live?.price ?? null,
           changePct,
           hasLiveQuote,
           nodeVolume: hasLiveQuote
@@ -2228,7 +2396,7 @@ export function MacroFlowMap({
             : 0,
         };
       });
-  }, [quoteMap, rangeEndIndex, rangeStartIndex, regionalOrder]);
+  }, [quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, regionalOrder, sparklineCache]);
   const flowLayoutData = useMemo<{ nodes: FlowNode[]; sectionHeaders: FlowSectionHeader[] }>(() => {
     const maxRegionalVolume = Math.max(
       1,
@@ -2368,7 +2536,11 @@ export function MacroFlowMap({
   const maxLinkFlow = Math.max(1, ...flowLinks.map((link) => link.flowValue));
 
   useEffect(() => {
-    const missingSymbols = sparklineSymbols.filter((symbol) => !Object.prototype.hasOwnProperty.call(sparklineCache, symbol));
+    const missingSymbols = sparklineSymbols.filter((symbol) => {
+      const fetchKey = `${symbol}:${rangeStartDate}:${rangeEndDate}`;
+      return !sparklineFetchKeysRef.current.has(fetchKey)
+        && !hasUsableRangeCandles(sparklineCache[symbol], rangeStartDate, rangeEndDate);
+    });
     if (missingSymbols.length === 0) return undefined;
     let cancelled = false;
 
@@ -2378,6 +2550,7 @@ export function MacroFlowMap({
       for (let index = 0; index < missingSymbols.length; index += batchSize) {
         const batch = missingSymbols.slice(index, index + batchSize);
         const results = await Promise.all(batch.map(async (symbol) => {
+          sparklineFetchKeysRef.current.add(`${symbol}:${rangeStartDate}:${rangeEndDate}`);
           try {
             const response = await fetch('/api/moomoo/kline', {
               method: 'POST',
@@ -2407,7 +2580,7 @@ export function MacroFlowMap({
     return () => {
       cancelled = true;
     };
-  }, [sparklineCache, sparklineSymbols]);
+  }, [rangeEndDate, rangeStartDate, sparklineCache, sparklineSymbols]);
 
   const flowSvgHeight = Math.max(
     460,
@@ -2628,6 +2801,52 @@ export function MacroFlowMap({
     setSidePanelMode('chart');
   };
 
+  const addChartComparisonSymbols = (symbols: string[]) => {
+    const activeNormalized = normalizeSymbol(activeSymbol);
+    setChartComparisonSymbols((current) => {
+      const next = [...current];
+      const seen = new Set(next.map(normalizeSymbol));
+      symbols.map(normalizeSymbol).filter(Boolean).forEach((symbol) => {
+        if (symbol === activeNormalized || seen.has(symbol)) return;
+        next.push(symbol);
+        seen.add(symbol);
+      });
+      return next;
+    });
+  };
+
+  const getDroppedStockSymbols = (event: React.DragEvent<HTMLElement>): string[] => {
+    const customPayload = event.dataTransfer.getData('application/x-mooview-symbols');
+    if (customPayload) {
+      try {
+        const parsed = JSON.parse(customPayload) as unknown;
+        if (Array.isArray(parsed)) return parsed.map(String).map(normalizeSymbol).filter(Boolean);
+      } catch {
+        // テキスト転送にフォールバックする。
+      }
+    }
+    const plain = event.dataTransfer.getData('text/plain');
+    return plain.split(/[\s,]+/).map(normalizeSymbol).filter(Boolean);
+  };
+
+  const beginStockDrag = (event: React.DragEvent<HTMLElement>, symbol: string) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    setDraggingStockSymbol(normalizedSymbol);
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('text/plain', normalizedSymbol);
+    event.dataTransfer.setData('application/x-mooview-symbols', JSON.stringify([normalizedSymbol]));
+  };
+
+  const dropStockOnChart = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const symbols = getDroppedStockSymbols(event);
+    addChartComparisonSymbols(symbols);
+    setDraggingStockSymbol(null);
+    setSidePanelOpen(true);
+    setSidePanelMode('chart');
+  };
+
   const selectSector = (sectorId: string) => {
     setSelectedStockKey(null);
     setSelectedSectorId((current) => {
@@ -2651,12 +2870,14 @@ export function MacroFlowMap({
   };
 
   const updateRangeDate = (handle: RangeHandle, nextDate: string) => {
-    const safeDate = clampDateValue(nextDate);
+    const safeDate = clampBusinessDateValue(nextDate);
     if (handle === 'start') {
-      setRangeStartDate(safeDate <= rangeEndDate ? safeDate : rangeEndDate);
+      const safeEndDate = clampBusinessDateValue(rangeEndDate);
+      setRangeStartDate(safeDate <= safeEndDate ? safeDate : safeEndDate);
       return;
     }
-    setRangeEndDate(safeDate >= rangeStartDate ? safeDate : rangeStartDate);
+    const safeStartDate = clampBusinessDateValue(rangeStartDate);
+    setRangeEndDate(safeDate >= safeStartDate ? safeDate : safeStartDate);
   };
 
   const updateRangeFromClientX = (clientX: number, handle: RangeHandle) => {
@@ -2664,14 +2885,16 @@ export function MacroFlowMap({
     if (!track) return;
     const rect = track.getBoundingClientRect();
     const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-    updateRangeDate(handle, dateFromOffset(Math.round(ratio * getTotalRangeDays())));
+    updateRangeDate(handle, businessDateFromOffset(Math.round(ratio * sliderTotalDays), sliderStartDate, FLOW_END_DATE));
   };
 
   const moveDate = (direction: -1 | 1) => {
-    const windowDays = Math.max(0, timelineEndIndex - timelineStartIndex);
-    const nextStart = clamp(timelineStartIndex + direction, 0, getTotalRangeDays() - windowDays);
-    setRangeStartDate(dateFromOffset(nextStart));
-    setRangeEndDate(dateFromOffset(nextStart + windowDays));
+    const nextStartDate = clampBusinessDateValue(addBusinessDays(rangeStartDate, direction));
+    const nextEndDate = clampBusinessDateValue(addBusinessDays(rangeEndDate, direction));
+    if (nextStartDate <= nextEndDate) {
+      setRangeStartDate(nextStartDate);
+      setRangeEndDate(nextEndDate);
+    }
   };
 
   const handleCalendarSelect = (date: string) => {
@@ -2689,6 +2912,8 @@ export function MacroFlowMap({
     setSelectedSectorId(null);
     setSelectedBasketId(null);
     setSelectedStockKey(null);
+    setChartComparisonSymbols([]);
+    setDraggingStockSymbol(null);
   };
 
   useEffect(() => {
@@ -2703,7 +2928,7 @@ export function MacroFlowMap({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [dragRangeHandle, rangeEndDate, rangeStartDate]);
+  }, [dragRangeHandle, rangeEndDate, rangeStartDate, sliderStartDate, sliderTotalDays]);
 
   useEffect(() => {
     if (!columnResize) return undefined;
@@ -2757,6 +2982,7 @@ export function MacroFlowMap({
       const target = event.target as HTMLElement | null;
       if (!target) return;
       if (target.closest('[data-macro-chart-panel="true"]') || target.closest('[data-macro-side-nav="true"]')) return;
+      if (target.closest('[data-macro-stock-card="true"]')) return;
       setSidePanelOpen(false);
     };
     window.addEventListener('pointerdown', handlePointerDown);
@@ -2896,7 +3122,7 @@ export function MacroFlowMap({
                 if (!track) return;
                 const rect = track.getBoundingClientRect();
                 const ratio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-                const offset = Math.round(ratio * getTotalRangeDays());
+                const offset = Math.round(ratio * sliderTotalDays);
                 const handle: RangeHandle = Math.abs(offset - timelineStartIndex) <= Math.abs(offset - timelineEndIndex) ? 'start' : 'end';
                 setDragRangeHandle(handle);
                 updateRangeFromClientX(event.clientX, handle);
@@ -2915,7 +3141,7 @@ export function MacroFlowMap({
                   setDragRangeHandle('start');
                   updateRangeFromClientX(event.clientX, 'start');
                 }}
-                className="absolute top-[-1px] h-3.5 w-3.5 -translate-x-1/2 rounded-full border border-emerald-300 bg-[#050505]"
+                className="absolute top-[-2px] h-4 w-4 -translate-x-1/2 rounded-full border border-emerald-300 bg-[#050505] shadow-[0_0_0_2px_rgba(5,5,5,0.9)]"
                 style={{ left: `${rangeStartPct}%` }}
                 title={`開始日 ${rangeStartDate}`}
                 aria-label="開始日ハンドル"
@@ -2928,7 +3154,7 @@ export function MacroFlowMap({
                   setDragRangeHandle('end');
                   updateRangeFromClientX(event.clientX, 'end');
                 }}
-                className="absolute top-[-1px] h-3.5 w-3.5 -translate-x-1/2 rounded-full border border-emerald-300 bg-[#050505]"
+                className="absolute top-[-2px] h-4 w-4 -translate-x-1/2 rounded-full border border-emerald-300 bg-[#050505] shadow-[0_0_0_2px_rgba(5,5,5,0.9)]"
                 style={{ left: `${rangeEndPct}%` }}
                 title={`終了日 ${rangeEndDate}`}
                 aria-label="終了日ハンドル"
@@ -2957,20 +3183,20 @@ export function MacroFlowMap({
                   {calendarDays.map((day) => {
                     const selectedStart = day.date === rangeStartDate;
                     const selectedEnd = day.date === rangeEndDate;
-                    const outOfRange = day.date < FLOW_MIN_DATE || day.date > FLOW_END_DATE;
+                    const disabledDay = day.date < FLOW_MIN_DATE || day.date > FLOW_END_DATE || !isBusinessDateValue(day.date);
                     return (
                       <button
                         key={day.date}
                         type="button"
                         onClick={() => handleCalendarSelect(day.date)}
-                        disabled={outOfRange}
+                        disabled={disabledDay}
                         className={`h-7 transition ${
                           selectedStart || selectedEnd
                             ? 'bg-emerald-500 text-black font-bold'
                             : day.inMonth
                               ? 'text-gray-100 hover:bg-[#111111]'
                               : 'text-gray-600 hover:text-gray-300 hover:bg-[#111111]'
-                        } ${outOfRange ? 'opacity-30 cursor-not-allowed' : ''}`}
+                        } ${disabledDay ? 'opacity-25 cursor-not-allowed hover:bg-transparent hover:text-gray-600' : ''}`}
                       >
                         {Number(day.date.slice(8, 10))}
                       </button>
@@ -3252,6 +3478,7 @@ export function MacroFlowMap({
                       <button
                         key={`flow-sector-etf-${item.id}`}
                         type="button"
+                        draggable
                         onClick={() => {
                           setActiveSymbol(item.symbol);
                           setSelectedSectorId(null);
@@ -3266,10 +3493,28 @@ export function MacroFlowMap({
                           setSidePanelOpen(true);
                           setSidePanelMode('chart');
                         }}
+                        onDragStart={(event) => {
+                          setDraggingSectorEtfId(item.id);
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData('text/plain', item.id);
+                        }}
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          const movingId = draggingSectorEtfId || event.dataTransfer.getData('text/plain');
+                          if (!movingId || movingId === item.id) return;
+                          setSectorEtfOrder((current) => moveIdBefore(current, movingId, item.id));
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          setDraggingSectorEtfId(null);
+                        }}
+                        onDragEnd={() => setDraggingSectorEtfId(null)}
                         title={`${item.label} / ${item.displaySymbol}\nPrice ${formatNodePrice(item.symbol, item.price)}\nChange ${formatPctMaybe(item.changePct, item.hasLiveQuote)}\nVolume ${formatFlow(item.nodeVolume)}`}
                         className={`absolute overflow-hidden border px-1 py-0.5 text-left transition ${
                           selected
                             ? 'text-white shadow-[0_0_14px_rgba(22,163,74,0.16)]'
+                            : draggingSectorEtfId === item.id
+                              ? 'text-gray-300 opacity-70'
                             : 'text-gray-200 hover:border-[#505050]'
                         }`}
                         style={{
@@ -3490,6 +3735,8 @@ export function MacroFlowMap({
                       <button
                         key={`flow-stock-${stock.basketId}-${stock.symbol}`}
                         type="button"
+                        data-macro-stock-card="true"
+                        draggable
                         onClick={() => {
                           setActiveSymbol(stock.symbol);
                           setSelectedStockKey(stockKey);
@@ -3497,10 +3744,14 @@ export function MacroFlowMap({
                           setSelectedBasketId(stock.basketId);
                         }}
                         onDoubleClick={() => openChartForStock(stock)}
+                        onDragStart={(event) => beginStockDrag(event, stock.symbol)}
+                        onDragEnd={() => setDraggingStockSymbol(null)}
                         title={`${stock.symbol} ${stock.name}\nVol ${formatFlow(stock.nodeVolume)}\nFlow ${formatFlow(stock.flowValue)}\nAlpha ${formatPctMaybe(stock.alpha, stock.hasLiveQuote)}\nMomentum ${stock.momentum.toFixed(2)}`}
                         className={`absolute overflow-hidden border px-1 py-0.5 text-left transition ${
                           selected
                             ? 'text-white shadow-[0_0_14px_rgba(22,163,74,0.22)]'
+                            : draggingStockSymbol === normalizeSymbol(stock.symbol)
+                              ? 'text-gray-300 opacity-70'
                             : faded
                               ? 'text-gray-500'
                               : 'text-gray-200 hover:border-[#505050]'
@@ -3674,11 +3925,41 @@ export function MacroFlowMap({
                       </button>
                     </div>
                   </div>
+                  {chartComparisonSymbols.length > 0 && (
+                    <div className="mt-2 flex items-center gap-1 overflow-x-auto border-t border-[#161616] pt-1">
+                      {chartComparisonSymbols.map((symbol, index) => (
+                        <span
+                          key={`macro-chart-comparison-${symbol}`}
+                          className="inline-flex h-5 shrink-0 items-center gap-1 border border-[#2a2a2a] bg-[#111111] px-1.5 font-mono text-[9px] font-bold"
+                          style={{ color: getFlowPaletteColor(index), borderColor: `${getFlowPaletteColor(index)}55` }}
+                        >
+                          {symbol}
+                          <button
+                            type="button"
+                            onClick={() => setChartComparisonSymbols((current) => current.filter((item) => item !== symbol))}
+                            className="text-gray-500 hover:text-red-300"
+                            aria-label={`${symbol}の比較を削除`}
+                            title="比較から削除"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div className="flex-1 min-h-0 bg-[#090909]">
+                <div
+                  className={`flex-1 min-h-0 bg-[#090909] ${draggingStockSymbol ? 'ring-1 ring-inset ring-emerald-500/40' : ''}`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'copy';
+                  }}
+                  onDrop={dropStockOnChart}
+                >
                   {activeSymbol ? (
                     renderTickerChart({
                       symbol: activeSymbol,
+                      comparisonSymbols: chartComparisonSymbols,
                       onOpenIndicatorSettings: () => {
                         setSidePanelOpen(true);
                         setSidePanelMode('settings');

@@ -50,6 +50,7 @@ type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
 type AppView = 'charts' | 'value-chain' | 'macro-flow';
 
+const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
 const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
@@ -1191,6 +1192,36 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('mooview_active_view', JSON.stringify(appView));
   }, [appView]);
+
+  useEffect(() => {
+    const handleWorkspaceShortcut = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (
+        target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.tagName === 'SELECT'
+        || target.isContentEditable
+      )) {
+        return;
+      }
+      const platform = navigator.platform.toLowerCase();
+      const isMac = platform.includes('mac');
+      const hasModifier = isMac ? event.metaKey : event.ctrlKey;
+      if (!hasModifier || !event.shiftKey) return;
+      event.preventDefault();
+      setWorkspaceMenuOpen(false);
+      setAppView((current) => {
+        const currentIndex = APP_VIEW_ORDER.indexOf(current);
+        const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        return APP_VIEW_ORDER[(safeIndex + delta + APP_VIEW_ORDER.length) % APP_VIEW_ORDER.length];
+      });
+    };
+
+    window.addEventListener('keydown', handleWorkspaceShortcut);
+    return () => window.removeEventListener('keydown', handleWorkspaceShortcut);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('tv_dashboard_watchlist_tabs', JSON.stringify(watchlistTabs));

@@ -8,9 +8,10 @@ import {
   ChevronRight,
   Database,
   FileDown,
+  FileJson,
+  FileSpreadsheet,
   FileText,
   Layers3,
-  ListTree,
   PanelRightOpen,
   Pencil,
   Plus,
@@ -27,6 +28,7 @@ type SortDirection = 'asc' | 'desc' | null;
 type SortColumnKey = 'sectors' | 'baskets' | 'stocks';
 type FlowColumnKey = 'regional' | SortColumnKey;
 type SidePanelMode = 'chart' | 'settings' | 'summary' | 'annotation' | 'sources' | 'basket-db';
+type BasketDbExportMenuAnchor = 'panel' | 'nav';
 type RangeHandle = 'start' | 'end';
 type ColumnBoundary = 'regional-sector' | 'sector-basket' | 'basket-stock' | 'stock-right';
 type MarketFilter = 'all' | 'jp' | 'us';
@@ -1992,7 +1994,7 @@ export function MacroFlowMap({
   const [basketEditor, setBasketEditor] = useState<BasketEditorState | null>(null);
   const [stockEditModal, setStockEditModal] = useState<StockEditModalState | null>(null);
   const [basketDbImportDecision, setBasketDbImportDecision] = useState<MacroImportDecisionState | null>(null);
-  const [basketDbExportMenuOpen, setBasketDbExportMenuOpen] = useState(false);
+  const [basketDbExportMenuAnchor, setBasketDbExportMenuAnchor] = useState<BasketDbExportMenuAnchor | null>(null);
 
   const selectedDate = rangeEndDate;
   const sliderStartDate = getSliderStartDate(rangeStartDate);
@@ -2107,11 +2109,11 @@ export function MacroFlowMap({
   }, [macroScopeMenuOpen]);
 
   useEffect(() => {
-    if (!basketDbExportMenuOpen) return undefined;
-    const close = () => setBasketDbExportMenuOpen(false);
+    if (!basketDbExportMenuAnchor) return undefined;
+    const close = () => setBasketDbExportMenuAnchor(null);
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
-  }, [basketDbExportMenuOpen]);
+  }, [basketDbExportMenuAnchor]);
 
   useEffect(() => {
     if (!stockContextMenu) return undefined;
@@ -3064,6 +3066,32 @@ export function MacroFlowMap({
     });
   };
 
+  const deleteEditableStock = (groupId: string, symbol: string) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const stock = findEditableStock(groupId, symbol);
+    if (!stock) return;
+    const base = normalizeStoredChain(editableBasketChain, editableBasketChain.name || 'マクロ全体');
+    const nextGroups = (base.groups || []).map((group) => {
+      if (group.id !== groupId) return group;
+      return {
+        ...group,
+        stocks: group.stocks.filter((item) => normalizeSymbol(item.symbol) !== normalizedSymbol),
+      };
+    });
+    persistBasketDbChain({
+      ...base,
+      groups: nextGroups,
+    }, selectedMacroScopeOption?.historyId ? 'replace-current' : 'new-history');
+    clearStockDataCache([stock.symbol, symbol]);
+    if (selectedStockKey === `${groupId}:${normalizedSymbol}`) {
+      setSelectedStockKey(null);
+    }
+    if (normalizeSymbol(activeSymbol) === normalizedSymbol) {
+      setActiveSymbol('NVDA');
+    }
+    setStockContextMenu(null);
+  };
+
   const resolveStockInput = async (
     rawSymbol: string,
     rawName: string,
@@ -3201,17 +3229,17 @@ export function MacroFlowMap({
 
   const exportBasketDbJson = () => {
     downloadText('mooview-value-chain-template.json', 'application/json;charset=utf-8', JSON.stringify(editableBasketChain, null, 2));
-    setBasketDbExportMenuOpen(false);
+    setBasketDbExportMenuAnchor(null);
   };
 
   const exportBasketDbCsv = () => {
     downloadText('mooview-value-chain-template.csv', 'text/csv;charset=utf-8', createValueChainCsv(editableBasketChain));
-    setBasketDbExportMenuOpen(false);
+    setBasketDbExportMenuAnchor(null);
   };
 
   const exportBasketDbSpec = () => {
     downloadText('mooview-value-chain-template-spec.md', 'text/markdown;charset=utf-8', createTemplateSpec(editableBasketChain));
-    setBasketDbExportMenuOpen(false);
+    setBasketDbExportMenuAnchor(null);
   };
 
   const openPanel = (mode: SidePanelMode) => {
@@ -4276,6 +4304,16 @@ export function MacroFlowMap({
             <ChartNoAxesCombined className="h-3.5 w-3.5" />
             チャート表示
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              deleteEditableStock(stockContextMenu.groupId, stockContextMenu.symbol);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-red-300 hover:bg-red-950/30 hover:text-red-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            削除
+          </button>
         </div>
       )}
 
@@ -4662,17 +4700,23 @@ export function MacroFlowMap({
                       <Upload className="h-3.5 w-3.5" />
                     </button>
                     <div className="relative" onClick={(event) => event.stopPropagation()}>
-                      <button type="button" onClick={() => setBasketDbExportMenuOpen((open) => !open)} className="h-7 w-7 inline-flex items-center justify-center border border-[#303030] bg-[#101010] text-gray-300 hover:bg-[#181818] hover:text-white" title="エクスポート" aria-label="エクスポート">
+                      <button
+                        type="button"
+                        onClick={() => setBasketDbExportMenuAnchor((anchor) => (anchor === 'panel' ? null : 'panel'))}
+                        className={`h-7 w-7 inline-flex items-center justify-center border border-[#303030] bg-[#101010] hover:bg-[#181818] hover:text-white ${basketDbExportMenuAnchor === 'panel' ? 'text-white' : 'text-gray-300'}`}
+                        title="エクスポート"
+                        aria-label="エクスポート"
+                      >
                         <FileDown className="h-3.5 w-3.5" />
                       </button>
-                      {basketDbExportMenuOpen && (
+                      {basketDbExportMenuAnchor === 'panel' && (
                         <div className="absolute left-0 top-8 z-50 w-44 border border-[#303030] bg-[#080808] py-1 shadow-2xl">
                           <button type="button" onClick={exportBasketDbCsv} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] text-gray-200 hover:bg-[#171717]">
-                            <FileText className="h-3.5 w-3.5 text-emerald-300" />
+                            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-300" />
                             CSVエクスポート
                           </button>
                           <button type="button" onClick={exportBasketDbJson} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] text-gray-200 hover:bg-[#171717]">
-                            <Database className="h-3.5 w-3.5 text-sky-300" />
+                            <FileJson className="h-3.5 w-3.5 text-sky-300" />
                             JSONエクスポート
                           </button>
                           <button type="button" onClick={exportBasketDbSpec} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] text-gray-200 hover:bg-[#171717]">
@@ -4682,7 +4726,6 @@ export function MacroFlowMap({
                         </div>
                       )}
                     </div>
-                    <input ref={basketDbImportInputRef} type="file" accept=".csv,.json,application/json,text/csv" className="hidden" onChange={handleBasketDbImportFile} />
                   </div>
                 </div>
 
@@ -4799,6 +4842,61 @@ export function MacroFlowMap({
           <SidePanelButton mode="settings" activeMode={sidePanelMode} title="チャート設定" onClick={() => openPanel('settings')}>
             <Settings className="w-4 h-4" />
           </SidePanelButton>
+          <div className="relative flex flex-col items-center gap-1">
+            <button
+              type="button"
+              onClick={() => basketDbImportInputRef.current?.click()}
+              className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 transition hover:bg-[#161616] hover:text-white"
+              title="CSV/JSONインポート"
+              aria-label="CSV/JSONインポート"
+            >
+              <Upload className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setBasketDbExportMenuAnchor((anchor) => (anchor === 'nav' ? null : 'nav'));
+              }}
+              className={`w-9 h-9 flex items-center justify-center border transition ${
+                basketDbExportMenuAnchor === 'nav'
+                  ? 'bg-[#202020] border-[#4a4a4a] text-white'
+                  : 'border-transparent text-gray-400 hover:text-white hover:bg-[#161616]'
+              }`}
+              title="エクスポート"
+              aria-label="エクスポート"
+            >
+              <FileDown className="w-3.5 h-3.5" />
+            </button>
+            {basketDbExportMenuAnchor === 'nav' && (
+              <div
+                className="absolute right-10 top-10 z-50 w-44 border border-[#303030] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button type="button" onClick={exportBasketDbCsv} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
+                  <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-300" />
+                  CSVエクスポート
+                </button>
+                <button type="button" onClick={exportBasketDbJson} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
+                  <FileJson className="h-3.5 w-3.5 text-sky-300" />
+                  JSONエクスポート
+                </button>
+                <button type="button" onClick={exportBasketDbSpec} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
+                  <FileDown className="h-3.5 w-3.5 text-gray-300" />
+                  テンプレート仕様書
+                </button>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => openPanel('basket-db')}
+              className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 transition hover:bg-[#161616] hover:text-white"
+              title="Basket Database"
+              aria-label="Basket Database"
+            >
+              <Layers3 className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <div className="my-1 h-px w-7 bg-[#242424]" />
           <SidePanelButton mode="summary" activeMode={sidePanelMode} title="TOP Flow Summary" onClick={() => openPanel('summary')}>
             <Activity className="w-4 h-4" />
@@ -4809,16 +4907,14 @@ export function MacroFlowMap({
           <SidePanelButton mode="sources" activeMode={sidePanelMode} title="Data Sources" onClick={() => openPanel('sources')}>
             <Database className="w-4 h-4" />
           </SidePanelButton>
-          <div className="my-1 h-px w-7 bg-[#242424]" />
-          <SidePanelButton mode="basket-db" activeMode={sidePanelMode} title="Basket Database" onClick={() => openPanel('basket-db')}>
-            <ListTree className="w-4 h-4" />
-          </SidePanelButton>
-          <div className="mt-auto flex flex-col items-center gap-1 pb-1 text-gray-600">
-            <Upload className="w-3.5 h-3.5" />
-            <FileDown className="w-3.5 h-3.5" />
-            <Layers3 className="w-3.5 h-3.5" />
-          </div>
         </nav>
+        <input
+          ref={basketDbImportInputRef}
+          type="file"
+          accept=".csv,.json,application/json,text/csv"
+          className="hidden"
+          onChange={handleBasketDbImportFile}
+        />
       </div>
     </main>
   );

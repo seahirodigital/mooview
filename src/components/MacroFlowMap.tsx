@@ -272,6 +272,15 @@ interface KlineFetchProgress {
   cachedSymbols: number;
 }
 
+interface QuoteFetchProgress {
+  status: 'restored' | 'loading' | 'done';
+  currentBatch: number;
+  totalBatches: number;
+  fetchedSymbols: number;
+  totalSymbols: number;
+  cachedSymbols: number;
+}
+
 interface StoredKlineCacheRecord {
   key?: string;
   symbol?: string;
@@ -279,6 +288,12 @@ interface StoredKlineCacheRecord {
   reqNum?: number;
   candles?: Candle[];
   savedAt?: number;
+}
+
+interface StoredMacroQuoteCache {
+  date?: string;
+  savedAt?: number;
+  quotes?: Record<string, MacroQuote | null>;
 }
 
 interface FlowLink {
@@ -333,9 +348,11 @@ const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
 const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
 const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
+const MACRO_QUOTE_CACHE_STORAGE_KEY = 'mooview_macro_flow_quote_cache_v1';
 const MACRO_KLINE_DB_NAME = 'mooview_macro_flow_kline_cache_v1';
 const MACRO_KLINE_DB_STORE = 'kline';
 const MACRO_KLINE_DB_VERSION = 1;
+const SNAPSHOT_BATCH_SIZE = 200;
 const KLINE_BATCH_SIZE = 60;
 const KLINE_BATCH_INTERVAL_MS = 30_000;
 const MACRO_ALL_SCOPE_ID = 'macro-all';
@@ -805,6 +822,61 @@ function parseMacroQuoteResult(quote: MacroQuoteResult, fallbackSymbol: string):
     volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
     dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
   };
+}
+
+function sanitizeStoredQuoteMap(quotes: unknown): Record<string, MacroQuote | null> {
+  const result: Record<string, MacroQuote | null> = {};
+  if (!quotes || typeof quotes !== 'object') return result;
+  Object.entries(quotes as Record<string, unknown>).forEach(([symbol, rawQuote]) => {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    if (!normalizedSymbol || isUnsupportedDataSymbol(normalizedSymbol)) return;
+    if (!rawQuote || typeof rawQuote !== 'object') return;
+    const quote = rawQuote as MacroQuote;
+    const price = Number(quote.price);
+    const changePct = Number(quote.changePct);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(changePct)) return;
+    const marketCap = Number(quote.marketCap);
+    const volume = Number(quote.volume);
+    result[normalizedSymbol] = {
+      name: String(quote.name || normalizedSymbol),
+      price,
+      changePct,
+      marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined,
+      volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
+      dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
+    };
+  });
+  return result;
+}
+
+function readStoredMacroQuoteCache(): Record<string, MacroQuote | null> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(MACRO_QUOTE_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as StoredMacroQuoteCache;
+    if (parsed.date !== FLOW_END_DATE) return {};
+    return sanitizeStoredQuoteMap(parsed.quotes);
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredMacroQuoteCache(quotes: Record<string, MacroQuote | null>): void {
+  if (typeof window === 'undefined') return;
+  const sanitized = sanitizeStoredQuoteMap(quotes);
+  try {
+    if (Object.keys(sanitized).length === 0) {
+      window.localStorage.removeItem(MACRO_QUOTE_CACHE_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(MACRO_QUOTE_CACHE_STORAGE_KEY, JSON.stringify({
+      date: FLOW_END_DATE,
+      savedAt: Date.now(),
+      quotes: sanitized,
+    } satisfies StoredMacroQuoteCache));
+  } catch {
+  }
 }
 
 let macroKlineDbPromise: Promise<IDBDatabase> | null = null;
@@ -2089,6 +2161,7 @@ export function MacroFlowMap({
 }: MacroFlowMapProps) {
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
   const macroQuoteFetchInFlightRef = useRef(false);
+  const macroQuoteCacheRef = useRef<Record<string, MacroQuote | null>>({});
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
   const klineQueueRunIdRef = useRef(0);
@@ -2126,8 +2199,9 @@ export function MacroFlowMap({
   const [draggingSectorEtfId, setDraggingSectorEtfId] = useState<string | null>(null);
   const [draggingStockSymbol, setDraggingStockSymbol] = useState<string | null>(null);
   const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
-  const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>({});
+  const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>(() => readStoredMacroQuoteCache());
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
+  const [quoteFetchProgress, setQuoteFetchProgress] = useState<QuoteFetchProgress | null>(null);
   const [klineFetchProgress, setKlineFetchProgress] = useState<KlineFetchProgress | null>(null);
   const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
   const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
@@ -2243,6 +2317,11 @@ export function MacroFlowMap({
   }, [macroScope, macroScopeOptions]);
 
   useEffect(() => {
+    macroQuoteCacheRef.current = macroQuoteCache;
+    writeStoredMacroQuoteCache(macroQuoteCache);
+  }, [macroQuoteCache]);
+
+  useEffect(() => {
     if (!macroScopeMenuOpen) return undefined;
     const close = () => setMacroScopeMenuOpen(false);
     window.addEventListener('click', close);
@@ -2282,12 +2361,25 @@ export function MacroFlowMap({
     const loadQuotes = async () => {
       if (macroQuoteFetchInFlightRef.current) return;
       macroQuoteFetchInFlightRef.current = true;
+      const totalSymbols = macroQuoteSymbols.length;
+      const totalBatches = Math.max(1, Math.ceil(totalSymbols / SNAPSHOT_BATCH_SIZE));
+      const cachedSymbols = macroQuoteSymbols.filter((symbol) => macroQuoteCacheRef.current[normalizeSymbol(symbol)]).length;
+      let fetchedSymbols = 0;
+      setQuoteFetchProgress({
+        status: cachedSymbols > 0 ? 'restored' : 'loading',
+        currentBatch: 0,
+        totalBatches,
+        fetchedSymbols,
+        totalSymbols,
+        cachedSymbols,
+      });
       const commitQuotes = (quotes: Record<string, MacroQuote | null>) => {
         if (cancelled || Object.keys(quotes).length === 0) return;
         setMacroQuoteCache((current) => ({ ...current, ...quotes }));
       };
-      const fetchSingleQuotes = async (symbols: string[]) => {
+      const fetchSingleQuotes = async (symbols: string[]): Promise<number> => {
         const singleBatchSize = 8;
+        let resolvedCount = 0;
         for (let index = 0; index < symbols.length; index += singleBatchSize) {
           const singleBatch = symbols.slice(index, index + singleBatchSize);
           const singleResults = await Promise.all(singleBatch.map(async (symbol) => {
@@ -2310,15 +2402,25 @@ export function MacroFlowMap({
             const [symbol, quote] = result;
             if (quote) singleQuotes[symbol] = quote;
           });
+          resolvedCount += Object.keys(singleQuotes).length;
           commitQuotes(singleQuotes);
-          if (cancelled) return;
+          if (cancelled) return resolvedCount;
         }
+        return resolvedCount;
       };
 
       try {
-        const batchSize = 200;
-        for (let index = 0; index < macroQuoteSymbols.length; index += batchSize) {
-          const batch = macroQuoteSymbols.slice(index, index + batchSize);
+        for (let index = 0; index < macroQuoteSymbols.length; index += SNAPSHOT_BATCH_SIZE) {
+          const currentBatch = Math.floor(index / SNAPSHOT_BATCH_SIZE) + 1;
+          const batch = macroQuoteSymbols.slice(index, index + SNAPSHOT_BATCH_SIZE);
+          setQuoteFetchProgress({
+            status: 'loading',
+            currentBatch,
+            totalBatches,
+            fetchedSymbols,
+            totalSymbols,
+            cachedSymbols,
+          });
           try {
             const response = await fetch('/api/moomoo/quotes', {
               method: 'POST',
@@ -2343,11 +2445,20 @@ export function MacroFlowMap({
               }
             });
             commitQuotes(batchQuotes);
+            fetchedSymbols += Object.keys(batchQuotes).length;
             const missingSymbols = batch.filter((symbol) => !resolvedSymbols.has(symbol));
-            await fetchSingleQuotes(missingSymbols);
+            fetchedSymbols += await fetchSingleQuotes(missingSymbols);
           } catch {
-            await fetchSingleQuotes(batch);
+            fetchedSymbols += await fetchSingleQuotes(batch);
           }
+          setQuoteFetchProgress({
+            status: currentBatch === totalBatches ? 'done' : 'loading',
+            currentBatch,
+            totalBatches,
+            fetchedSymbols,
+            totalSymbols,
+            cachedSymbols,
+          });
           if (cancelled) return;
         }
       } catch {
@@ -2355,6 +2466,9 @@ export function MacroFlowMap({
           setMacroQuoteCache((current) => current);
         }
       } finally {
+        if (!cancelled) {
+          setQuoteFetchProgress((current) => current ? { ...current, status: 'done' } : current);
+        }
         macroQuoteFetchInFlightRef.current = false;
       }
     };
@@ -3641,6 +3755,23 @@ export function MacroFlowMap({
   const klineProgressTitle = klineFetchProgress
     ? `KLine ${klineFetchProgress.fetchedSymbols}/${klineFetchProgress.totalSymbols}銘柄取得、cache ${klineFetchProgress.cachedSymbols}銘柄`
     : undefined;
+  const quoteProgressText = (() => {
+    if (!quoteFetchProgress) return null;
+    if (quoteFetchProgress.status === 'restored') {
+      return `1D復元済 ${quoteFetchProgress.cachedSymbols}`;
+    }
+    const remainingBatches = Math.max(0, quoteFetchProgress.totalBatches - quoteFetchProgress.currentBatch);
+    const label = quoteFetchProgress.status === 'done' ? '1D完了' : '1D取得中';
+    return `${label} ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches} 残${remainingBatches}`;
+  })();
+  const quoteProgressTitle = quoteFetchProgress
+    ? `1D snapshot ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄取得、cache ${quoteFetchProgress.cachedSymbols}銘柄`
+    : undefined;
+  const rangeProgressText = klineProgressText || quoteProgressText;
+  const rangeProgressTitle = klineProgressText ? klineProgressTitle : quoteProgressTitle;
+  const rangeProgressStatus = klineProgressText
+    ? klineFetchProgress?.status
+    : quoteFetchProgress?.status;
 
   useEffect(() => {
     if (!dragRangeHandle) return undefined;
@@ -3826,12 +3957,12 @@ export function MacroFlowMap({
               </button>
               <div className="flex min-w-[116px] flex-col items-center leading-none">
                 <span className="text-emerald-300">{activeWindowDays}D</span>
-                {klineProgressText && (
+                {rangeProgressText && (
                   <span
-                    className={`mt-0.5 max-w-[116px] truncate text-[8px] ${klineFetchProgress?.status === 'done' ? 'text-emerald-400' : klineFetchProgress?.status === 'waiting' ? 'text-amber-300' : 'text-cyan-300'}`}
-                    title={klineProgressTitle}
+                    className={`mt-0.5 max-w-[116px] truncate text-[8px] ${rangeProgressStatus === 'done' || rangeProgressStatus === 'restored' ? 'text-emerald-400' : rangeProgressStatus === 'waiting' ? 'text-amber-300' : 'text-cyan-300'}`}
+                    title={rangeProgressTitle}
                   >
-                    {klineProgressText}
+                    {rangeProgressText}
                   </span>
                 )}
               </div>

@@ -283,6 +283,19 @@ interface QuoteFetchProgress {
   failedSymbols: string[];
 }
 
+interface HistoryBackfillProgress {
+  status: 'loading' | 'waiting' | 'done' | 'partial';
+  currentBatch: number;
+  totalBatches: number;
+  processedSymbols: number;
+  totalSymbols: number;
+  filledQuotes: number;
+  totalMissing: number;
+  currentDate: string;
+  totalDates: number;
+  failedSymbols: string[];
+}
+
 interface StoredKlineCacheRecord {
   key?: string;
   symbol?: string;
@@ -2288,6 +2301,62 @@ function getStoredQuoteForDate(
   return history[date]?.[normalizedSymbol] || null;
 }
 
+function getBackfillReqNumForDateCount(dateCount: number): number {
+  if (dateCount <= 1) return 2;
+  return Math.min(1000, Math.max(260, dateCount + 20));
+}
+
+function createMacroQuoteFromDailyCandle(
+  symbol: string,
+  candle: Candle,
+  previousCandle: Candle | undefined,
+  fallbackQuote?: MacroQuote,
+): MacroQuote | null {
+  const price = Number(candle.close);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const previousClose = Number(previousCandle?.close);
+  const open = Number(candle.open);
+  const changePct = Number.isFinite(previousClose) && previousClose > 0
+    ? ((price / previousClose) - 1) * 100
+    : Number.isFinite(open) && open > 0
+      ? ((price / open) - 1) * 100
+      : 0;
+  return {
+    name: fallbackQuote?.name || symbol,
+    price,
+    changePct,
+    marketCap: fallbackQuote?.marketCap,
+    volume: Number.isFinite(Number(candle.volume)) && Number(candle.volume) > 0 ? Number(candle.volume) : fallbackQuote?.volume,
+    dataDate: getCandleDateValue(candle),
+  };
+}
+
+function createQuoteHistoryUpdatesFromCandles(
+  symbol: string,
+  candles: Candle[],
+  targetDates: Set<string>,
+  existingHistory: Record<string, Record<string, MacroQuote | null>>,
+  latestQuotes: Record<string, MacroQuote | null>,
+): Record<string, Record<string, MacroQuote | null>> {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const sortedCandles = [...candles]
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+    .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+  const updates: Record<string, Record<string, MacroQuote | null>> = {};
+  sortedCandles.forEach((candle, index) => {
+    const date = getCandleDateValue(candle);
+    if (!targetDates.has(date)) return;
+    if (getStoredQuoteForDate(normalizedSymbol, date, existingHistory, latestQuotes)) return;
+    const quote = createMacroQuoteFromDailyCandle(normalizedSymbol, candle, sortedCandles[index - 1], latestQuotes[normalizedSymbol] || undefined);
+    if (!quote) return;
+    updates[date] = {
+      ...(updates[date] || {}),
+      [normalizedSymbol]: quote,
+    };
+  });
+  return updates;
+}
+
 function getQuoteHistoryEndPrice(
   symbol: string,
   history: Record<string, Record<string, MacroQuote | null>>,
@@ -2573,6 +2642,7 @@ export function MacroFlowMap({
   const macroQuoteCacheRef = useRef<Record<string, MacroQuote | null>>({});
   const macroQuoteHistoryRef = useRef<Record<string, Record<string, MacroQuote | null>>>({});
   const quoteIndexedDbHydratedRef = useRef(false);
+  const historyBackfillRunIdRef = useRef(0);
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
   const klineQueueRunIdRef = useRef(0);
@@ -2616,6 +2686,7 @@ export function MacroFlowMap({
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
   const [quoteFetchProgress, setQuoteFetchProgress] = useState<QuoteFetchProgress | null>(null);
   const [klineFetchProgress, setKlineFetchProgress] = useState<KlineFetchProgress | null>(null);
+  const [historyBackfillProgress, setHistoryBackfillProgress] = useState<HistoryBackfillProgress | null>(null);
   const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
   const [cacheTransferStatus, setCacheTransferStatus] = useState<string | null>(null);
   const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
@@ -4213,6 +4284,157 @@ export function MacroFlowMap({
     setCacheTransferStatus(`キャッシュを書き出しました: snapshot ${Object.keys(quoteHistory).length}日分 / KLine ${klineRecords.length}件`);
   };
 
+  const runRangeHistoryBackfill = async () => {
+    const runId = historyBackfillRunIdRef.current + 1;
+    historyBackfillRunIdRef.current = runId;
+    const datesNewestFirst = getBusinessDateValuesInWindow(rangeStartDate, rangeEndDate).reverse();
+    const targetDates = new Set(datesNewestFirst);
+    const historyAtStart = macroQuoteHistoryRef.current;
+    const latestQuotes = macroQuoteCacheRef.current;
+    const targetSymbols = macroQuoteSymbols.filter((symbol) => (
+      datesNewestFirst.some((date) => !getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes))
+    ));
+    const totalMissing = targetSymbols.reduce((sum, symbol) => (
+      sum + datesNewestFirst.filter((date) => !getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes)).length
+    ), 0);
+    const totalBatches = Math.max(1, Math.ceil(targetSymbols.length / KLINE_BATCH_SIZE));
+    const backfillReqNum = getBackfillReqNumForDateCount(datesNewestFirst.length);
+
+    setHistoryBackfillProgress({
+      status: targetSymbols.length === 0 ? 'done' : 'loading',
+      currentBatch: 0,
+      totalBatches,
+      processedSymbols: 0,
+      totalSymbols: targetSymbols.length,
+      filledQuotes: 0,
+      totalMissing,
+      currentDate: datesNewestFirst[0] || rangeEndDate,
+      totalDates: datesNewestFirst.length,
+      failedSymbols: [],
+    });
+    if (targetSymbols.length === 0) return;
+
+    let processedSymbols = 0;
+    let filledQuotes = 0;
+    const failedSymbols: string[] = [];
+    const applyUpdates = async (updates: Record<string, Record<string, MacroQuote | null>>) => {
+      const updateEntries = datesNewestFirst
+        .map((date) => [date, updates[date]] as const)
+        .filter(([, quotes]) => quotes && Object.keys(quotes).length > 0);
+      if (updateEntries.length === 0) return;
+      const nextHistory = { ...macroQuoteHistoryRef.current };
+      for (const [date, quotes] of updateEntries) {
+        const mergedDateQuotes = {
+          ...(nextHistory[date] || {}),
+          ...quotes,
+        };
+        nextHistory[date] = mergedDateQuotes;
+        await writeStoredMacroQuoteHistoryDateIndexedDb(date, mergedDateQuotes);
+        filledQuotes += Object.keys(quotes).length;
+      }
+      macroQuoteHistoryRef.current = nextHistory;
+      setMacroQuoteHistory(nextHistory);
+    };
+
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
+      const currentBatch = batchIndex + 1;
+      if (batchIndex > 0) {
+        setHistoryBackfillProgress({
+          status: 'waiting',
+          currentBatch,
+          totalBatches,
+          processedSymbols,
+          totalSymbols: targetSymbols.length,
+          filledQuotes,
+          totalMissing,
+          currentDate: datesNewestFirst[0] || rangeEndDate,
+          totalDates: datesNewestFirst.length,
+          failedSymbols,
+        });
+        await waitForKlineBatchInterval();
+        if (historyBackfillRunIdRef.current !== runId) return;
+      }
+
+      setHistoryBackfillProgress({
+        status: 'loading',
+        currentBatch,
+        totalBatches,
+        processedSymbols,
+        totalSymbols: targetSymbols.length,
+        filledQuotes,
+        totalMissing,
+        currentDate: datesNewestFirst[0] || rangeEndDate,
+        totalDates: datesNewestFirst.length,
+        failedSymbols,
+      });
+
+      const batch = targetSymbols.slice(batchIndex * KLINE_BATCH_SIZE, (batchIndex + 1) * KLINE_BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(async (symbol) => {
+        const normalizedSymbol = normalizeSymbol(symbol);
+        const cachedCandles = await readStoredKlineCandles(normalizedSymbol, backfillReqNum);
+        if (cachedCandles && hasCandlesForRequestedRange(cachedCandles, rangeStartDate, rangeEndDate)) {
+          return [normalizedSymbol, cachedCandles] as const;
+        }
+        try {
+          const response = await fetch('/api/moomoo/kline', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol: normalizedSymbol, timeframe: '1d', reqNum: backfillReqNum }),
+          });
+          const data = await response.json();
+          const candles = Array.isArray(data.candles)
+            ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+            : [];
+          if (!response.ok || !data.success || candles.length === 0) return null;
+          await writeStoredKlineCandles(normalizedSymbol, backfillReqNum, candles);
+          return [normalizedSymbol, candles] as const;
+        } catch {
+          return null;
+        }
+      }));
+      if (historyBackfillRunIdRef.current !== runId) return;
+
+      const updates: Record<string, Record<string, MacroQuote | null>> = {};
+      const nextSparklineCache: Record<string, Candle[]> = {};
+      batchResults.forEach((result, index) => {
+        processedSymbols += 1;
+        if (!result) {
+          failedSymbols.push(batch[index]);
+          return;
+        }
+        const [symbol, candles] = result;
+        nextSparklineCache[symbol] = candles;
+        const symbolUpdates = createQuoteHistoryUpdatesFromCandles(symbol, candles, targetDates, macroQuoteHistoryRef.current, macroQuoteCacheRef.current);
+        Object.entries(symbolUpdates).forEach(([date, quotes]) => {
+          updates[date] = {
+            ...(updates[date] || {}),
+            ...quotes,
+          };
+        });
+      });
+      if (Object.keys(nextSparklineCache).length > 0) {
+        setSparklineCache((current) => ({ ...current, ...nextSparklineCache }));
+      }
+      await applyUpdates(updates);
+
+      setHistoryBackfillProgress({
+        status: batchIndex === totalBatches - 1
+          ? failedSymbols.length > 0 || filledQuotes < totalMissing ? 'partial' : 'done'
+          : 'waiting',
+        currentBatch,
+        totalBatches,
+        processedSymbols,
+        totalSymbols: targetSymbols.length,
+        filledQuotes,
+        totalMissing,
+        currentDate: datesNewestFirst[0] || rangeEndDate,
+        totalDates: datesNewestFirst.length,
+        failedSymbols,
+      });
+    }
+  };
+
   const openPanel = (mode: SidePanelMode) => {
     if (sidePanelOpen && sidePanelMode === mode && mode === 'chart') {
       setSidePanelOpen(false);
@@ -4362,6 +4584,20 @@ export function MacroFlowMap({
   const klineProgressTitle = klineFetchProgress
     ? `KLine ${klineFetchProgress.fetchedSymbols}/${klineFetchProgress.totalSymbols}銘柄取得、cache ${klineFetchProgress.cachedSymbols}銘柄`
     : undefined;
+  const historyBackfillProgressText = (() => {
+    if (!historyBackfillProgress) return null;
+    const label = historyBackfillProgress.status === 'done'
+      ? '履歴取得完了'
+      : historyBackfillProgress.status === 'partial'
+        ? '履歴一部取得'
+        : historyBackfillProgress.status === 'waiting'
+          ? '履歴待機'
+          : '履歴取得中';
+    return `${label} ${historyBackfillProgress.processedSymbols}/${historyBackfillProgress.totalSymbols} 残${Math.max(0, historyBackfillProgress.totalMissing - historyBackfillProgress.filledQuotes)}`;
+  })();
+  const historyBackfillProgressTitle = historyBackfillProgress
+    ? `表示期間 ${rangeStartDate} - ${rangeEndDate} / ${historyBackfillProgress.totalDates}営業日 / 追加保存 ${historyBackfillProgress.filledQuotes}/${historyBackfillProgress.totalMissing}件 / batch ${historyBackfillProgress.currentBatch}/${historyBackfillProgress.totalBatches}${historyBackfillProgress.failedSymbols.length > 0 ? ` / 失敗: ${historyBackfillProgress.failedSymbols.slice(0, 20).join(', ')}` : ''}`
+    : undefined;
   const quoteProgressText = (() => {
     if (!quoteFetchProgress) return null;
     const label = quoteFetchProgress.status === 'done'
@@ -4375,11 +4611,14 @@ export function MacroFlowMap({
   const quoteProgressTitle = quoteFetchProgress
     ? `1D snapshot 取得済 ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄 / 今回対象 ${quoteFetchProgress.targetSymbols}銘柄 / 復元cache ${quoteFetchProgress.cachedSymbols}銘柄 / batch ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches}${quoteFetchProgress.failedSymbols.length > 0 ? ` / 未取得: ${quoteFetchProgress.failedSymbols.slice(0, 20).join(', ')}` : ''}`
     : undefined;
-  const rangeProgressText = klineProgressText || quoteProgressText;
-  const rangeProgressTitle = klineProgressText ? klineProgressTitle : quoteProgressTitle;
-  const rangeProgressStatus = klineProgressText
+  const rangeProgressText = historyBackfillProgressText || klineProgressText || quoteProgressText;
+  const rangeProgressTitle = historyBackfillProgressText ? historyBackfillProgressTitle : klineProgressText ? klineProgressTitle : quoteProgressTitle;
+  const rangeProgressStatus = historyBackfillProgressText
+    ? historyBackfillProgress?.status
+    : klineProgressText
     ? klineFetchProgress?.status
     : quoteFetchProgress?.status;
+  const historyBackfillRunning = historyBackfillProgress?.status === 'loading' || historyBackfillProgress?.status === 'waiting';
 
   useEffect(() => {
     if (!dragRangeHandle) return undefined;
@@ -4684,7 +4923,22 @@ export function MacroFlowMap({
               </div>
             )}
           </div>
-          <div className="flex h-8 shrink-0 items-center border border-[#242424] bg-[#050505] p-0.5">
+          <div className="flex h-8 shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={runRangeHistoryBackfill}
+              disabled={historyBackfillRunning}
+              className={`h-8 w-8 inline-flex items-center justify-center border transition ${
+                historyBackfillRunning
+                  ? 'cursor-wait border-cyan-700/70 bg-cyan-950/30 text-cyan-300'
+                  : 'border-[#242424] bg-[#050505] text-gray-400 hover:border-cyan-500/70 hover:text-cyan-200'
+              }`}
+              title={`表示期間の日次履歴をIndexedDBへ取得: ${rangeStartDate} - ${rangeEndDate}`}
+              aria-label="表示期間の日次履歴を取得"
+            >
+              <CalendarDays className="h-3.5 w-3.5" />
+            </button>
+            <div className="flex h-8 shrink-0 items-center border border-[#242424] bg-[#050505] p-0.5">
             {(['jp', 'us', 'all'] as MarketFilter[]).map((option) => (
               <button
                 key={option}
@@ -4701,6 +4955,7 @@ export function MacroFlowMap({
                 {option.toUpperCase()}
               </button>
             ))}
+            </div>
           </div>
         </div>
 

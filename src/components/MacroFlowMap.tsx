@@ -273,7 +273,7 @@ interface KlineFetchProgress {
 }
 
 interface QuoteFetchProgress {
-  status: 'restored' | 'loading' | 'done';
+  status: 'loading' | 'done' | 'partial';
   currentBatch: number;
   totalBatches: number;
   fetchedSymbols: number;
@@ -294,6 +294,10 @@ interface StoredMacroQuoteCache {
   date?: string;
   savedAt?: number;
   quotes?: Record<string, MacroQuote | null>;
+}
+
+interface StoredMacroQuoteCacheRecord extends StoredMacroQuoteCache {
+  key: string;
 }
 
 interface FlowLink {
@@ -349,6 +353,10 @@ const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
 const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
 const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
 const MACRO_QUOTE_CACHE_STORAGE_KEY = 'mooview_macro_flow_quote_cache_v1';
+const MACRO_QUOTE_DB_NAME = 'mooview_macro_flow_quote_cache_v1';
+const MACRO_QUOTE_DB_STORE = 'quotes';
+const MACRO_QUOTE_DB_VERSION = 1;
+const MACRO_QUOTE_DB_RECORD_KEY = 'latest';
 const MACRO_KLINE_DB_NAME = 'mooview_macro_flow_kline_cache_v1';
 const MACRO_KLINE_DB_STORE = 'kline';
 const MACRO_KLINE_DB_VERSION = 1;
@@ -875,6 +883,79 @@ function writeStoredMacroQuoteCache(quotes: Record<string, MacroQuote | null>): 
       savedAt: Date.now(),
       quotes: sanitized,
     } satisfies StoredMacroQuoteCache));
+  } catch {
+  }
+}
+
+let macroQuoteDbPromise: Promise<IDBDatabase> | null = null;
+
+function openMacroQuoteDb(): Promise<IDBDatabase> {
+  if (typeof window === 'undefined' || !window.indexedDB) {
+    return Promise.reject(new Error('IndexedDB unavailable'));
+  }
+  if (macroQuoteDbPromise) return macroQuoteDbPromise;
+  macroQuoteDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(MACRO_QUOTE_DB_NAME, MACRO_QUOTE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(MACRO_QUOTE_DB_STORE)) {
+        db.createObjectStore(MACRO_QUOTE_DB_STORE, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+    request.onblocked = () => reject(new Error('IndexedDB open blocked'));
+  }).catch((error) => {
+    macroQuoteDbPromise = null;
+    throw error;
+  });
+  return macroQuoteDbPromise;
+}
+
+async function readStoredMacroQuoteIndexedDb(): Promise<Record<string, MacroQuote | null>> {
+  try {
+    const db = await openMacroQuoteDb();
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_QUOTE_DB_STORE, 'readonly');
+      const request = transaction.objectStore(MACRO_QUOTE_DB_STORE).get(MACRO_QUOTE_DB_RECORD_KEY);
+      request.onsuccess = () => {
+        const record = request.result as StoredMacroQuoteCacheRecord | undefined;
+        if (record?.date !== FLOW_END_DATE) {
+          resolve({});
+          return;
+        }
+        resolve(sanitizeStoredQuoteMap(record.quotes));
+      };
+      request.onerror = () => resolve({});
+      transaction.onerror = () => resolve({});
+    });
+  } catch {
+    return {};
+  }
+}
+
+async function writeStoredMacroQuoteIndexedDb(quotes: Record<string, MacroQuote | null>): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const sanitized = sanitizeStoredQuoteMap(quotes);
+  try {
+    const db = await openMacroQuoteDb();
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(MACRO_QUOTE_DB_STORE, 'readwrite');
+      const store = transaction.objectStore(MACRO_QUOTE_DB_STORE);
+      if (Object.keys(sanitized).length === 0) {
+        store.delete(MACRO_QUOTE_DB_RECORD_KEY);
+      } else {
+        store.put({
+          key: MACRO_QUOTE_DB_RECORD_KEY,
+          date: FLOW_END_DATE,
+          savedAt: Date.now(),
+          quotes: sanitized,
+        } satisfies StoredMacroQuoteCacheRecord);
+      }
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+    });
   } catch {
   }
 }
@@ -1948,11 +2029,11 @@ function getPeriodChangePct(
   endDate: string,
   latestChangePct?: number,
 ): number | null {
-  const rangeChangePct = getRangeChangePctFromCandles(candles, startDate, endDate);
-  if (rangeChangePct !== null) return rangeChangePct;
   if (startDate === endDate && endDate === FLOW_END_DATE && Number.isFinite(latestChangePct)) {
     return Number(latestChangePct);
   }
+  const rangeChangePct = getRangeChangePctFromCandles(candles, startDate, endDate);
+  if (rangeChangePct !== null) return rangeChangePct;
   return null;
 }
 
@@ -2162,6 +2243,7 @@ export function MacroFlowMap({
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
   const macroQuoteFetchInFlightRef = useRef(false);
   const macroQuoteCacheRef = useRef<Record<string, MacroQuote | null>>({});
+  const quoteIndexedDbHydratedRef = useRef(false);
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
   const klineQueueRunIdRef = useRef(0);
@@ -2317,8 +2399,27 @@ export function MacroFlowMap({
   }, [macroScope, macroScopeOptions]);
 
   useEffect(() => {
+    let cancelled = false;
+    void readStoredMacroQuoteIndexedDb().then((storedQuotes) => {
+      if (cancelled) return;
+      quoteIndexedDbHydratedRef.current = true;
+      if (Object.keys(storedQuotes).length === 0) {
+        void writeStoredMacroQuoteIndexedDb(macroQuoteCacheRef.current);
+        return;
+      }
+      setMacroQuoteCache((current) => ({ ...storedQuotes, ...current }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     macroQuoteCacheRef.current = macroQuoteCache;
     writeStoredMacroQuoteCache(macroQuoteCache);
+    if (quoteIndexedDbHydratedRef.current) {
+      void writeStoredMacroQuoteIndexedDb(macroQuoteCache);
+    }
   }, [macroQuoteCache]);
 
   useEffect(() => {
@@ -2366,7 +2467,7 @@ export function MacroFlowMap({
       const cachedSymbols = macroQuoteSymbols.filter((symbol) => macroQuoteCacheRef.current[normalizeSymbol(symbol)]).length;
       let fetchedSymbols = 0;
       setQuoteFetchProgress({
-        status: cachedSymbols > 0 ? 'restored' : 'loading',
+        status: 'loading',
         currentBatch: 0,
         totalBatches,
         fetchedSymbols,
@@ -2386,6 +2487,7 @@ export function MacroFlowMap({
             try {
               const response = await fetch('/api/moomoo/quote', {
                 method: 'POST',
+                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ symbol }),
               });
@@ -2424,6 +2526,7 @@ export function MacroFlowMap({
           try {
             const response = await fetch('/api/moomoo/quotes', {
               method: 'POST',
+              cache: 'no-store',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ symbols: batch }),
             });
@@ -2452,7 +2555,9 @@ export function MacroFlowMap({
             fetchedSymbols += await fetchSingleQuotes(batch);
           }
           setQuoteFetchProgress({
-            status: currentBatch === totalBatches ? 'done' : 'loading',
+            status: currentBatch === totalBatches
+              ? fetchedSymbols >= totalSymbols ? 'done' : 'partial'
+              : 'loading',
             currentBatch,
             totalBatches,
             fetchedSymbols,
@@ -2467,7 +2572,14 @@ export function MacroFlowMap({
         }
       } finally {
         if (!cancelled) {
-          setQuoteFetchProgress((current) => current ? { ...current, status: 'done' } : current);
+          setQuoteFetchProgress((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              status: current.fetchedSymbols >= current.totalSymbols ? 'done' : 'partial',
+              currentBatch: Math.max(current.currentBatch, current.totalBatches),
+            };
+          });
         }
         macroQuoteFetchInFlightRef.current = false;
       }
@@ -3403,6 +3515,7 @@ export function MacroFlowMap({
     try {
       const response = await fetch('/api/moomoo/quote', {
         method: 'POST',
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol }),
       });
@@ -3757,15 +3870,15 @@ export function MacroFlowMap({
     : undefined;
   const quoteProgressText = (() => {
     if (!quoteFetchProgress) return null;
-    if (quoteFetchProgress.status === 'restored') {
-      return `1D復元済 ${quoteFetchProgress.cachedSymbols}`;
-    }
-    const remainingBatches = Math.max(0, quoteFetchProgress.totalBatches - quoteFetchProgress.currentBatch);
-    const label = quoteFetchProgress.status === 'done' ? '1D完了' : '1D取得中';
-    return `${label} ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches} 残${remainingBatches}`;
+    const label = quoteFetchProgress.status === 'done'
+      ? '1D完了'
+      : quoteFetchProgress.status === 'partial'
+        ? '1D一部取得'
+        : '1D取得中';
+    return `${label} ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}`;
   })();
   const quoteProgressTitle = quoteFetchProgress
-    ? `1D snapshot ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄取得、cache ${quoteFetchProgress.cachedSymbols}銘柄`
+    ? `1D snapshot 最新取得 ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄 / 復元cache ${quoteFetchProgress.cachedSymbols}銘柄 / batch ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches}`
     : undefined;
   const rangeProgressText = klineProgressText || quoteProgressText;
   const rangeProgressTitle = klineProgressText ? klineProgressTitle : quoteProgressTitle;
@@ -3884,13 +3997,16 @@ export function MacroFlowMap({
                   event.stopPropagation();
                   setMacroScopeMenuOpen((open) => !open);
                 }}
-                className="h-8 w-full bg-[#050505] border border-[#242424] px-2 text-left text-[11px] font-bold text-gray-100 outline-none transition hover:border-sky-500/70 focus:border-sky-500/70 flex items-center justify-between gap-2"
+                className="h-11 w-full bg-[#050505] border border-[#242424] px-2 py-1 text-left outline-none transition hover:border-sky-500/70 focus:border-sky-500/70 flex items-center justify-between gap-2"
                 aria-haspopup="listbox"
                 aria-expanded={macroScopeMenuOpen}
                 aria-label="マクロ資金フローの表示範囲"
-                title={selectedMacroScopeOption?.detail}
+                title={`${selectedMacroScopeOption?.label || 'マクロ全体'}\n${selectedMacroScopeOption?.detail || 'バリューチェーン情報なし'}`}
               >
-                <span className="min-w-0 truncate">{selectedMacroScopeOption?.label || 'マクロ全体'}</span>
+                <span className="min-w-0 flex-1 leading-tight">
+                  <span className="block truncate text-[11px] font-bold text-gray-100">{selectedMacroScopeOption?.label || 'マクロ全体'}</span>
+                  <span className="mt-0.5 block truncate text-[9px] font-normal text-gray-500">{selectedMacroScopeOption?.detail || 'バリューチェーン情報なし'}</span>
+                </span>
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform ${macroScopeMenuOpen ? 'rotate-180' : ''}`} />
               </button>
               {macroScopeMenuOpen && (
@@ -3959,7 +4075,7 @@ export function MacroFlowMap({
                 <span className="text-emerald-300">{activeWindowDays}D</span>
                 {rangeProgressText && (
                   <span
-                    className={`mt-0.5 max-w-[116px] truncate text-[8px] ${rangeProgressStatus === 'done' || rangeProgressStatus === 'restored' ? 'text-emerald-400' : rangeProgressStatus === 'waiting' ? 'text-amber-300' : 'text-cyan-300'}`}
+                    className={`mt-0.5 max-w-[116px] truncate text-[8px] ${rangeProgressStatus === 'done' ? 'text-emerald-400' : rangeProgressStatus === 'waiting' || rangeProgressStatus === 'partial' ? 'text-amber-300' : 'text-cyan-300'}`}
                     title={rangeProgressTitle}
                   >
                     {rangeProgressText}

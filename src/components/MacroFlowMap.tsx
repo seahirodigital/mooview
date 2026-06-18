@@ -279,6 +279,8 @@ interface QuoteFetchProgress {
   fetchedSymbols: number;
   totalSymbols: number;
   cachedSymbols: number;
+  targetSymbols: number;
+  failedSymbols: string[];
 }
 
 interface StoredKlineCacheRecord {
@@ -2273,6 +2275,19 @@ function getQuoteFromHistory(
   return history[date]?.[normalizeSymbol(symbol)] || null;
 }
 
+function getStoredQuoteForDate(
+  symbol: string,
+  date: string,
+  history: Record<string, Record<string, MacroQuote | null>>,
+  latestQuotes?: Record<string, MacroQuote | null>,
+): MacroQuote | null {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (date === FLOW_END_DATE && latestQuotes?.[normalizedSymbol]) {
+    return latestQuotes[normalizedSymbol] || null;
+  }
+  return history[date]?.[normalizedSymbol] || null;
+}
+
 function getQuoteHistoryEndPrice(
   symbol: string,
   history: Record<string, Record<string, MacroQuote | null>>,
@@ -2597,6 +2612,7 @@ export function MacroFlowMap({
   const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
   const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>(() => readStoredMacroQuoteCache());
   const [macroQuoteHistory, setMacroQuoteHistory] = useState<Record<string, Record<string, MacroQuote | null>>>({});
+  const [quoteCacheHydrated, setQuoteCacheHydrated] = useState(false);
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
   const [quoteFetchProgress, setQuoteFetchProgress] = useState<QuoteFetchProgress | null>(null);
   const [klineFetchProgress, setKlineFetchProgress] = useState<KlineFetchProgress | null>(null);
@@ -2722,6 +2738,7 @@ export function MacroFlowMap({
     ]).then(([storedQuotes, storedHistory]) => {
       if (cancelled) return;
       quoteIndexedDbHydratedRef.current = true;
+      setQuoteCacheHydrated(true);
       if (Object.keys(storedHistory).length > 0) {
         setMacroQuoteHistory((current) => ({ ...storedHistory, ...current }));
       }
@@ -2792,31 +2809,58 @@ export function MacroFlowMap({
   }, [basketDbImportDecision, basketEditor, stockEditModal]);
 
   useEffect(() => {
-    if (!macroQuoteSignature) return undefined;
+    if (!macroQuoteSignature || !quoteCacheHydrated) return undefined;
     let cancelled = false;
 
     const loadQuotes = async () => {
       if (macroQuoteFetchInFlightRef.current) return;
       macroQuoteFetchInFlightRef.current = true;
       const totalSymbols = macroQuoteSymbols.length;
-      const totalBatches = Math.max(1, Math.ceil(totalSymbols / SNAPSHOT_BATCH_SIZE));
-      const cachedSymbols = macroQuoteSymbols.filter((symbol) => macroQuoteCacheRef.current[normalizeSymbol(symbol)]).length;
-      let fetchedSymbols = 0;
+      const historyAtStart = macroQuoteHistoryRef.current;
+      const cacheAtStart = macroQuoteCacheRef.current;
+      const targetSymbols = macroQuoteSymbols.filter((symbol) => (
+        !getStoredQuoteForDate(symbol, FLOW_END_DATE, historyAtStart, cacheAtStart)
+      ));
+      const pendingSymbols = new Set(targetSymbols);
+      const totalBatches = Math.max(1, Math.ceil(targetSymbols.length / SNAPSHOT_BATCH_SIZE));
+      const cachedSymbols = totalSymbols - pendingSymbols.size;
+      const getFetchedSymbols = () => totalSymbols - pendingSymbols.size;
+      const setProgress = (status: QuoteFetchProgress['status'], currentBatch: number) => {
+        setQuoteFetchProgress({
+          status,
+          currentBatch,
+          totalBatches,
+          fetchedSymbols: getFetchedSymbols(),
+          totalSymbols,
+          cachedSymbols,
+          targetSymbols: targetSymbols.length,
+          failedSymbols: Array.from(pendingSymbols),
+        });
+      };
       setQuoteFetchProgress({
-        status: 'loading',
+        status: targetSymbols.length === 0 ? 'done' : 'loading',
         currentBatch: 0,
         totalBatches,
-        fetchedSymbols,
+        fetchedSymbols: getFetchedSymbols(),
         totalSymbols,
         cachedSymbols,
+        targetSymbols: targetSymbols.length,
+        failedSymbols: Array.from(pendingSymbols),
       });
+      if (targetSymbols.length === 0) {
+        macroQuoteFetchInFlightRef.current = false;
+        return;
+      }
       const commitQuotes = (quotes: Record<string, MacroQuote | null>) => {
         if (cancelled || Object.keys(quotes).length === 0) return;
+        Object.entries(quotes).forEach(([symbol, quote]) => {
+          if (quote) pendingSymbols.delete(normalizeSymbol(symbol));
+        });
         setMacroQuoteCache((current) => ({ ...current, ...quotes }));
       };
-      const fetchSingleQuotes = async (symbols: string[]): Promise<number> => {
+      const fetchSingleQuotes = async (symbols: string[]): Promise<Record<string, MacroQuote | null>> => {
         const singleBatchSize = 8;
-        let resolvedCount = 0;
+        const resolvedQuotes: Record<string, MacroQuote | null> = {};
         for (let index = 0; index < symbols.length; index += singleBatchSize) {
           const singleBatch = symbols.slice(index, index + singleBatchSize);
           const singleResults = await Promise.all(singleBatch.map(async (symbol) => {
@@ -2840,25 +2884,18 @@ export function MacroFlowMap({
             const [symbol, quote] = result;
             if (quote) singleQuotes[symbol] = quote;
           });
-          resolvedCount += Object.keys(singleQuotes).length;
+          Object.assign(resolvedQuotes, singleQuotes);
           commitQuotes(singleQuotes);
-          if (cancelled) return resolvedCount;
+          if (cancelled) return resolvedQuotes;
         }
-        return resolvedCount;
+        return resolvedQuotes;
       };
 
       try {
-        for (let index = 0; index < macroQuoteSymbols.length; index += SNAPSHOT_BATCH_SIZE) {
+        for (let index = 0; index < targetSymbols.length; index += SNAPSHOT_BATCH_SIZE) {
           const currentBatch = Math.floor(index / SNAPSHOT_BATCH_SIZE) + 1;
-          const batch = macroQuoteSymbols.slice(index, index + SNAPSHOT_BATCH_SIZE);
-          setQuoteFetchProgress({
-            status: 'loading',
-            currentBatch,
-            totalBatches,
-            fetchedSymbols,
-            totalSymbols,
-            cachedSymbols,
-          });
+          const batch = targetSymbols.slice(index, index + SNAPSHOT_BATCH_SIZE);
+          setProgress('loading', currentBatch);
           try {
             const response = await fetch('/api/moomoo/quotes', {
               method: 'POST',
@@ -2884,22 +2921,14 @@ export function MacroFlowMap({
               }
             });
             commitQuotes(batchQuotes);
-            fetchedSymbols += Object.keys(batchQuotes).length;
             const missingSymbols = batch.filter((symbol) => !resolvedSymbols.has(symbol));
-            fetchedSymbols += await fetchSingleQuotes(missingSymbols);
+            await fetchSingleQuotes(missingSymbols);
           } catch {
-            fetchedSymbols += await fetchSingleQuotes(batch);
+            await fetchSingleQuotes(batch);
           }
-          setQuoteFetchProgress({
-            status: currentBatch === totalBatches
-              ? fetchedSymbols >= totalSymbols ? 'done' : 'partial'
-              : 'loading',
-            currentBatch,
-            totalBatches,
-            fetchedSymbols,
-            totalSymbols,
-            cachedSymbols,
-          });
+          setProgress(currentBatch === totalBatches
+            ? pendingSymbols.size === 0 ? 'done' : 'partial'
+            : 'loading', currentBatch);
           if (cancelled) return;
         }
       } catch {
@@ -2912,8 +2941,10 @@ export function MacroFlowMap({
             if (!current) return current;
             return {
               ...current,
-              status: current.fetchedSymbols >= current.totalSymbols ? 'done' : 'partial',
+              status: pendingSymbols.size === 0 ? 'done' : 'partial',
               currentBatch: Math.max(current.currentBatch, current.totalBatches),
+              fetchedSymbols: getFetchedSymbols(),
+              failedSymbols: Array.from(pendingSymbols),
             };
           });
         }
@@ -2927,7 +2958,7 @@ export function MacroFlowMap({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [macroQuoteSignature, macroQuoteSymbols, quoteRefreshToken]);
+  }, [macroQuoteSignature, macroQuoteSymbols, quoteCacheHydrated, quoteRefreshToken]);
 
   useEffect(() => {
     setRegionalOrder((current) => {
@@ -4338,10 +4369,11 @@ export function MacroFlowMap({
       : quoteFetchProgress.status === 'partial'
         ? '1D一部取得'
         : '1D取得中';
-    return `${label} ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}`;
+    const remainingSymbols = Math.max(0, quoteFetchProgress.totalSymbols - quoteFetchProgress.fetchedSymbols);
+    return `${label} ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols} 残${remainingSymbols}`;
   })();
   const quoteProgressTitle = quoteFetchProgress
-    ? `1D snapshot 最新取得 ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄 / 復元cache ${quoteFetchProgress.cachedSymbols}銘柄 / batch ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches}`
+    ? `1D snapshot 取得済 ${quoteFetchProgress.fetchedSymbols}/${quoteFetchProgress.totalSymbols}銘柄 / 今回対象 ${quoteFetchProgress.targetSymbols}銘柄 / 復元cache ${quoteFetchProgress.cachedSymbols}銘柄 / batch ${quoteFetchProgress.currentBatch}/${quoteFetchProgress.totalBatches}${quoteFetchProgress.failedSymbols.length > 0 ? ` / 未取得: ${quoteFetchProgress.failedSymbols.slice(0, 20).join(', ')}` : ''}`
     : undefined;
   const rangeProgressText = klineProgressText || quoteProgressText;
   const rangeProgressTitle = klineProgressText ? klineProgressTitle : quoteProgressTitle;

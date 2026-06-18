@@ -309,7 +309,6 @@ const FLOW_START_DATE = '2026-06-10';
 const FLOW_END_DATE = getTodayDateValue();
 const FLOW_MIN_DATE = getDateValueDaysAgo(365);
 const DEFAULT_RANGE_DAYS = 5;
-const FLOW_DEFAULT_START_DATE = getBusinessDateValueDaysAgo(DEFAULT_RANGE_DAYS);
 const FLOW_EVENT_DATE = '2026-06-10';
 const CALENDAR_WEEK_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
@@ -1491,7 +1490,7 @@ function getBusinessRangeProgressPct(value: string, startDate = FLOW_MIN_DATE, e
 }
 
 function getRangeWindowDays(startDate: string, endDate: string): number {
-  return getBusinessWindowDays(startDate, endDate);
+  return Math.max(1, getBusinessWindowDays(startDate, endDate));
 }
 
 function getSliderStartDate(rangeStartDate: string): string {
@@ -1725,12 +1724,34 @@ function getVolumeMultiplierFromCandles(candles: Candle[] | undefined, startDate
 
 function getRangeEndPriceFromCandles(candles: Candle[] | undefined, startDate: string, endDate: string): number | null {
   const endpoints = getRangeCandleEndpoints(candles, startDate, endDate);
-  return endpoints?.end.close ?? null;
+  if (endpoints) return endpoints.end.close;
+  if (!candles || candles.length === 0) return null;
+  const sortedCandles = [...candles]
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+    .sort((first, second) => getCandleDateValue(first).localeCompare(getCandleDateValue(second)));
+  const endCandle = [...sortedCandles].reverse().find((candle) => getCandleDateValue(candle) <= endDate)
+    || sortedCandles.find((candle) => getCandleDateValue(candle) >= endDate)
+    || sortedCandles[sortedCandles.length - 1];
+  return endCandle?.close ?? null;
 }
 
 function hasUsableRangeCandles(candles: Candle[] | undefined, startDate: string, endDate: string): boolean {
   if (!candles || candles.length === 0) return false;
   return getRangeChangePctFromCandles(candles, startDate, endDate) !== null;
+}
+
+function hasCandlesForRequestedRange(candles: Candle[] | undefined, startDate: string, endDate: string): boolean {
+  if (!hasUsableRangeCandles(candles, startDate, endDate)) return false;
+  if (startDate === endDate) return true;
+  const validDates = (candles || [])
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+    .map(getCandleDateValue);
+  return validDates.some((dateValue) => dateValue <= startDate)
+    && validDates.some((dateValue) => dateValue >= startDate && dateValue <= endDate);
+}
+
+function getSparklineReqNum(startDate: string, endDate: string): number {
+  return startDate === endDate ? 2 : 260;
 }
 
 function getPeriodChangePct(
@@ -1951,9 +1972,11 @@ export function MacroFlowMap({
   onChartSymbolsChange,
 }: MacroFlowMapProps) {
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
+  const macroQuoteFetchInFlightRef = useRef(false);
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
+  const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
   const [macroScopeOptions, setMacroScopeOptions] = useState<MacroScopeOption[]>(() => readSyncedMacroScopeOptions());
-  const [rangeStartDate, setRangeStartDate] = useState(FLOW_DEFAULT_START_DATE);
+  const [rangeStartDate, setRangeStartDate] = useState(FLOW_END_DATE);
   const [rangeEndDate, setRangeEndDate] = useState(FLOW_END_DATE);
   const [calendarTarget, setCalendarTarget] = useState<RangeHandle>('end');
   const [dragRangeHandle, setDragRangeHandle] = useState<RangeHandle | null>(null);
@@ -2139,8 +2162,42 @@ export function MacroFlowMap({
     let cancelled = false;
 
     const loadQuotes = async () => {
+      if (macroQuoteFetchInFlightRef.current) return;
+      macroQuoteFetchInFlightRef.current = true;
+      const commitQuotes = (quotes: Record<string, MacroQuote | null>) => {
+        if (cancelled || Object.keys(quotes).length === 0) return;
+        setMacroQuoteCache((current) => ({ ...current, ...quotes }));
+      };
+      const fetchSingleQuotes = async (symbols: string[]) => {
+        const singleBatchSize = 8;
+        for (let index = 0; index < symbols.length; index += singleBatchSize) {
+          const singleBatch = symbols.slice(index, index + singleBatchSize);
+          const singleResults = await Promise.all(singleBatch.map(async (symbol) => {
+            try {
+              const response = await fetch('/api/moomoo/quote', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol }),
+              });
+              const data = await response.json();
+              if (!response.ok || !data.success) return null;
+              return [symbol, parseMacroQuoteResult(data as MacroQuoteResult, symbol)] as const;
+            } catch {
+              return null;
+            }
+          }));
+          const singleQuotes: Record<string, MacroQuote | null> = {};
+          singleResults.forEach((result) => {
+            if (!result) return;
+            const [symbol, quote] = result;
+            if (quote) singleQuotes[symbol] = quote;
+          });
+          commitQuotes(singleQuotes);
+          if (cancelled) return;
+        }
+      };
+
       try {
-        const nextQuotes: Record<string, MacroQuote | null> = {};
         const batchSize = 40;
         for (let index = 0; index < macroQuoteSymbols.length; index += batchSize) {
           const batch = macroQuoteSymbols.slice(index, index + batchSize);
@@ -2155,6 +2212,7 @@ export function MacroFlowMap({
               throw new Error(data.error || 'quotes fetch failed');
             }
             const resolvedSymbols = new Set<string>();
+            const batchQuotes: Record<string, MacroQuote | null> = {};
             Object.entries(data.quotes as Record<string, MacroQuoteResult>).forEach(([key, quote]) => {
               const requestKey = normalizeSymbol(String(key));
               const quoteKey = normalizeSymbol(String(quote.symbol || ''));
@@ -2162,59 +2220,24 @@ export function MacroFlowMap({
               if (!normalized) return;
               const parsed = parseMacroQuoteResult(quote, normalized);
               if (parsed) {
-                nextQuotes[normalized] = parsed;
+                batchQuotes[normalized] = parsed;
                 resolvedSymbols.add(normalized);
               }
             });
+            commitQuotes(batchQuotes);
             const missingSymbols = batch.filter((symbol) => !resolvedSymbols.has(symbol));
-            const singleResults = await Promise.all(missingSymbols.map(async (symbol) => {
-              try {
-                const response = await fetch('/api/moomoo/quote', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ symbol }),
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) return null;
-                return [symbol, parseMacroQuoteResult(data as MacroQuoteResult, symbol)] as const;
-              } catch {
-                return null;
-              }
-            }));
-            singleResults.forEach((result) => {
-              if (!result) return;
-              const [symbol, quote] = result;
-              if (quote) nextQuotes[symbol] = quote;
-            });
+            await fetchSingleQuotes(missingSymbols);
           } catch {
-            const singleResults = await Promise.all(batch.map(async (symbol) => {
-              try {
-                const response = await fetch('/api/moomoo/quote', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ symbol }),
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) return null;
-                return [symbol, parseMacroQuoteResult(data as MacroQuoteResult, symbol)] as const;
-              } catch {
-                return null;
-              }
-            }));
-            singleResults.forEach((result) => {
-              if (!result) return;
-              const [symbol, quote] = result;
-              if (quote) nextQuotes[symbol] = quote;
-            });
+            await fetchSingleQuotes(batch);
           }
-        }
-        if (!cancelled) {
-          setMacroQuoteCache((current) => ({ ...current, ...nextQuotes }));
+          if (cancelled) return;
         }
       } catch {
         if (!cancelled) {
           setMacroQuoteCache((current) => current);
         }
+      } finally {
+        macroQuoteFetchInFlightRef.current = false;
       }
     };
 
@@ -2767,13 +2790,12 @@ export function MacroFlowMap({
     return links;
   }, [flowBaskets, selectedBasketId, selectedSectorId, visibleStockKeys]);
   const sparklineSymbols = useMemo(() => Array.from(new Set([
-    ...sectorEtfRows.map((item) => item.symbol),
-    ...regionalRows.map((region) => region.symbol),
-    ...flowBaskets.map((basket) => basket.stockMetrics[0]?.symbol || basket.stocks[0]?.symbol || ''),
-    ...flowStocks.map((stock) => stock.symbol),
-    ...orderedSectors.flatMap((sector) => sector.baskets.flatMap((basket) => basket.stockMetrics.map((stock) => stock.symbol))),
-  ].map(normalizeSymbol).filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [flowBaskets, flowStocks, orderedSectors, regionalRows, sectorEtfRows]);
+    ...baskets.flatMap((basket) => basket.stocks.map((stock) => stock.symbol)),
+    ...sectorEtfDefs.map((item) => item.symbol),
+    ...REGIONAL_MARKET_DEFS.map((region) => region.symbol),
+  ].map(normalizeSymbol).filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [baskets, sectorEtfDefs]);
   const sparklineSymbolSignature = sparklineSymbols.join('|');
+  const sparklineReqNum = getSparklineReqNum(rangeStartDate, rangeEndDate);
   const sectorRollupCandles = useMemo(() => {
     const next: Record<string, Candle[]> = {};
     orderedSectors.forEach((sector) => {
@@ -2785,12 +2807,8 @@ export function MacroFlowMap({
   const maxLinkFlow = Math.max(1, ...flowLinks.map((link) => link.flowValue));
 
   useEffect(() => {
-    sparklineFetchKeysRef.current.clear();
-  }, [rangeEndDate, rangeStartDate, sparklineSymbolSignature]);
-
-  useEffect(() => {
     const missingSymbols = sparklineSymbols.filter((symbol) => (
-      !hasUsableRangeCandles(sparklineCache[symbol], rangeStartDate, rangeEndDate)
+      !hasCandlesForRequestedRange(sparklineCache[symbol], rangeStartDate, rangeEndDate)
     ));
     if (missingSymbols.length === 0) return undefined;
     let cancelled = false;
@@ -2800,14 +2818,15 @@ export function MacroFlowMap({
       for (let index = 0; index < missingSymbols.length; index += batchSize) {
         const batch = missingSymbols.slice(index, index + batchSize);
         const results = await Promise.all(batch.map(async (symbol) => {
-          const fetchKey = `${symbol}:${rangeStartDate}:${rangeEndDate}`;
+          const fetchKey = `${symbol}:${sparklineReqNum}`;
+          if (sparklineFetchKeysRef.current.has(fetchKey) || sparklineFetchedKeysRef.current.has(fetchKey)) return null;
           sparklineFetchKeysRef.current.add(fetchKey);
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               const response = await fetch('/api/moomoo/kline', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol, timeframe: '1d', reqNum: 260 }),
+                body: JSON.stringify({ symbol, timeframe: '1d', reqNum: sparklineReqNum }),
               });
               const data = await response.json();
               const candles = Array.isArray(data.candles)
@@ -2815,7 +2834,7 @@ export function MacroFlowMap({
                 : [];
               if (response.ok && data.success && candles.length > 0) {
                 sparklineFetchKeysRef.current.delete(fetchKey);
-                return [symbol, candles] as const;
+                return [symbol, candles, fetchKey] as const;
               }
             } catch {
               // 一時的な502や接続失敗は次の試行に任せる
@@ -2825,12 +2844,15 @@ export function MacroFlowMap({
           return null;
         }));
         const next: Record<string, Candle[]> = {};
+        const fetchedKeys: string[] = [];
         results.forEach((result) => {
           if (!result) return;
-          const [symbol, candles] = result;
+          const [symbol, candles, fetchKey] = result;
           next[symbol] = candles;
+          fetchedKeys.push(fetchKey);
         });
         if (!cancelled && Object.keys(next).length > 0) {
+          fetchedKeys.forEach((fetchKey) => sparklineFetchedKeysRef.current.add(fetchKey));
           setSparklineCache((current) => ({ ...current, ...next }));
         }
         if (cancelled) return;
@@ -2841,7 +2863,7 @@ export function MacroFlowMap({
     return () => {
       cancelled = true;
     };
-  }, [rangeEndDate, rangeStartDate, sparklineCache, sparklineSymbolSignature, sparklineSymbols]);
+  }, [quoteRefreshToken, rangeEndDate, rangeStartDate, sparklineCache, sparklineReqNum, sparklineSymbolSignature]);
 
   const flowSvgHeight = Math.max(
     460,
@@ -3032,6 +3054,7 @@ export function MacroFlowMap({
       return next;
     });
     sparklineFetchKeysRef.current.clear();
+    sparklineFetchedKeysRef.current.clear();
     setQuoteRefreshToken((value) => value + 1);
   };
 
@@ -3362,7 +3385,7 @@ export function MacroFlowMap({
   };
 
   const resetFlowView = () => {
-    setRangeStartDate(FLOW_DEFAULT_START_DATE);
+    setRangeStartDate(FLOW_END_DATE);
     setRangeEndDate(FLOW_END_DATE);
     setSearchQuery('');
     setMacroScope(MACRO_ALL_SCOPE_ID);

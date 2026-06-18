@@ -796,6 +796,21 @@ class MoomooQuoteService:
             except Exception as error:
                 history_error = error
 
+            if timeframe == "1d" and count <= 2:
+                try:
+                    quote = self._quote_locked(symbol)
+                    candles = quote_to_fallback_candles(symbol, quote)
+                    if candles:
+                        return {
+                            "success": True,
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "source": "quote-fallback",
+                            "candles": candles,
+                        }
+                except Exception:
+                    pass
+
             try:
                 self._subscribe(symbol, subtype)
                 ret, data = self._get_context().get_cur_kline(

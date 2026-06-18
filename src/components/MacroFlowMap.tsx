@@ -263,6 +263,24 @@ interface StockContextMenuState {
   label: string;
 }
 
+interface KlineFetchProgress {
+  status: 'loading' | 'waiting' | 'done';
+  currentBatch: number;
+  totalBatches: number;
+  fetchedSymbols: number;
+  totalSymbols: number;
+  cachedSymbols: number;
+}
+
+interface StoredKlineCacheRecord {
+  key?: string;
+  symbol?: string;
+  timeframe?: string;
+  reqNum?: number;
+  candles?: Candle[];
+  savedAt?: number;
+}
+
 interface FlowLink {
   id: string;
   sourceId: string;
@@ -315,6 +333,11 @@ const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
 const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
 const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
+const MACRO_KLINE_DB_NAME = 'mooview_macro_flow_kline_cache_v1';
+const MACRO_KLINE_DB_STORE = 'kline';
+const MACRO_KLINE_DB_VERSION = 1;
+const KLINE_BATCH_SIZE = 60;
+const KLINE_BATCH_INTERVAL_MS = 30_000;
 const MACRO_ALL_SCOPE_ID = 'macro-all';
 const FLOW_ROW_GAP = 4;
 const FLOW_PANEL_PADDING_Y = 34;
@@ -782,6 +805,99 @@ function parseMacroQuoteResult(quote: MacroQuoteResult, fallbackSymbol: string):
     volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
     dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
   };
+}
+
+let macroKlineDbPromise: Promise<IDBDatabase> | null = null;
+
+function getMacroKlineCacheKey(symbol: string, reqNum: number): string {
+  return `${normalizeSymbol(symbol)}:1d:${reqNum}`;
+}
+
+function openMacroKlineDb(): Promise<IDBDatabase> {
+  if (typeof window === 'undefined' || !window.indexedDB) {
+    return Promise.reject(new Error('IndexedDB unavailable'));
+  }
+  if (macroKlineDbPromise) return macroKlineDbPromise;
+  macroKlineDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(MACRO_KLINE_DB_NAME, MACRO_KLINE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(MACRO_KLINE_DB_STORE)) {
+        db.createObjectStore(MACRO_KLINE_DB_STORE, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+    request.onblocked = () => reject(new Error('IndexedDB open blocked'));
+  }).catch((error) => {
+    macroKlineDbPromise = null;
+    throw error;
+  });
+  return macroKlineDbPromise;
+}
+
+function sanitizeStoredCandles(candles: unknown): Candle[] | null {
+  if (!Array.isArray(candles)) return null;
+  const sanitized = candles.filter((candle): candle is Candle => (
+    candle
+    && typeof candle === 'object'
+    && Number.isFinite(Number((candle as Candle).time))
+    && typeof (candle as Candle).timeStr === 'string'
+    && Number.isFinite(Number((candle as Candle).open))
+    && Number.isFinite(Number((candle as Candle).high))
+    && Number.isFinite(Number((candle as Candle).low))
+    && Number.isFinite(Number((candle as Candle).close))
+    && Number.isFinite(Number((candle as Candle).volume))
+    && Number((candle as Candle).close) > 0
+  ));
+  return sanitized.length > 0 ? sanitized : null;
+}
+
+async function readStoredKlineCandles(symbol: string, reqNum: number): Promise<Candle[] | null> {
+  try {
+    const db = await openMacroKlineDb();
+    const key = getMacroKlineCacheKey(symbol, reqNum);
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_KLINE_DB_STORE, 'readonly');
+      const request = transaction.objectStore(MACRO_KLINE_DB_STORE).get(key);
+      request.onsuccess = () => {
+        const record = request.result as StoredKlineCacheRecord | undefined;
+        resolve(sanitizeStoredCandles(record?.candles));
+      };
+      request.onerror = () => resolve(null);
+      transaction.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function writeStoredKlineCandles(symbol: string, reqNum: number, candles: Candle[]): Promise<void> {
+  const sanitized = sanitizeStoredCandles(candles);
+  if (!sanitized) return;
+  try {
+    const db = await openMacroKlineDb();
+    const key = getMacroKlineCacheKey(symbol, reqNum);
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(MACRO_KLINE_DB_STORE, 'readwrite');
+      transaction.objectStore(MACRO_KLINE_DB_STORE).put({
+        key,
+        symbol: normalizeSymbol(symbol),
+        timeframe: '1d',
+        reqNum,
+        candles: sanitized,
+        savedAt: Date.now(),
+      } satisfies StoredKlineCacheRecord & { key: string });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+    });
+  } catch {
+  }
+}
+
+function waitForKlineBatchInterval(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, KLINE_BATCH_INTERVAL_MS));
 }
 
 function moveIdBefore(ids: string[], movingId: string, targetId: string): string[] {
@@ -1975,6 +2091,7 @@ export function MacroFlowMap({
   const macroQuoteFetchInFlightRef = useRef(false);
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
+  const klineQueueRunIdRef = useRef(0);
   const [macroScopeOptions, setMacroScopeOptions] = useState<MacroScopeOption[]>(() => readSyncedMacroScopeOptions());
   const [rangeStartDate, setRangeStartDate] = useState(FLOW_END_DATE);
   const [rangeEndDate, setRangeEndDate] = useState(FLOW_END_DATE);
@@ -2011,6 +2128,7 @@ export function MacroFlowMap({
   const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
   const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>({});
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
+  const [klineFetchProgress, setKlineFetchProgress] = useState<KlineFetchProgress | null>(null);
   const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
   const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
   const basketDbImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -2198,7 +2316,7 @@ export function MacroFlowMap({
       };
 
       try {
-        const batchSize = 40;
+        const batchSize = 200;
         for (let index = 0; index < macroQuoteSymbols.length; index += batchSize) {
           const batch = macroQuoteSymbols.slice(index, index + batchSize);
           try {
@@ -2789,11 +2907,27 @@ export function MacroFlowMap({
     });
     return links;
   }, [flowBaskets, selectedBasketId, selectedSectorId, visibleStockKeys]);
+  const stockKlineSymbols = useMemo(() => {
+    const bySymbol = new Map<string, number>();
+    baskets.forEach((basket) => {
+      basket.stocks.forEach((stock) => {
+        const symbol = normalizeSymbol(stock.symbol);
+        if (!symbol || isUnsupportedDataSymbol(symbol)) return;
+        const marketCap = Number(stock.marketCap);
+        bySymbol.set(symbol, Math.max(bySymbol.get(symbol) || 0, Number.isFinite(marketCap) ? marketCap : 0));
+      });
+    });
+    return Array.from(bySymbol.entries())
+      .sort(([firstSymbol, firstMarketCap], [secondSymbol, secondMarketCap]) => (
+        secondMarketCap - firstMarketCap || firstSymbol.localeCompare(secondSymbol)
+      ))
+      .map(([symbol]) => symbol);
+  }, [baskets]);
   const sparklineSymbols = useMemo(() => Array.from(new Set([
-    ...baskets.flatMap((basket) => basket.stocks.map((stock) => stock.symbol)),
-    ...sectorEtfDefs.map((item) => item.symbol),
-    ...REGIONAL_MARKET_DEFS.map((region) => region.symbol),
-  ].map(normalizeSymbol).filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [baskets, sectorEtfDefs]);
+    ...stockKlineSymbols,
+    ...sectorEtfDefs.map((item) => normalizeSymbol(item.symbol)),
+    ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
+  ].filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [sectorEtfDefs, stockKlineSymbols]);
   const sparklineSymbolSignature = sparklineSymbols.join('|');
   const sparklineReqNum = getSparklineReqNum(rangeStartDate, rangeEndDate);
   const sectorRollupCandles = useMemo(() => {
@@ -2807,55 +2941,146 @@ export function MacroFlowMap({
   const maxLinkFlow = Math.max(1, ...flowLinks.map((link) => link.flowValue));
 
   useEffect(() => {
-    const missingSymbols = sparklineSymbols.filter((symbol) => (
-      !hasCandlesForRequestedRange(sparklineCache[symbol], rangeStartDate, rangeEndDate)
-    ));
-    if (missingSymbols.length === 0) return undefined;
+    const runId = klineQueueRunIdRef.current + 1;
+    klineQueueRunIdRef.current = runId;
+    sparklineFetchKeysRef.current.clear();
+
+    if (rangeStartDate === rangeEndDate) {
+      setKlineFetchProgress(null);
+      return undefined;
+    }
+
     let cancelled = false;
+    const cacheAtStart = sparklineCache;
+
+    const fetchKline = async (symbol: string): Promise<readonly [string, Candle[], string] | null> => {
+      const fetchKey = getMacroKlineCacheKey(symbol, sparklineReqNum);
+      if (sparklineFetchKeysRef.current.has(fetchKey)) return null;
+      sparklineFetchKeysRef.current.add(fetchKey);
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const response = await fetch('/api/moomoo/kline', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ symbol, timeframe: '1d', reqNum: sparklineReqNum }),
+            });
+            const data = await response.json();
+            const candles = Array.isArray(data.candles)
+              ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
+              : [];
+            if (response.ok && data.success && candles.length > 0) {
+              return [symbol, candles, fetchKey] as const;
+            }
+          } catch {
+          }
+        }
+        return null;
+      } finally {
+        sparklineFetchKeysRef.current.delete(fetchKey);
+      }
+    };
 
     const loadSparklines = async () => {
-      const batchSize = 6;
-      for (let index = 0; index < missingSymbols.length; index += batchSize) {
-        const batch = missingSymbols.slice(index, index + batchSize);
-        const results = await Promise.all(batch.map(async (symbol) => {
-          const fetchKey = `${symbol}:${sparklineReqNum}`;
-          if (sparklineFetchKeysRef.current.has(fetchKey) || sparklineFetchedKeysRef.current.has(fetchKey)) return null;
-          sparklineFetchKeysRef.current.add(fetchKey);
-          for (let attempt = 0; attempt < 2; attempt += 1) {
-            try {
-              const response = await fetch('/api/moomoo/kline', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol, timeframe: '1d', reqNum: sparklineReqNum }),
-              });
-              const data = await response.json();
-              const candles = Array.isArray(data.candles)
-                ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
-                : [];
-              if (response.ok && data.success && candles.length > 0) {
-                sparklineFetchKeysRef.current.delete(fetchKey);
-                return [symbol, candles, fetchKey] as const;
-              }
-            } catch {
-              // 一時的な502や接続失敗は次の試行に任せる
-            }
-          }
-          sparklineFetchKeysRef.current.delete(fetchKey);
-          return null;
-        }));
+      const missingAtStart = sparklineSymbols.filter((symbol) => (
+        !hasCandlesForRequestedRange(cacheAtStart[symbol], rangeStartDate, rangeEndDate)
+      ));
+      if (missingAtStart.length === 0) {
+        setKlineFetchProgress(null);
+        return;
+      }
+
+      const storedResults = await Promise.all(missingAtStart.map(async (symbol) => {
+        const candles = await readStoredKlineCandles(symbol, sparklineReqNum);
+        if (!candles || !hasCandlesForRequestedRange(candles, rangeStartDate, rangeEndDate)) return null;
+        return [symbol, candles] as const;
+      }));
+      if (cancelled || klineQueueRunIdRef.current !== runId) return;
+
+      const cachedCandles: Record<string, Candle[]> = {};
+      storedResults.forEach((result) => {
+        if (!result) return;
+        const [symbol, candles] = result;
+        cachedCandles[symbol] = candles;
+        sparklineFetchedKeysRef.current.add(getMacroKlineCacheKey(symbol, sparklineReqNum));
+      });
+
+      const cacheWithStored = { ...cacheAtStart, ...cachedCandles };
+      const cachedCount = Object.keys(cachedCandles).length;
+      if (cachedCount > 0) {
+        setSparklineCache((current) => ({ ...current, ...cachedCandles }));
+      }
+
+      const remainingSymbols = sparklineSymbols.filter((symbol) => (
+        !hasCandlesForRequestedRange(cacheWithStored[symbol], rangeStartDate, rangeEndDate)
+      ));
+      if (remainingSymbols.length === 0) {
+        setKlineFetchProgress({
+          status: 'done',
+          currentBatch: 0,
+          totalBatches: 0,
+          fetchedSymbols: 0,
+          totalSymbols: 0,
+          cachedSymbols: missingAtStart.length,
+        });
+        return;
+      }
+
+      const totalBatches = Math.ceil(remainingSymbols.length / KLINE_BATCH_SIZE);
+      let fetchedSymbols = 0;
+      for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
+        const currentBatch = batchIndex + 1;
+        if (batchIndex > 0) {
+          setKlineFetchProgress({
+            status: 'waiting',
+            currentBatch,
+            totalBatches,
+            fetchedSymbols,
+            totalSymbols: remainingSymbols.length,
+            cachedSymbols: cachedCount,
+          });
+          await waitForKlineBatchInterval();
+          if (cancelled || klineQueueRunIdRef.current !== runId) return;
+        }
+
+        setKlineFetchProgress({
+          status: 'loading',
+          currentBatch,
+          totalBatches,
+          fetchedSymbols,
+          totalSymbols: remainingSymbols.length,
+          cachedSymbols: cachedCount,
+        });
+
+        const batch = remainingSymbols.slice(batchIndex * KLINE_BATCH_SIZE, (batchIndex + 1) * KLINE_BATCH_SIZE);
+        const results = await Promise.all(batch.map(fetchKline));
+        if (cancelled || klineQueueRunIdRef.current !== runId) return;
+
         const next: Record<string, Candle[]> = {};
-        const fetchedKeys: string[] = [];
+        const writeTasks: Promise<void>[] = [];
         results.forEach((result) => {
           if (!result) return;
           const [symbol, candles, fetchKey] = result;
           next[symbol] = candles;
-          fetchedKeys.push(fetchKey);
+          sparklineFetchedKeysRef.current.add(fetchKey);
+          writeTasks.push(writeStoredKlineCandles(symbol, sparklineReqNum, candles));
         });
-        if (!cancelled && Object.keys(next).length > 0) {
-          fetchedKeys.forEach((fetchKey) => sparklineFetchedKeysRef.current.add(fetchKey));
+
+        const fetchedThisBatch = Object.keys(next).length;
+        fetchedSymbols += fetchedThisBatch;
+        if (fetchedThisBatch > 0) {
           setSparklineCache((current) => ({ ...current, ...next }));
         }
-        if (cancelled) return;
+        void Promise.all(writeTasks);
+
+        setKlineFetchProgress({
+          status: batchIndex === totalBatches - 1 ? 'done' : 'waiting',
+          currentBatch,
+          totalBatches,
+          fetchedSymbols,
+          totalSymbols: remainingSymbols.length,
+          cachedSymbols: cachedCount,
+        });
       }
     };
 
@@ -2863,7 +3088,7 @@ export function MacroFlowMap({
     return () => {
       cancelled = true;
     };
-  }, [quoteRefreshToken, rangeEndDate, rangeStartDate, sparklineCache, sparklineReqNum, sparklineSymbolSignature]);
+  }, [quoteRefreshToken, rangeEndDate, rangeStartDate, sparklineReqNum, sparklineSymbolSignature]);
 
   const flowSvgHeight = Math.max(
     460,
@@ -3055,6 +3280,8 @@ export function MacroFlowMap({
     });
     sparklineFetchKeysRef.current.clear();
     sparklineFetchedKeysRef.current.clear();
+    klineQueueRunIdRef.current += 1;
+    setKlineFetchProgress(null);
     setQuoteRefreshToken((value) => value + 1);
   };
 
@@ -3398,6 +3625,23 @@ export function MacroFlowMap({
     setDraggingStockSymbol(null);
   };
 
+  const klineProgressText = (() => {
+    if (!klineFetchProgress) return null;
+    if (klineFetchProgress.totalBatches === 0) {
+      return `KLine復元済 ${klineFetchProgress.cachedSymbols}`;
+    }
+    const remainingBatches = Math.max(0, klineFetchProgress.totalBatches - klineFetchProgress.currentBatch);
+    const label = klineFetchProgress.status === 'done'
+      ? 'KLine完了'
+      : klineFetchProgress.status === 'waiting'
+        ? 'KLine待機'
+        : 'KLine取得中';
+    return `${label} ${klineFetchProgress.currentBatch}/${klineFetchProgress.totalBatches} 残${remainingBatches}`;
+  })();
+  const klineProgressTitle = klineFetchProgress
+    ? `KLine ${klineFetchProgress.fetchedSymbols}/${klineFetchProgress.totalSymbols}銘柄取得、cache ${klineFetchProgress.cachedSymbols}銘柄`
+    : undefined;
+
   useEffect(() => {
     if (!dragRangeHandle) return undefined;
     const handlePointerMove = (event: PointerEvent) => {
@@ -3580,7 +3824,17 @@ export function MacroFlowMap({
               >
                 {rangeStartDate}
               </button>
-              <span className="text-emerald-300">{activeWindowDays}D</span>
+              <div className="flex min-w-[116px] flex-col items-center leading-none">
+                <span className="text-emerald-300">{activeWindowDays}D</span>
+                {klineProgressText && (
+                  <span
+                    className={`mt-0.5 max-w-[116px] truncate text-[8px] ${klineFetchProgress?.status === 'done' ? 'text-emerald-400' : klineFetchProgress?.status === 'waiting' ? 'text-amber-300' : 'text-cyan-300'}`}
+                    title={klineProgressTitle}
+                  >
+                    {klineProgressText}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={(event) => {

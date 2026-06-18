@@ -728,7 +728,7 @@ class MoomooQuoteService:
 
         symbols = []
         seen = set()
-        for raw_symbol in raw_symbols[:200]:
+        for raw_symbol in raw_symbols[:400]:
             try:
                 symbol = normalize_symbol(str(raw_symbol))
             except Exception:

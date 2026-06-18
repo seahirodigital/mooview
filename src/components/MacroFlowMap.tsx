@@ -300,6 +300,28 @@ interface StoredMacroQuoteCacheRecord extends StoredMacroQuoteCache {
   key: string;
 }
 
+interface StoredMacroQuoteHistoryRecord {
+  key: string;
+  date: string;
+  savedAt?: number;
+  quotes?: Record<string, MacroQuote | null>;
+}
+
+interface MacroFlowCacheExportPayload {
+  schema?: string;
+  schemaVersion?: number;
+  exportedAt?: string;
+  flowEndDate?: string;
+  quoteHistory?: Record<string, StoredMacroQuoteCache | Record<string, MacroQuote | null>>;
+  latestQuotes?: StoredMacroQuoteCache;
+  klineRecords?: StoredKlineCacheRecord[];
+  valueChain?: {
+    current?: StoredValueChain | null;
+    history?: StoredValueChainHistoryEntry[];
+    activeHistoryId?: string | null;
+  };
+}
+
 interface FlowLink {
   id: string;
   sourceId: string;
@@ -355,8 +377,11 @@ const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
 const MACRO_QUOTE_CACHE_STORAGE_KEY = 'mooview_macro_flow_quote_cache_v1';
 const MACRO_QUOTE_DB_NAME = 'mooview_macro_flow_quote_cache_v1';
 const MACRO_QUOTE_DB_STORE = 'quotes';
-const MACRO_QUOTE_DB_VERSION = 1;
+const MACRO_QUOTE_HISTORY_DB_STORE = 'quote_history';
+const MACRO_QUOTE_DB_VERSION = 2;
 const MACRO_QUOTE_DB_RECORD_KEY = 'latest';
+const MACRO_FLOW_CACHE_EXPORT_SCHEMA = 'mooview-macro-flow-cache';
+const MACRO_FLOW_CACHE_EXPORT_VERSION = 1;
 const MACRO_KLINE_DB_NAME = 'mooview_macro_flow_kline_cache_v1';
 const MACRO_KLINE_DB_STORE = 'kline';
 const MACRO_KLINE_DB_VERSION = 1;
@@ -857,6 +882,24 @@ function sanitizeStoredQuoteMap(quotes: unknown): Record<string, MacroQuote | nu
   return result;
 }
 
+function isDateValueText(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function sanitizeStoredQuoteHistory(history: unknown): Record<string, Record<string, MacroQuote | null>> {
+  const result: Record<string, Record<string, MacroQuote | null>> = {};
+  if (!history || typeof history !== 'object') return result;
+  Object.entries(history as Record<string, unknown>).forEach(([date, rawRecord]) => {
+    if (!isDateValueText(date)) return;
+    const rawQuotes = rawRecord && typeof rawRecord === 'object' && 'quotes' in rawRecord
+      ? (rawRecord as StoredMacroQuoteCache).quotes
+      : rawRecord;
+    const quotes = sanitizeStoredQuoteMap(rawQuotes);
+    if (Object.keys(quotes).length > 0) result[date] = quotes;
+  });
+  return result;
+}
+
 function readStoredMacroQuoteCache(): Record<string, MacroQuote | null> {
   if (typeof window === 'undefined') return {};
   try {
@@ -900,6 +943,9 @@ function openMacroQuoteDb(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains(MACRO_QUOTE_DB_STORE)) {
         db.createObjectStore(MACRO_QUOTE_DB_STORE, { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains(MACRO_QUOTE_HISTORY_DB_STORE)) {
+        db.createObjectStore(MACRO_QUOTE_HISTORY_DB_STORE, { keyPath: 'key' });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -957,6 +1003,83 @@ async function writeStoredMacroQuoteIndexedDb(quotes: Record<string, MacroQuote 
       transaction.onabort = () => resolve();
     });
   } catch {
+  }
+}
+
+async function readStoredMacroQuoteHistoryIndexedDb(): Promise<Record<string, Record<string, MacroQuote | null>>> {
+  try {
+    const db = await openMacroQuoteDb();
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_QUOTE_HISTORY_DB_STORE, 'readonly');
+      const request = transaction.objectStore(MACRO_QUOTE_HISTORY_DB_STORE).getAll();
+      request.onsuccess = () => {
+        const next: Record<string, Record<string, MacroQuote | null>> = {};
+        const records = Array.isArray(request.result) ? request.result as StoredMacroQuoteHistoryRecord[] : [];
+        records.forEach((record) => {
+          const date = String(record.date || record.key || '');
+          if (!isDateValueText(date)) return;
+          const quotes = sanitizeStoredQuoteMap(record.quotes);
+          if (Object.keys(quotes).length > 0) next[date] = quotes;
+        });
+        resolve(next);
+      };
+      request.onerror = () => resolve({});
+      transaction.onerror = () => resolve({});
+    });
+  } catch {
+    return {};
+  }
+}
+
+async function writeStoredMacroQuoteHistoryDateIndexedDb(date: string, quotes: Record<string, MacroQuote | null>): Promise<void> {
+  if (typeof window === 'undefined' || !isDateValueText(date)) return;
+  const sanitized = sanitizeStoredQuoteMap(quotes);
+  try {
+    const db = await openMacroQuoteDb();
+    await new Promise<void>((resolve) => {
+      const transaction = db.transaction(MACRO_QUOTE_HISTORY_DB_STORE, 'readwrite');
+      const store = transaction.objectStore(MACRO_QUOTE_HISTORY_DB_STORE);
+      if (Object.keys(sanitized).length === 0) {
+        store.delete(date);
+      } else {
+        store.put({
+          key: date,
+          date,
+          savedAt: Date.now(),
+          quotes: sanitized,
+        } satisfies StoredMacroQuoteHistoryRecord);
+      }
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+    });
+  } catch {
+  }
+}
+
+async function writeStoredMacroQuoteHistoryIndexedDb(history: Record<string, Record<string, MacroQuote | null>>): Promise<number> {
+  const sanitizedHistory = sanitizeStoredQuoteHistory(history);
+  const entries = Object.entries(sanitizedHistory);
+  if (entries.length === 0) return 0;
+  try {
+    const db = await openMacroQuoteDb();
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_QUOTE_HISTORY_DB_STORE, 'readwrite');
+      const store = transaction.objectStore(MACRO_QUOTE_HISTORY_DB_STORE);
+      entries.forEach(([date, quotes]) => {
+        store.put({
+          key: date,
+          date,
+          savedAt: Date.now(),
+          quotes,
+        } satisfies StoredMacroQuoteHistoryRecord);
+      });
+      transaction.oncomplete = () => resolve(entries.length);
+      transaction.onerror = () => resolve(0);
+      transaction.onabort = () => resolve(0);
+    });
+  } catch {
+    return 0;
   }
 }
 
@@ -1046,6 +1169,62 @@ async function writeStoredKlineCandles(symbol: string, reqNum: number, candles: 
       transaction.onabort = () => resolve();
     });
   } catch {
+  }
+}
+
+function sanitizeStoredKlineRecord(record: unknown): (StoredKlineCacheRecord & { key: string }) | null {
+  if (!record || typeof record !== 'object') return null;
+  const source = record as StoredKlineCacheRecord;
+  const symbol = normalizeSymbol(String(source.symbol || ''));
+  const reqNum = Number(source.reqNum);
+  const candles = sanitizeStoredCandles(source.candles);
+  if (!symbol || !Number.isFinite(reqNum) || reqNum <= 0 || !candles) return null;
+  const key = String(source.key || getMacroKlineCacheKey(symbol, reqNum));
+  return {
+    key,
+    symbol,
+    timeframe: source.timeframe || '1d',
+    reqNum,
+    candles,
+    savedAt: Number.isFinite(Number(source.savedAt)) ? Number(source.savedAt) : Date.now(),
+  };
+}
+
+async function readStoredKlineCacheRecords(): Promise<Array<StoredKlineCacheRecord & { key: string }>> {
+  try {
+    const db = await openMacroKlineDb();
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_KLINE_DB_STORE, 'readonly');
+      const request = transaction.objectStore(MACRO_KLINE_DB_STORE).getAll();
+      request.onsuccess = () => {
+        const records = Array.isArray(request.result) ? request.result : [];
+        resolve(records.map(sanitizeStoredKlineRecord).filter((record): record is StoredKlineCacheRecord & { key: string } => Boolean(record)));
+      };
+      request.onerror = () => resolve([]);
+      transaction.onerror = () => resolve([]);
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function writeStoredKlineCacheRecords(records: StoredKlineCacheRecord[]): Promise<number> {
+  const sanitizedRecords = records
+    .map(sanitizeStoredKlineRecord)
+    .filter((record): record is StoredKlineCacheRecord & { key: string } => Boolean(record));
+  if (sanitizedRecords.length === 0) return 0;
+  try {
+    const db = await openMacroKlineDb();
+    return await new Promise((resolve) => {
+      const transaction = db.transaction(MACRO_KLINE_DB_STORE, 'readwrite');
+      const store = transaction.objectStore(MACRO_KLINE_DB_STORE);
+      sanitizedRecords.forEach((record) => store.put(record));
+      transaction.oncomplete = () => resolve(sanitizedRecords.length);
+      transaction.onerror = () => resolve(0);
+      transaction.onabort = () => resolve(0);
+    });
+  } catch {
+    return 0;
   }
 }
 
@@ -1448,6 +1627,73 @@ chainName,stageId,stageName,segmentId,segmentName,categoryId,categoryName,laneId
 - name: ${normalized.name}
 - baskets: ${(normalized.groups || []).map((group) => group.name).join(', ')}
 `;
+}
+
+function parseMacroFlowCacheJson(text: string): MacroFlowCacheExportPayload | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed[0] !== '{') return null;
+  try {
+    const parsed = JSON.parse(trimmed) as MacroFlowCacheExportPayload;
+    if (parsed.schema !== MACRO_FLOW_CACHE_EXPORT_SCHEMA) return null;
+    const quoteHistory = sanitizeStoredQuoteHistory(parsed.quoteHistory);
+    const latestQuoteMap = sanitizeStoredQuoteMap(parsed.latestQuotes?.quotes);
+    const latestQuotes = Object.keys(latestQuoteMap).length > 0
+      ? {
+        date: parsed.latestQuotes?.date || parsed.flowEndDate || FLOW_END_DATE,
+        savedAt: Number.isFinite(Number(parsed.latestQuotes?.savedAt)) ? Number(parsed.latestQuotes?.savedAt) : Date.now(),
+        quotes: latestQuoteMap,
+      } satisfies StoredMacroQuoteCache
+      : undefined;
+    const klineRecords = Array.isArray(parsed.klineRecords)
+      ? parsed.klineRecords.map(sanitizeStoredKlineRecord).filter((record): record is StoredKlineCacheRecord & { key: string } => Boolean(record))
+      : [];
+    const currentChain = parsed.valueChain?.current ? normalizeStoredChain(parsed.valueChain.current) : null;
+    const history = Array.isArray(parsed.valueChain?.history)
+      ? parsed.valueChain.history.map((entry, index): StoredValueChainHistoryEntry | null => {
+        if (!entry || typeof entry !== 'object' || !entry.chain) return null;
+        return {
+          id: String(entry.id || createValueChainId(`imported-chain-${index}`)),
+          importedAt: typeof entry.importedAt === 'string' ? entry.importedAt : new Date().toISOString(),
+          chain: normalizeStoredChain(entry.chain),
+        };
+      }).filter((entry): entry is StoredValueChainHistoryEntry => Boolean(entry))
+      : [];
+    return {
+      schema: MACRO_FLOW_CACHE_EXPORT_SCHEMA,
+      schemaVersion: MACRO_FLOW_CACHE_EXPORT_VERSION,
+      exportedAt: parsed.exportedAt || new Date().toISOString(),
+      flowEndDate: parsed.flowEndDate,
+      quoteHistory,
+      latestQuotes,
+      klineRecords,
+      valueChain: {
+        current: currentChain,
+        history,
+        activeHistoryId: typeof parsed.valueChain?.activeHistoryId === 'string' ? parsed.valueChain.activeHistoryId : null,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeValueChainHistoryEntries(
+  importedEntries: StoredValueChainHistoryEntry[],
+  existingEntries: StoredValueChainHistoryEntry[],
+): StoredValueChainHistoryEntry[] {
+  const merged = new Map<string, StoredValueChainHistoryEntry>();
+  [...importedEntries, ...existingEntries].forEach((entry, index) => {
+    if (!entry.chain) return;
+    const id = String(entry.id || `chain-history-${index}`);
+    const key = `${id}::${entry.chain.name || ''}::${entry.importedAt || ''}`;
+    if (merged.has(key)) return;
+    merged.set(key, {
+      id,
+      importedAt: entry.importedAt || new Date().toISOString(),
+      chain: normalizeStoredChain(entry.chain),
+    });
+  });
+  return Array.from(merged.values());
 }
 
 function stocksToText(stocks: MacroStock[]): string {
@@ -2004,6 +2250,73 @@ function getRangeEndPriceFromCandles(candles: Candle[] | undefined, startDate: s
   return endCandle?.close ?? null;
 }
 
+function getQuoteHistoryDates(history: Record<string, Record<string, MacroQuote | null>>): string[] {
+  return Object.keys(history).filter(isDateValueText).sort((first, second) => first.localeCompare(second));
+}
+
+function findQuoteHistoryDate(dates: string[], targetDate: string, direction: 'forward' | 'backward'): string | null {
+  if (dates.length === 0) return null;
+  if (direction === 'forward') {
+    return dates.find((date) => date >= targetDate) || null;
+  }
+  for (let index = dates.length - 1; index >= 0; index -= 1) {
+    if (dates[index] <= targetDate) return dates[index];
+  }
+  return null;
+}
+
+function getQuoteFromHistory(
+  symbol: string,
+  history: Record<string, Record<string, MacroQuote | null>>,
+  date: string,
+): MacroQuote | null {
+  return history[date]?.[normalizeSymbol(symbol)] || null;
+}
+
+function getQuoteHistoryEndPrice(
+  symbol: string,
+  history: Record<string, Record<string, MacroQuote | null>>,
+  startDate: string,
+  endDate: string,
+  latestQuote?: MacroQuote,
+): number | null {
+  if (endDate === FLOW_END_DATE && latestQuote && Number.isFinite(latestQuote.price) && latestQuote.price > 0) {
+    return latestQuote.price;
+  }
+  const dates = getQuoteHistoryDates(history);
+  const endHistoryDate = findQuoteHistoryDate(dates, endDate, 'backward');
+  if (!endHistoryDate || endHistoryDate < startDate) return null;
+  const endQuote = getQuoteFromHistory(symbol, history, endHistoryDate);
+  return endQuote && Number.isFinite(endQuote.price) && endQuote.price > 0 ? endQuote.price : null;
+}
+
+function getQuoteHistoryChangePct(
+  symbol: string,
+  history: Record<string, Record<string, MacroQuote | null>>,
+  startDate: string,
+  endDate: string,
+  latestQuote?: MacroQuote,
+): number | null {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (startDate === endDate && endDate === FLOW_END_DATE && latestQuote && Number.isFinite(latestQuote.changePct)) {
+    return Number(latestQuote.changePct);
+  }
+  const dates = getQuoteHistoryDates(history);
+  const endHistoryDate = endDate === FLOW_END_DATE && latestQuote ? FLOW_END_DATE : findQuoteHistoryDate(dates, endDate, 'backward');
+  const endQuote = endDate === FLOW_END_DATE && latestQuote
+    ? latestQuote
+    : endHistoryDate ? getQuoteFromHistory(normalizedSymbol, history, endHistoryDate) : null;
+  if (!endHistoryDate || !endQuote || !Number.isFinite(endQuote.price) || endQuote.price <= 0) return null;
+  if (startDate === endDate) {
+    return Number.isFinite(endQuote.changePct) ? Number(endQuote.changePct) : null;
+  }
+  const startHistoryDate = findQuoteHistoryDate(dates, startDate, 'forward');
+  if (!startHistoryDate || startHistoryDate > endHistoryDate) return null;
+  const startQuote = getQuoteFromHistory(normalizedSymbol, history, startHistoryDate);
+  if (!startQuote || !Number.isFinite(startQuote.price) || startQuote.price <= 0) return null;
+  return ((endQuote.price / startQuote.price) - 1) * 100;
+}
+
 function hasUsableRangeCandles(candles: Candle[] | undefined, startDate: string, endDate: string): boolean {
   if (!candles || candles.length === 0) return false;
   return getRangeChangePctFromCandles(candles, startDate, endDate) !== null;
@@ -2243,6 +2556,7 @@ export function MacroFlowMap({
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
   const macroQuoteFetchInFlightRef = useRef(false);
   const macroQuoteCacheRef = useRef<Record<string, MacroQuote | null>>({});
+  const macroQuoteHistoryRef = useRef<Record<string, Record<string, MacroQuote | null>>>({});
   const quoteIndexedDbHydratedRef = useRef(false);
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
@@ -2282,10 +2596,12 @@ export function MacroFlowMap({
   const [draggingStockSymbol, setDraggingStockSymbol] = useState<string | null>(null);
   const [chartComparisonSymbols, setChartComparisonSymbols] = useState<string[]>([]);
   const [macroQuoteCache, setMacroQuoteCache] = useState<Record<string, MacroQuote | null>>(() => readStoredMacroQuoteCache());
+  const [macroQuoteHistory, setMacroQuoteHistory] = useState<Record<string, Record<string, MacroQuote | null>>>({});
   const [sparklineCache, setSparklineCache] = useState<Record<string, Candle[]>>({});
   const [quoteFetchProgress, setQuoteFetchProgress] = useState<QuoteFetchProgress | null>(null);
   const [klineFetchProgress, setKlineFetchProgress] = useState<KlineFetchProgress | null>(null);
   const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
+  const [cacheTransferStatus, setCacheTransferStatus] = useState<string | null>(null);
   const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
   const basketDbImportInputRef = useRef<HTMLInputElement | null>(null);
   const [basketEditor, setBasketEditor] = useState<BasketEditorState | null>(null);
@@ -2400,10 +2716,20 @@ export function MacroFlowMap({
 
   useEffect(() => {
     let cancelled = false;
-    void readStoredMacroQuoteIndexedDb().then((storedQuotes) => {
+    void Promise.all([
+      readStoredMacroQuoteIndexedDb(),
+      readStoredMacroQuoteHistoryIndexedDb(),
+    ]).then(([storedQuotes, storedHistory]) => {
       if (cancelled) return;
       quoteIndexedDbHydratedRef.current = true;
+      if (Object.keys(storedHistory).length > 0) {
+        setMacroQuoteHistory((current) => ({ ...storedHistory, ...current }));
+      }
       if (Object.keys(storedQuotes).length === 0) {
+        const todayQuotes = storedHistory[FLOW_END_DATE] || {};
+        if (Object.keys(todayQuotes).length > 0) {
+          setMacroQuoteCache((current) => ({ ...todayQuotes, ...current }));
+        }
         void writeStoredMacroQuoteIndexedDb(macroQuoteCacheRef.current);
         return;
       }
@@ -2419,8 +2745,18 @@ export function MacroFlowMap({
     writeStoredMacroQuoteCache(macroQuoteCache);
     if (quoteIndexedDbHydratedRef.current) {
       void writeStoredMacroQuoteIndexedDb(macroQuoteCache);
+      void writeStoredMacroQuoteHistoryDateIndexedDb(FLOW_END_DATE, macroQuoteCache);
+      const todayQuotes = sanitizeStoredQuoteMap(macroQuoteCache);
+      setMacroQuoteHistory((current) => {
+        if (Object.keys(todayQuotes).length === 0) return current;
+        return { ...current, [FLOW_END_DATE]: todayQuotes };
+      });
     }
   }, [macroQuoteCache]);
+
+  useEffect(() => {
+    macroQuoteHistoryRef.current = macroQuoteHistory;
+  }, [macroQuoteHistory]);
 
   useEffect(() => {
     if (!macroScopeMenuOpen) return undefined;
@@ -2625,8 +2961,10 @@ export function MacroFlowMap({
         const normalizedSymbol = normalizeSymbol(stock.symbol);
         const live = quoteMap.get(normalizedSymbol);
         const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
+        const historyEndPrice = getQuoteHistoryEndPrice(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
+        const historyChangePct = getQuoteHistoryChangePct(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
         const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-        const changePct = getPeriodChangePct(
+        const changePct = historyChangePct ?? getPeriodChangePct(
           rangeCandles,
           rangeStartDate,
           rangeEndDate,
@@ -2642,7 +2980,7 @@ export function MacroFlowMap({
         return {
           stock,
           hasLiveQuote,
-          price: rangeEndPrice ?? live?.price ?? null,
+          price: historyEndPrice ?? rangeEndPrice ?? live?.price ?? null,
           marketCap,
           changePct: apiChangePct,
           nodeVolume,
@@ -2805,7 +3143,7 @@ export function MacroFlowMap({
       sectors,
       stocks: allocatedBasketMetrics.flatMap((basket) => basket.stockMetrics),
     };
-  }, [baskets, quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, sparklineCache]);
+  }, [baskets, macroQuoteHistory, quoteMap, rangeEndDate, rangeEndIndex, rangeStartDate, rangeStartIndex, sparklineCache]);
 
   const filteredMetrics = useMemo<{
     baskets: BasketMetric[];
@@ -2967,8 +3305,10 @@ export function MacroFlowMap({
       const normalizedSymbol = normalizeSymbol(item.symbol);
       const live = quoteMap.get(normalizedSymbol);
       const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
+      const historyEndPrice = getQuoteHistoryEndPrice(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
+      const historyChangePct = getQuoteHistoryChangePct(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
       const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-      const periodChangePct = getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
+      const periodChangePct = historyChangePct ?? getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
       const hasLiveQuote = periodChangePct !== null;
       const changePct = periodChangePct ?? 0;
       return {
@@ -2976,7 +3316,7 @@ export function MacroFlowMap({
         label: item.label,
         displaySymbol: item.displaySymbol,
         symbol: item.symbol,
-        price: rangeEndPrice ?? live?.price ?? null,
+        price: historyEndPrice ?? rangeEndPrice ?? live?.price ?? null,
         changePct,
         hasLiveQuote,
         nodeVolume: hasLiveQuote
@@ -2984,7 +3324,7 @@ export function MacroFlowMap({
           : 0,
       };
     });
-  }, [quoteMap, rangeEndDate, rangeStartDate, sectorEtfDefs, sectorEtfOrder, sparklineCache]);
+  }, [macroQuoteHistory, quoteMap, rangeEndDate, rangeStartDate, sectorEtfDefs, sectorEtfOrder, sparklineCache]);
   const regionalRows = useMemo<RegionalMarketMetric[]>(() => {
     const definitionMap = new Map(REGIONAL_MARKET_DEFS.map((region) => [region.id, region]));
     return regionalOrder
@@ -2994,8 +3334,10 @@ export function MacroFlowMap({
         const normalizedSymbol = normalizeSymbol(region.symbol);
         const live = quoteMap.get(normalizedSymbol);
         const rangeCandles = getCandlesWithLatestQuote(sparklineCache[normalizedSymbol], live, rangeEndDate);
+        const historyEndPrice = getQuoteHistoryEndPrice(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
+        const historyChangePct = getQuoteHistoryChangePct(normalizedSymbol, macroQuoteHistory, rangeStartDate, rangeEndDate, live);
         const rangeEndPrice = getRangeEndPriceFromCandles(rangeCandles, rangeStartDate, rangeEndDate);
-        const periodChangePct = getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
+        const periodChangePct = historyChangePct ?? getPeriodChangePct(rangeCandles, rangeStartDate, rangeEndDate, live?.changePct);
         const hasLiveQuote = periodChangePct !== null;
         const changePct = periodChangePct ?? 0;
         return {
@@ -3003,7 +3345,7 @@ export function MacroFlowMap({
           label: REGIONAL_LABELS[region.id] || region.label,
           displaySymbol: region.displaySymbol,
           symbol: region.symbol,
-          price: rangeEndPrice ?? live?.price ?? null,
+          price: historyEndPrice ?? rangeEndPrice ?? live?.price ?? null,
           changePct,
           hasLiveQuote,
           nodeVolume: hasLiveQuote
@@ -3011,7 +3353,7 @@ export function MacroFlowMap({
             : 0,
         };
       });
-  }, [quoteMap, rangeEndDate, rangeStartDate, regionalOrder, sparklineCache]);
+  }, [macroQuoteHistory, quoteMap, rangeEndDate, rangeStartDate, regionalOrder, sparklineCache]);
   const flowLayoutData = useMemo<{ nodes: FlowNode[]; sectionHeaders: FlowSectionHeader[] }>(() => {
     const maxRegionalVolume = Math.max(
       1,
@@ -3688,6 +4030,11 @@ export function MacroFlowMap({
     event.target.value = '';
     if (!file) return;
     const text = await file.text();
+    const cachePayload = parseMacroFlowCacheJson(text);
+    if (cachePayload) {
+      await importMacroFlowCache(cachePayload, file.name);
+      return;
+    }
     const importedChain = parseValueChainJson(text) || parseValueChainCsv(text, editableBasketChain);
     if (!importedChain) return;
     setBasketDbImportDecision({
@@ -3696,6 +4043,76 @@ export function MacroFlowMap({
       sourceName: file.name,
     });
     setBasketEditor(null);
+  };
+
+  const importMacroFlowCache = async (payload: MacroFlowCacheExportPayload, sourceName: string) => {
+    setCacheTransferStatus('キャッシュをインポート中...');
+    const importedHistory = sanitizeStoredQuoteHistory(payload.quoteHistory);
+    const latestQuotes = sanitizeStoredQuoteMap(payload.latestQuotes?.quotes);
+    const latestDate = payload.latestQuotes?.date || payload.flowEndDate;
+    if (latestDate && isDateValueText(latestDate) && Object.keys(latestQuotes).length > 0) {
+      importedHistory[latestDate] = {
+        ...importedHistory[latestDate],
+        ...latestQuotes,
+      };
+    }
+
+    const mergedHistory: Record<string, Record<string, MacroQuote | null>> = {};
+    Object.entries(importedHistory).forEach(([date, quotes]) => {
+      mergedHistory[date] = { ...quotes };
+    });
+    Object.entries(macroQuoteHistoryRef.current).forEach(([date, quotes]) => {
+      mergedHistory[date] = { ...(mergedHistory[date] ?? {}), ...sanitizeStoredQuoteMap(quotes) };
+    });
+    const quoteHistoryDays = await writeStoredMacroQuoteHistoryIndexedDb(mergedHistory);
+    setMacroQuoteHistory((current) => {
+      const next = { ...current };
+      Object.entries(importedHistory).forEach(([date, quotes]) => {
+        next[date] = { ...quotes, ...(next[date] || {}) };
+      });
+      return next;
+    });
+
+    const todayQuotes = importedHistory[FLOW_END_DATE];
+    if (todayQuotes && Object.keys(todayQuotes).length > 0) {
+      const mergedToday = { ...todayQuotes, ...macroQuoteCacheRef.current };
+      setMacroQuoteCache(mergedToday);
+      await writeStoredMacroQuoteIndexedDb(mergedToday);
+    }
+
+    const klineRecords = Array.isArray(payload.klineRecords) ? payload.klineRecords : [];
+    const importedKlineRecords = klineRecords
+      .map(sanitizeStoredKlineRecord)
+      .filter((record): record is StoredKlineCacheRecord & { key: string } => Boolean(record));
+    const klineCount = await writeStoredKlineCacheRecords(importedKlineRecords);
+    if (importedKlineRecords.length > 0) {
+      const nextSparklineCache: Record<string, Candle[]> = {};
+      importedKlineRecords.forEach((record) => {
+        if (record.reqNum !== sparklineReqNum || !record.symbol) return;
+        const candles = sanitizeStoredCandles(record.candles);
+        if (candles) nextSparklineCache[normalizeSymbol(record.symbol)] = candles;
+      });
+      if (Object.keys(nextSparklineCache).length > 0) {
+        setSparklineCache((current) => ({ ...current, ...nextSparklineCache }));
+      }
+    }
+
+    if (payload.valueChain?.current) {
+      localStorage.setItem(VALUE_CHAIN_STORAGE_KEY, JSON.stringify(normalizeStoredChain(payload.valueChain.current)));
+    }
+    if (Array.isArray(payload.valueChain?.history) && payload.valueChain.history.length > 0) {
+      const mergedValueChainHistory = mergeValueChainHistoryEntries(payload.valueChain.history, readValueChainHistory());
+      writeValueChainHistory(mergedValueChainHistory);
+      if (payload.valueChain.activeHistoryId) {
+        localStorage.setItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY, payload.valueChain.activeHistoryId);
+      }
+      refreshBasketScopeOptions(payload.valueChain.activeHistoryId ? `value-chain-history-${payload.valueChain.activeHistoryId}` : macroScope);
+    }
+
+    setBasketDbImportDecision(null);
+    setBasketDbExportMenuAnchor(null);
+    setQuoteRefreshToken((value) => value + 1);
+    setCacheTransferStatus(`${sourceName}: snapshot ${quoteHistoryDays}日分 / KLine ${klineCount}件を取り込みました`);
   };
 
   const applyBasketDbImportDecision = (mode: 'replace-current' | 'new-history') => {
@@ -3717,6 +4134,52 @@ export function MacroFlowMap({
   const exportBasketDbSpec = () => {
     downloadText('mooview-value-chain-template-spec.md', 'text/markdown;charset=utf-8', createTemplateSpec(editableBasketChain));
     setBasketDbExportMenuAnchor(null);
+  };
+
+  const exportMacroFlowCacheJson = async () => {
+    setCacheTransferStatus('キャッシュを書き出し中...');
+    const storedHistory = await readStoredMacroQuoteHistoryIndexedDb();
+    const memoryHistory = sanitizeStoredQuoteHistory(macroQuoteHistoryRef.current);
+    const todayQuotes = sanitizeStoredQuoteMap(macroQuoteCacheRef.current);
+    const mergedHistory = {
+      ...storedHistory,
+      ...memoryHistory,
+    };
+    if (Object.keys(todayQuotes).length > 0) {
+      mergedHistory[FLOW_END_DATE] = todayQuotes;
+    }
+    const quoteHistory = Object.fromEntries(
+      Object.entries(mergedHistory).map(([date, quotes]) => [
+        date,
+        {
+          date,
+          savedAt: Date.now(),
+          quotes: sanitizeStoredQuoteMap(quotes),
+        } satisfies StoredMacroQuoteCache,
+      ]),
+    );
+    const klineRecords = await readStoredKlineCacheRecords();
+    const payload: MacroFlowCacheExportPayload = {
+      schema: MACRO_FLOW_CACHE_EXPORT_SCHEMA,
+      schemaVersion: MACRO_FLOW_CACHE_EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      flowEndDate: FLOW_END_DATE,
+      latestQuotes: {
+        date: FLOW_END_DATE,
+        savedAt: Date.now(),
+        quotes: todayQuotes,
+      },
+      quoteHistory,
+      klineRecords,
+      valueChain: {
+        current: readStoredValueChain(),
+        history: readValueChainHistory(),
+        activeHistoryId: localStorage.getItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY),
+      },
+    };
+    downloadText(`mooview-macroflow-cache-${FLOW_END_DATE}.json`, 'application/json;charset=utf-8', JSON.stringify(payload, null, 2));
+    setBasketDbExportMenuAnchor(null);
+    setCacheTransferStatus(`キャッシュを書き出しました: snapshot ${Object.keys(quoteHistory).length}日分 / KLine ${klineRecords.length}件`);
   };
 
   const openPanel = (mode: SidePanelMode) => {
@@ -5220,7 +5683,7 @@ export function MacroFlowMap({
                     <button type="button" onClick={() => openBasketEditor()} className="h-7 w-7 inline-flex items-center justify-center border border-[#303030] bg-[#101010] text-gray-300 hover:bg-[#181818] hover:text-white" title="バスケットを追加" aria-label="バスケットを追加">
                       <Plus className="h-3.5 w-3.5" />
                     </button>
-                    <button type="button" onClick={() => basketDbImportInputRef.current?.click()} className="h-7 w-7 inline-flex items-center justify-center border border-[#303030] bg-[#101010] text-gray-300 hover:bg-[#181818] hover:text-white" title="CSV/JSONインポート" aria-label="CSV/JSONインポート">
+                    <button type="button" onClick={() => basketDbImportInputRef.current?.click()} className="h-7 w-7 inline-flex items-center justify-center border border-[#303030] bg-[#101010] text-gray-300 hover:bg-[#181818] hover:text-white" title="CSV/JSON/キャッシュインポート" aria-label="CSV/JSON/キャッシュインポート">
                       <Upload className="h-3.5 w-3.5" />
                     </button>
                     <div className="relative" onClick={(event) => event.stopPropagation()}>
@@ -5243,6 +5706,10 @@ export function MacroFlowMap({
                             <FileJson className="h-3.5 w-3.5 text-sky-300" />
                             JSONエクスポート
                           </button>
+                          <button type="button" onClick={exportMacroFlowCacheJson} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] text-gray-200 hover:bg-[#171717]">
+                            <Database className="h-3.5 w-3.5 text-cyan-300" />
+                            キャッシュJSON
+                          </button>
                           <button type="button" onClick={exportBasketDbSpec} className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-[10px] text-gray-200 hover:bg-[#171717]">
                             <FileDown className="h-3.5 w-3.5 text-gray-300" />
                             テンプレート仕様
@@ -5251,6 +5718,11 @@ export function MacroFlowMap({
                       )}
                     </div>
                   </div>
+                  {cacheTransferStatus && (
+                    <div className="mt-2 truncate border border-[#242424] bg-[#050505] px-2 py-1 font-mono text-[9px] text-cyan-300" title={cacheTransferStatus}>
+                      {cacheTransferStatus}
+                    </div>
+                  )}
                 </div>
 
                 {basketEditor && (
@@ -5371,8 +5843,8 @@ export function MacroFlowMap({
               type="button"
               onClick={() => basketDbImportInputRef.current?.click()}
               className="w-9 h-9 flex items-center justify-center border border-transparent text-gray-400 transition hover:bg-[#161616] hover:text-white"
-              title="CSV/JSONインポート"
-              aria-label="CSV/JSONインポート"
+              title="CSV/JSON/キャッシュインポート"
+              aria-label="CSV/JSON/キャッシュインポート"
             >
               <Upload className="w-3.5 h-3.5" />
             </button>
@@ -5404,6 +5876,10 @@ export function MacroFlowMap({
                 <button type="button" onClick={exportBasketDbJson} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
                   <FileJson className="h-3.5 w-3.5 text-sky-300" />
                   JSONエクスポート
+                </button>
+                <button type="button" onClick={exportMacroFlowCacheJson} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
+                  <Database className="h-3.5 w-3.5 text-cyan-300" />
+                  キャッシュJSON
                 </button>
                 <button type="button" onClick={exportBasketDbSpec} className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]">
                   <FileDown className="h-3.5 w-3.5 text-gray-300" />

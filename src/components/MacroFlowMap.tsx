@@ -46,6 +46,9 @@ interface MacroQuote {
   marketCap?: number;
   volume?: number;
   dataDate?: string;
+  dataTime?: string;
+  source?: 'snapshot' | 'kline' | 'ticker';
+  finalized?: boolean;
 }
 
 interface MacroQuoteResult {
@@ -59,6 +62,7 @@ interface MacroQuoteResult {
   marketCap?: number;
   volume?: number;
   dataDate?: string;
+  dataTime?: string;
 }
 
 interface SymbolSearchCandidate {
@@ -844,6 +848,8 @@ function createTickerQuote(ticker: MacroTickerStat): MacroQuote | null {
     marketCap: hasMarketCap ? marketCap : undefined,
     volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
     dataDate: FLOW_END_DATE,
+    source: 'ticker',
+    finalized: false,
   };
 }
 
@@ -869,6 +875,9 @@ function parseMacroQuoteResult(quote: MacroQuoteResult, fallbackSymbol: string):
     marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined,
     volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
     dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
+    dataTime: typeof quote.dataTime === 'string' ? quote.dataTime : undefined,
+    source: 'snapshot',
+    finalized: false,
   };
 }
 
@@ -885,6 +894,9 @@ function sanitizeStoredQuoteMap(quotes: unknown): Record<string, MacroQuote | nu
     if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(changePct)) return;
     const marketCap = Number(quote.marketCap);
     const volume = Number(quote.volume);
+    const source = quote.source === 'kline' || quote.source === 'snapshot' || quote.source === 'ticker'
+      ? quote.source
+      : undefined;
     result[normalizedSymbol] = {
       name: String(quote.name || normalizedSymbol),
       price,
@@ -892,6 +904,9 @@ function sanitizeStoredQuoteMap(quotes: unknown): Record<string, MacroQuote | nu
       marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined,
       volume: Number.isFinite(volume) && volume > 0 ? volume : undefined,
       dataDate: typeof quote.dataDate === 'string' ? quote.dataDate : undefined,
+      dataTime: typeof quote.dataTime === 'string' ? quote.dataTime : undefined,
+      source,
+      finalized: typeof quote.finalized === 'boolean' ? quote.finalized : false,
     };
   });
   return result;
@@ -2301,6 +2316,13 @@ function getStoredQuoteForDate(
   return history[date]?.[normalizedSymbol] || null;
 }
 
+function shouldReplaceStoredQuoteWithKline(quote: MacroQuote | null, date: string): boolean {
+  if (!quote) return true;
+  if (date >= FLOW_END_DATE) return false;
+  if (quote.source === 'kline' || quote.finalized === true) return false;
+  return true;
+}
+
 function getBackfillReqNumForDateCount(dateCount: number): number {
   if (dateCount <= 1) return 2;
   return Math.min(1000, Math.max(260, dateCount + 20));
@@ -2328,6 +2350,8 @@ function createMacroQuoteFromDailyCandle(
     marketCap: fallbackQuote?.marketCap,
     volume: Number.isFinite(Number(candle.volume)) && Number(candle.volume) > 0 ? Number(candle.volume) : fallbackQuote?.volume,
     dataDate: getCandleDateValue(candle),
+    source: 'kline',
+    finalized: getCandleDateValue(candle) < FLOW_END_DATE,
   };
 }
 
@@ -2346,7 +2370,8 @@ function createQuoteHistoryUpdatesFromCandles(
   sortedCandles.forEach((candle, index) => {
     const date = getCandleDateValue(candle);
     if (!targetDates.has(date)) return;
-    if (getStoredQuoteForDate(normalizedSymbol, date, existingHistory, latestQuotes)) return;
+    const storedQuote = getStoredQuoteForDate(normalizedSymbol, date, existingHistory, latestQuotes);
+    if (!shouldReplaceStoredQuoteWithKline(storedQuote, date)) return;
     const quote = createMacroQuoteFromDailyCandle(normalizedSymbol, candle, sortedCandles[index - 1], latestQuotes[normalizedSymbol] || undefined);
     if (!quote) return;
     updates[date] = {
@@ -2833,11 +2858,17 @@ export function MacroFlowMap({
     writeStoredMacroQuoteCache(macroQuoteCache);
     if (quoteIndexedDbHydratedRef.current) {
       void writeStoredMacroQuoteIndexedDb(macroQuoteCache);
-      void writeStoredMacroQuoteHistoryDateIndexedDb(FLOW_END_DATE, macroQuoteCache);
       const todayQuotes = sanitizeStoredQuoteMap(macroQuoteCache);
+      const todaySnapshotQuotes = Object.fromEntries(
+        Object.entries(todayQuotes).map(([symbol, quote]) => [
+          symbol,
+          quote ? { ...quote, source: quote.source || 'snapshot', finalized: false } : quote,
+        ]),
+      );
+      void writeStoredMacroQuoteHistoryDateIndexedDb(FLOW_END_DATE, todaySnapshotQuotes);
       setMacroQuoteHistory((current) => {
-        if (Object.keys(todayQuotes).length === 0) return current;
-        return { ...current, [FLOW_END_DATE]: todayQuotes };
+        if (Object.keys(todaySnapshotQuotes).length === 0) return current;
+        return { ...current, [FLOW_END_DATE]: todaySnapshotQuotes };
       });
     }
   }, [macroQuoteCache]);
@@ -4291,11 +4322,14 @@ export function MacroFlowMap({
     const targetDates = new Set(datesNewestFirst);
     const historyAtStart = macroQuoteHistoryRef.current;
     const latestQuotes = macroQuoteCacheRef.current;
+    const needsHistoryBackfill = (symbol: string, date: string) => (
+      shouldReplaceStoredQuoteWithKline(getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes), date)
+    );
     const targetSymbols = macroQuoteSymbols.filter((symbol) => (
-      datesNewestFirst.some((date) => !getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes))
+      datesNewestFirst.some((date) => needsHistoryBackfill(symbol, date))
     ));
     const totalMissing = targetSymbols.reduce((sum, symbol) => (
-      sum + datesNewestFirst.filter((date) => !getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes)).length
+      sum + datesNewestFirst.filter((date) => needsHistoryBackfill(symbol, date)).length
     ), 0);
     const totalBatches = Math.max(1, Math.ceil(targetSymbols.length / KLINE_BATCH_SIZE));
     const backfillReqNum = getBackfillReqNumForDateCount(datesNewestFirst.length);

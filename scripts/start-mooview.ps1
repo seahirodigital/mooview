@@ -359,6 +359,7 @@ try {
         $env:MOOMOO_GATEWAY_URL = "http://127.0.0.1:8787"
         $env:MOOMOO_GATEWAY_AUTOSTART = "true"
         $env:NODE_OPTIONS = "--use-system-ca"
+        $env:DISABLE_HMR = "true"
 
         $serverProcess = Start-Process `
             -FilePath $npmPath `

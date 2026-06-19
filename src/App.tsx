@@ -54,6 +54,10 @@ const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
 const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
+const CANDLES_CACHE_INDEXED_DB_NAME = 'mooview_chart_candles_cache_v1';
+const CANDLES_CACHE_INDEXED_DB_STORE = 'values';
+const CANDLES_CACHE_INDEXED_DB_CACHE_KEY = 'candles';
+const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
@@ -179,6 +183,113 @@ function readStoredValue<T>(key: string, fallback: T): T {
   }
 }
 
+function isStorageQuotaError(error: unknown): boolean {
+  return error instanceof DOMException
+    && (
+      error.name === 'QuotaExceededError'
+      || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+      || error.code === 22
+      || error.code === 1014
+    );
+}
+
+function clearVolatileStorageCache(): void {
+  localStorage.removeItem(CANDLES_CACHE_STORAGE_KEY);
+  localStorage.removeItem(CANDLES_CACHE_META_STORAGE_KEY);
+}
+
+function writeStoredValue(key: string, value: string, retryAfterCacheClear = true): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    if (!isStorageQuotaError(error)) {
+      console.warn(`localStorageへの保存に失敗しました: ${key}`, error);
+      return false;
+    }
+
+    clearVolatileStorageCache();
+    if (!retryAfterCacheClear) {
+      console.warn(`localStorage容量不足のためキャッシュ保存をスキップしました: ${key}`);
+      return false;
+    }
+
+    try {
+      localStorage.setItem(key, value);
+      console.warn(`localStorage容量不足を検出したため、ローソク足キャッシュを削除して保存しました: ${key}`);
+      return true;
+    } catch (retryError) {
+      console.warn(`localStorage容量不足のため保存できませんでした: ${key}`, retryError);
+      return false;
+    }
+  }
+}
+
+function writeStoredJson(key: string, value: unknown, retryAfterCacheClear = true): boolean {
+  try {
+    return writeStoredValue(key, JSON.stringify(value), retryAfterCacheClear);
+  } catch (error) {
+    console.warn(`localStorage保存用JSONの作成に失敗しました: ${key}`, error);
+    return false;
+  }
+}
+
+function compactTickersForStorage(tickers: TickerInfo[]): TickerInfo[] {
+  const seen = new Set<string>();
+  return tickers.flatMap((ticker) => {
+    const normalizedTicker = normalizeTickerInfo(ticker);
+    if (!normalizedTicker || seen.has(normalizedTicker.symbol)) return [];
+    seen.add(normalizedTicker.symbol);
+    return [normalizedTicker];
+  });
+}
+
+let candlesCacheDbPromise: Promise<IDBDatabase> | null = null;
+
+function openCandlesCacheDb(): Promise<IDBDatabase> {
+  if (typeof window === 'undefined' || !window.indexedDB) {
+    return Promise.reject(new Error('IndexedDBを利用できません。'));
+  }
+  if (candlesCacheDbPromise) return candlesCacheDbPromise;
+
+  candlesCacheDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(CANDLES_CACHE_INDEXED_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(CANDLES_CACHE_INDEXED_DB_STORE)) {
+        db.createObjectStore(CANDLES_CACHE_INDEXED_DB_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDBを開けませんでした。'));
+    request.onblocked = () => reject(new Error('IndexedDBの更新がブロックされました。'));
+  });
+
+  return candlesCacheDbPromise;
+}
+
+async function readCandlesCacheIndexedDb<T>(key: string): Promise<T | null> {
+  const db = await openCandlesCacheDb();
+  return new Promise<T | null>((resolve, reject) => {
+    const transaction = db.transaction(CANDLES_CACHE_INDEXED_DB_STORE, 'readonly');
+    const store = transaction.objectStore(CANDLES_CACHE_INDEXED_DB_STORE);
+    const request = store.get(key);
+    request.onsuccess = () => resolve((request.result as T | undefined) ?? null);
+    request.onerror = () => reject(request.error || new Error('IndexedDBから読み込めませんでした。'));
+  });
+}
+
+async function writeCandlesCacheIndexedDb(key: string, value: unknown): Promise<void> {
+  const db = await openCandlesCacheDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(CANDLES_CACHE_INDEXED_DB_STORE, 'readwrite');
+    const store = transaction.objectStore(CANDLES_CACHE_INDEXED_DB_STORE);
+    const request = store.put(value, key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error || new Error('IndexedDBへ保存できませんでした。'));
+  });
+}
+
 function normalizeStoredCandlesCache(raw: unknown): Record<string, Candle[]> {
   if (!raw || typeof raw !== 'object') return {};
   const next: Record<string, Candle[]> = {};
@@ -261,9 +372,13 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
       .map((symbol) => normalizeStoredSymbolValue(symbol))
       .filter(Boolean),
   ));
+  const watchlistTabId = typeof panel.watchlistTabId === 'string' && panel.watchlistTabId.trim()
+    ? panel.watchlistTabId.trim()
+    : undefined;
   return {
     ...panel,
     symbol: normalizeStoredSymbolValue(panel.symbol),
+    watchlistTabId,
     comparisonSymbols: normalizedComparisonSymbols.length > 0 ? normalizedComparisonSymbols : panel.comparisonSymbols,
     timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
     priceScale: panel.priceScale ?? 1,
@@ -277,29 +392,31 @@ function formatClockTime(date = new Date()): string {
   return date.toLocaleTimeString('ja-JP', { hour12: false });
 }
 
-function formatTickerPrice(symbol: string, price: number | null): string {
-  if (price === null) return 'N/A';
+function formatTickerPrice(symbol: string, price: number | null | undefined): string {
+  const numericPrice = Number(price);
+  if (!Number.isFinite(numericPrice)) return 'N/A';
   if (parseSymbolExpression(symbol)) {
-    return price.toLocaleString('en-US', {
+    return numericPrice.toLocaleString('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 4,
     });
   }
   if (symbol.startsWith('JP.')) {
-    return `¥${price.toLocaleString('ja-JP', { maximumFractionDigits: 2 })}`;
+    return `¥${numericPrice.toLocaleString('ja-JP', { maximumFractionDigits: 2 })}`;
   }
-  return `$${price.toLocaleString('en-US', {
+  return `$${numericPrice.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
 }
 
-function formatWatchlistSymbol(symbol: string): string {
-  const expression = parseSymbolExpression(symbol);
+function formatWatchlistSymbol(symbol: string | null | undefined): string {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol || '');
+  const expression = parseSymbolExpression(normalizedSymbol);
   if (expression) {
     return `${formatWatchlistSymbol(expression.left)}${expression.operator}${formatWatchlistSymbol(expression.right)}`;
   }
-  return symbol.startsWith('JP.') ? symbol.slice(3) : symbol;
+  return normalizedSymbol.startsWith('JP.') ? normalizedSymbol.slice(3) : normalizedSymbol;
 }
 
 function createId(prefix: string): string {
@@ -471,8 +588,8 @@ function parseCsvRows(text: string): string[][] {
   return rows;
 }
 
-function normalizeTickerSymbolForStorage(rawSymbol: string): string {
-  const cleaned = rawSymbol.trim().replace(/^["']|["']$/g, '');
+function normalizeTickerSymbolForStorage(rawSymbol: unknown): string {
+  const cleaned = String(rawSymbol ?? '').trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return '';
   const upper = cleaned.toUpperCase();
   const usStripped = upper.startsWith('US.')
@@ -500,7 +617,7 @@ function normalizeTickerSymbolForStorage(rawSymbol: string): string {
   return upper;
 }
 
-function normalizeStoredSymbolValue(rawSymbol: string): string {
+function normalizeStoredSymbolValue(rawSymbol: unknown): string {
   const expression = normalizeSymbolExpressionForStorage(rawSymbol);
   if (expression) {
     return formatSymbolExpression(expression);
@@ -508,9 +625,10 @@ function normalizeStoredSymbolValue(rawSymbol: string): string {
   return normalizeTickerSymbolForStorage(rawSymbol);
 }
 
-function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpression | null {
-  if (DIRECT_SYMBOL_INPUTS.has(rawExpression.trim().toUpperCase())) return null;
-  const expression = parseSymbolExpression(rawExpression);
+function normalizeSymbolExpressionForStorage(rawExpression: unknown): SymbolExpression | null {
+  const rawValue = String(rawExpression ?? '');
+  if (DIRECT_SYMBOL_INPUTS.has(rawValue.trim().toUpperCase())) return null;
+  const expression = parseSymbolExpression(rawValue);
   if (!expression) return null;
   const left = normalizeTickerSymbolForStorage(expression.left);
   const right = normalizeTickerSymbolForStorage(expression.right);
@@ -525,6 +643,66 @@ function normalizeSymbolExpressionForStorage(rawExpression: string): SymbolExpre
 function getStoredSymbolOperands(symbol: string): string[] {
   const expression = normalizeSymbolExpressionForStorage(symbol);
   return expression ? [expression.left, expression.right] : [normalizeStoredSymbolValue(symbol)];
+}
+
+function normalizeTickerInfo(rawTicker: unknown): TickerInfo | null {
+  if (!rawTicker || typeof rawTicker !== 'object') return null;
+  const source = rawTicker as Partial<TickerInfo>;
+  const symbol = normalizeStoredSymbolValue(source.symbol || '');
+  if (!symbol) return null;
+  const basePrice = Number(source.basePrice);
+  const dailyChangePct = Number(source.dailyChangePct);
+  return {
+    symbol,
+    name: typeof source.name === 'string' && source.name.trim()
+      ? source.name.trim()
+      : formatWatchlistSymbol(symbol),
+    basePrice: Number.isFinite(basePrice) ? basePrice : 0,
+    dailyChangePct: Number.isFinite(dailyChangePct) ? dailyChangePct : 0,
+  };
+}
+
+function getWatchlistTabSymbols(tab?: WatchlistTab | null): string[] {
+  const symbols: string[] = [];
+  const seen = new Set<string>();
+  tab?.sections.forEach((section) => {
+    section.symbols.forEach((rawSymbol) => {
+      const symbol = normalizeStoredSymbolValue(rawSymbol);
+      if (!symbol || seen.has(symbol)) return;
+      seen.add(symbol);
+      symbols.push(symbol);
+    });
+  });
+  return symbols;
+}
+
+function areSymbolListsEqual(first: string[] = [], second: string[] = []): boolean {
+  if (first.length !== second.length) return false;
+  return first.every((symbol, index) => symbol === second[index]);
+}
+
+function syncPanelToWatchlistTab(panel: ChartPanel, tabId: string, symbols: string[]): ChartPanel {
+  if (symbols.length === 0) {
+    return {
+      ...panel,
+      watchlistTabId: tabId,
+      comparisonSymbols: [],
+    };
+  }
+
+  const [primarySymbol, ...comparisonSymbols] = symbols;
+  return {
+    ...panel,
+    symbol: primarySymbol,
+    watchlistTabId: tabId,
+    comparisonSymbols,
+  };
+}
+
+function hasWatchlistPanelTargetChanged(current: ChartPanel, next: ChartPanel): boolean {
+  return current.symbol !== next.symbol
+    || current.watchlistTabId !== next.watchlistTabId
+    || !areSymbolListsEqual(current.comparisonSymbols || [], next.comparisonSymbols || []);
 }
 
 function resolveCandlesForSymbol(
@@ -546,14 +724,74 @@ function resolveCandlesForSymbol(
 }
 
 function splitTickerInputList(rawInput: string): string[] {
-  return Array.from(
+  const items = Array.from(
     new Set(
       rawInput
-        .split(/[,\u3001]/)
+        .split(/[,\u3001\r\n\t]+/)
         .map((value) => value.trim())
         .filter(Boolean),
     ),
   );
+  return expandRelativeSymbolShorthandItems(items);
+}
+
+function normalizeRelativeSlash(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, '').replace(/／/g, '/');
+}
+
+function isRelativeBaseShortcut(value: string): boolean {
+  const normalized = normalizeRelativeSlash(value);
+  return normalized.startsWith('/')
+    && normalized.length > 1
+    && !normalized.slice(1).includes('/');
+}
+
+function getRelativeBaseShortcut(value: string): string | null {
+  if (!isRelativeBaseShortcut(value)) return null;
+  const base = normalizeRelativeSlash(value).slice(1).trim();
+  return base ? base : null;
+}
+
+function expandRelativeSymbolShorthandItems(items: string[]): string[] {
+  const cleanedItems = items.map((item) => item.trim()).filter(Boolean);
+  const base = cleanedItems
+    .map(getRelativeBaseShortcut)
+    .filter((item): item is string => Boolean(item))
+    .at(-1);
+
+  if (!base) return cleanedItems;
+
+  return cleanedItems
+    .filter((item) => !isRelativeBaseShortcut(item))
+    .map((item) => {
+      if (parseSymbolExpression(item) || DIRECT_SYMBOL_INPUTS.has(item.trim().toUpperCase())) {
+        return item;
+      }
+      return `${item}/${base}`;
+    });
+}
+
+function expandRelativeWatchlistCsvCandidates(
+  candidates: WatchlistCsvCandidate[],
+): WatchlistCsvCandidate[] {
+  const base = candidates
+    .map((candidate) => getRelativeBaseShortcut(candidate.code))
+    .filter((item): item is string => Boolean(item))
+    .at(-1);
+
+  if (!base) return candidates;
+
+  return candidates
+    .filter((candidate) => !isRelativeBaseShortcut(candidate.code))
+    .map((candidate) => {
+      if (parseSymbolExpression(candidate.code) || DIRECT_SYMBOL_INPUTS.has(candidate.code.trim().toUpperCase())) {
+        return candidate;
+      }
+      return {
+        ...candidate,
+        code: `${candidate.code}/${base}`,
+      };
+    });
 }
 
 function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
@@ -565,19 +803,38 @@ function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
   const marketIndex = headers.findIndex((header) => header === '市場' || header.toLowerCase() === 'market');
   if (codeIndex === -1) return [];
 
-  return rows.slice(1)
+  return expandRelativeWatchlistCsvCandidates(rows.slice(1)
     .map((row) => ({
       code: String(row[codeIndex] ?? '').trim(),
       name: String(nameIndex >= 0 ? row[nameIndex] ?? '' : '').trim(),
       market: String(marketIndex >= 0 ? row[marketIndex] ?? '' : '').trim(),
     }))
-    .filter((candidate) => candidate.code);
+    .filter((candidate) => candidate.code));
 }
 
 function normalizeImportedSymbol(rawCode: string): string | null {
   const cleaned = rawCode.trim().replace(/^["']|["']$/g, '');
   if (!cleaned) return null;
-  return normalizeTickerSymbolForStorage(cleaned) || null;
+  return normalizeStoredSymbolValue(cleaned) || null;
+}
+
+async function readWatchlistImportText(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const utf8Text = new TextDecoder('utf-8').decode(buffer);
+  if (extractWatchlistCsvCandidates(utf8Text).length > 0) {
+    return utf8Text;
+  }
+
+  try {
+    const shiftJisText = new TextDecoder('shift_jis').decode(buffer);
+    if (extractWatchlistCsvCandidates(shiftJisText).length > 0) {
+      return shiftJisText;
+    }
+  } catch {
+    // ブラウザがShift-JISデコードに未対応の場合はUTF-8結果を使う。
+  }
+
+  return utf8Text;
 }
 
 function isLikelyTickerInput(value: string): boolean {
@@ -887,6 +1144,7 @@ export default function App() {
   const forceCandleRefreshRef = useRef(false);
   const quoteFetchInFlightRef = useRef(false);
   const moomooRealTimeActiveRef = useRef(true);
+  const candlesCacheIndexedDbHydratedRef = useRef(false);
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
@@ -899,12 +1157,15 @@ export default function App() {
     const saved = localStorage.getItem('tv_dashboard_tickers');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as TickerInfo[];
-        return parsed.map((ticker) => ({
-          ...ticker,
-          symbol: normalizeStoredSymbolValue(ticker.symbol),
-          name: ticker.name || normalizeStoredSymbolValue(ticker.symbol),
-        }));
+        const parsed = JSON.parse(saved) as unknown;
+        if (Array.isArray(parsed)) {
+          const normalizedTickers = parsed
+            .map(normalizeTickerInfo)
+            .filter((ticker): ticker is TickerInfo => Boolean(ticker));
+          if (normalizedTickers.length > 0) {
+            return normalizedTickers;
+          }
+        }
       } catch (e) {
         console.error("Failed to parse tickers, resetting", e);
       }
@@ -1156,6 +1417,8 @@ export default function App() {
   const [lastApiSyncTime, setLastApiSyncTime] = useState(() => formatClockTime());
 
   // --- MOOMOO API (OPEND) CONFIG AND STATE ---
+
+  // --- MOOMOO API (OPEND) CONFIG AND STATE ---
   const [moomooStatus, setMoomooStatus] = useState<'disconnected' | 'connected' | 'connecting' | 'error'>('disconnected');
   const [moomooError, setMoomooError] = useState<string | null>(null);
   const [moomooRealTimeActive, setMoomooRealTimeActive] = useState<boolean>(() => {
@@ -1163,9 +1426,109 @@ export default function App() {
     return saved === null ? true : saved === 'true';
   });
 
+  useEffect(() => {
+    const handleGlobalStockDelete = (event: Event) => {
+      const customEvent = event as CustomEvent<{ symbol: string }>;
+      const deleteTargetSymbol = normalizeStoredSymbolValue(customEvent.detail.symbol);
+      const normalizedTarget = normalizeTickerSymbolForStorage(deleteTargetSymbol);
+      if (!normalizedTarget) return;
+
+      // 1. tickers から削除
+      setTickers((current) =>
+        current.filter((t) => normalizeTickerSymbolForStorage(t.symbol) !== normalizedTarget)
+      );
+
+      // 2. headerTickerSymbols から削除
+      setHeaderTickerSymbols((current) =>
+        current.filter((s) => normalizeTickerSymbolForStorage(s) !== normalizedTarget)
+      );
+
+      // 3. watchlistTabs から削除
+      setWatchlistTabs((current) =>
+        current.map((tab) => ({
+          ...tab,
+          sections: tab.sections.map((section) => ({
+            ...section,
+            symbols: (section.symbols || []).filter((s) => normalizeTickerSymbolForStorage(s) !== normalizedTarget),
+          })),
+        }))
+      );
+    };
+
+    window.addEventListener('mooview:delete-global-stock', handleGlobalStockDelete);
+    return () => {
+      window.removeEventListener('mooview:delete-global-stock', handleGlobalStockDelete);
+    };
+  }, []);
+
   // --- PERSISTENCE EFFECT WRITERS ---
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_tickers', JSON.stringify(tickers));
+    let cancelled = false;
+
+    const hydrateCandlesCache = async () => {
+      try {
+        const [indexedDbCache, indexedDbMeta] = await Promise.all([
+          readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_CACHE_KEY),
+          readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_META_KEY),
+        ]);
+        if (cancelled) return;
+
+        const normalizedIndexedDbCache = normalizeStoredCandlesCache(indexedDbCache);
+        if (Object.keys(normalizedIndexedDbCache).length > 0) {
+          setCandlesCache((currentCache) => compactCandlesCache({
+            ...currentCache,
+            ...normalizedIndexedDbCache,
+          }));
+        }
+
+        const normalizedIndexedDbMeta = normalizeTimestampMap(indexedDbMeta);
+        if (Object.keys(normalizedIndexedDbMeta).length > 0) {
+          candleFetchTimestampsRef.current = {
+            ...candleFetchTimestampsRef.current,
+            ...normalizedIndexedDbMeta,
+          };
+        }
+
+        const legacyCache = normalizeStoredCandlesCache(
+          readStoredValue<unknown>(CANDLES_CACHE_STORAGE_KEY, {}),
+        );
+        const legacyMeta = normalizeTimestampMap(
+          readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}),
+        );
+        if (Object.keys(legacyCache).length > 0) {
+          await writeCandlesCacheIndexedDb(
+            CANDLES_CACHE_INDEXED_DB_CACHE_KEY,
+            compactCandlesCache({
+              ...normalizedIndexedDbCache,
+              ...legacyCache,
+            }),
+          );
+        }
+        if (Object.keys(legacyMeta).length > 0) {
+          await writeCandlesCacheIndexedDb(
+            CANDLES_CACHE_INDEXED_DB_META_KEY,
+            {
+              ...normalizedIndexedDbMeta,
+              ...legacyMeta,
+            },
+          );
+        }
+      } catch (error) {
+        console.warn('ローソク足キャッシュのIndexedDB読み込みに失敗しました。', error);
+      } finally {
+        clearVolatileStorageCache();
+        candlesCacheIndexedDbHydratedRef.current = true;
+      }
+    };
+
+    void hydrateCandlesCache();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    writeStoredJson('tv_dashboard_tickers', compactTickersForStorage(tickers));
   }, [tickers]);
 
   useEffect(() => {
@@ -1179,7 +1542,7 @@ export default function App() {
   }, [tickers]);
 
   useEffect(() => {
-    localStorage.setItem(HEADER_TICKER_SYMBOLS_STORAGE_KEY, JSON.stringify(headerTickerSymbols));
+    writeStoredJson(HEADER_TICKER_SYMBOLS_STORAGE_KEY, headerTickerSymbols);
   }, [headerTickerSymbols]);
 
   useEffect(() => {
@@ -1190,7 +1553,7 @@ export default function App() {
   }, [headerTickerMenu]);
 
   useEffect(() => {
-    localStorage.setItem('mooview_active_view', JSON.stringify(appView));
+    writeStoredJson('mooview_active_view', appView);
   }, [appView]);
 
   useEffect(() => {
@@ -1224,35 +1587,42 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_watchlist_tabs', JSON.stringify(watchlistTabs));
+    writeStoredJson('tv_dashboard_watchlist_tabs', watchlistTabs);
   }, [watchlistTabs]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_active_watchlist_tab', JSON.stringify(activeWatchlistTabId));
+    writeStoredJson('tv_dashboard_active_watchlist_tab', activeWatchlistTabId);
   }, [activeWatchlistTabId]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_panels', JSON.stringify(panels));
+    writeStoredJson('tv_dashboard_panels', panels);
   }, [panels]);
 
   useEffect(() => {
-    localStorage.setItem(VALUE_CHAIN_CHART_STATE_STORAGE_KEY, JSON.stringify(valueChainChartState));
+    writeStoredJson(VALUE_CHAIN_CHART_STATE_STORAGE_KEY, valueChainChartState);
   }, [valueChainChartState]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
-      try {
-        localStorage.setItem(CANDLES_CACHE_STORAGE_KEY, JSON.stringify(compactCandlesCache(candlesCache)));
-        localStorage.setItem(CANDLES_CACHE_META_STORAGE_KEY, JSON.stringify(candleFetchTimestampsRef.current));
-      } catch (error) {
-        console.warn('ローソク足キャッシュの保存に失敗しました。', error);
-      }
+      if (!candlesCacheIndexedDbHydratedRef.current) return;
+      void Promise.all([
+        writeCandlesCacheIndexedDb(
+          CANDLES_CACHE_INDEXED_DB_CACHE_KEY,
+          compactCandlesCache(candlesCache),
+        ),
+        writeCandlesCacheIndexedDb(
+          CANDLES_CACHE_INDEXED_DB_META_KEY,
+          candleFetchTimestampsRef.current,
+        ),
+      ])
+        .then(() => clearVolatileStorageCache())
+        .catch((error) => console.warn('ローソク足キャッシュのIndexedDB保存に失敗しました。', error));
     }, 600);
     return () => window.clearTimeout(saveTimer);
   }, [candlesCache]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_indicators', JSON.stringify(indicatorDatabase));
+    writeStoredJson('tv_dashboard_indicators', indicatorDatabase);
   }, [indicatorDatabase]);
 
   useEffect(() => {
@@ -1276,7 +1646,7 @@ export default function App() {
   }, [valueChainChartSymbols]);
 
   useEffect(() => {
-    localStorage.setItem('moomoo_active', String(moomooRealTimeActive));
+    writeStoredValue('moomoo_active', String(moomooRealTimeActive));
     moomooRealTimeActiveRef.current = moomooRealTimeActive;
   }, [moomooRealTimeActive]);
 
@@ -1289,55 +1659,55 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_focused_symbol', JSON.stringify(focusedSymbolIndex));
+    writeStoredJson('tv_dashboard_focused_symbol', focusedSymbolIndex);
   }, [focusedSymbolIndex]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_panel_engines', JSON.stringify(panelEngineToggle));
+    writeStoredJson('tv_dashboard_panel_engines', panelEngineToggle);
   }, [panelEngineToggle]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_layout_style', JSON.stringify(layoutStyle));
+    writeStoredJson('tv_dashboard_layout_style', layoutStyle);
   }, [layoutStyle]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_grid_rows', JSON.stringify(gridRows));
+    writeStoredJson('tv_dashboard_grid_rows', gridRows);
   }, [gridRows]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_grid_cols', JSON.stringify(gridCols));
+    writeStoredJson('tv_dashboard_grid_cols', gridCols);
   }, [gridCols]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_sidebar_open', JSON.stringify(sidebarOpen));
+    writeStoredJson('tv_dashboard_sidebar_open', sidebarOpen);
   }, [sidebarOpen]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_sidebar_view', JSON.stringify(sidebarView));
+    writeStoredJson('tv_dashboard_sidebar_view', sidebarView);
   }, [sidebarView]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_sidebar_width', JSON.stringify(sidebarWidth));
+    writeStoredJson('tv_dashboard_sidebar_width', sidebarWidth);
   }, [sidebarWidth]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_column_widths', JSON.stringify(colWeights));
+    writeStoredJson('tv_dashboard_column_widths', colWeights);
   }, [colWeights]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_panel_heights', JSON.stringify(panelHeights));
+    writeStoredJson('tv_dashboard_panel_heights', panelHeights);
   }, [panelHeights]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_watchlist_column_widths', JSON.stringify(watchlistColumnWidths));
+    writeStoredJson('tv_dashboard_watchlist_column_widths', watchlistColumnWidths);
   }, [watchlistColumnWidths]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_watchlist_show_name_column', JSON.stringify(showWatchlistNameColumn));
+    writeStoredJson('tv_dashboard_watchlist_show_name_column', showWatchlistNameColumn);
   }, [showWatchlistNameColumn]);
 
   useEffect(() => {
-    localStorage.setItem('tv_dashboard_watchlist_sort', JSON.stringify(watchlistSort));
+    writeStoredJson('tv_dashboard_watchlist_sort', watchlistSort);
   }, [watchlistSort]);
 
   useEffect(() => {
@@ -2243,6 +2613,7 @@ export default function App() {
           ? {
               ...panel,
               symbol,
+              watchlistTabId: undefined,
               comparisonSymbols: (panel.comparisonSymbols || []).filter(
                 (comparisonSymbol) => comparisonSymbol !== symbol
               ),
@@ -2586,11 +2957,9 @@ export default function App() {
     }
   };
 
-  // 銘柄名・証券コード・ティッカーから候補を検索する
-  const handleAddTicker = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitTickerInput = async () => {
     const queryInput = newSymbolInput.trim();
-    if (!queryInput) return;
+    if (!queryInput || tickerSearchLoading) return;
 
     setTickerSearchError(null);
     setTickerSearchCandidates([]);
@@ -2635,7 +3004,13 @@ export default function App() {
       return;
     }
 
-    await registerTickerInput(queryInput);
+    await registerTickerInput(inputItems[0] || queryInput);
+  };
+
+  // 銘柄名・証券コード・ティッカーから候補を検索する
+  const handleAddTicker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitTickerInput();
   };
 
   const beginWatchlistImport = (mode: WatchlistImportMode) => {
@@ -2646,9 +3021,10 @@ export default function App() {
   };
 
   const handleImportWatchlistCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
+    const selectedFiles = event.currentTarget.files;
+    const files: File[] = selectedFiles ? Array.from(selectedFiles) : [];
     event.currentTarget.value = '';
-    if (!file) return;
+    if (files.length === 0) return;
 
     const importMode = watchlistImportModeRef.current;
     setWatchlistImporting(true);
@@ -2656,160 +3032,241 @@ export default function App() {
     setTickerSearchError(null);
 
     try {
-      const text = await file.text();
-      const candidates = extractWatchlistCsvCandidates(text);
-      if (candidates.length === 0) {
-        setWatchlistImportMessage('CSVからコード列を読み取れませんでした。');
-        return;
-      }
-
       const tickerBySymbol = new Map(tickers.map((ticker) => [ticker.symbol, ticker]));
-      const queuedSymbols = new Set<string>();
-      const normalizedCandidates: Array<WatchlistCsvCandidate & { symbol: string }> = [];
-      const importedSymbols: string[] = [];
-      const newTickers: TickerInfo[] = [];
-      const newQuotes: Record<string, MoomooTickerQuote> = {};
-      let invalidOrDuplicateCount = 0;
-      let unavailableCount = 0;
+      const allNewTickers: TickerInfo[] = [];
+      const allNewQuotes: Record<string, MoomooTickerQuote> = {};
+      const importedFileResults: Array<{ symbols: string[] }> = [];
+      let totalInvalidOrDuplicateCount = 0;
+      let totalUnverifiedQuoteCount = 0;
+      let filesWithoutCodeColumn = 0;
+      let filesWithoutValidSymbols = 0;
 
-      candidates.forEach((candidate) => {
-        const symbol = normalizeImportedSymbol(candidate.code);
-        if (!symbol || queuedSymbols.has(symbol)) {
-          invalidOrDuplicateCount += 1;
-          return;
+      const fetchImportQuote = async (symbol: string) => {
+        try {
+          const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol }),
+          }, 12_000);
+          const price = Number(data.price);
+          if (!response.ok || !data.success || !Number.isFinite(price) || price <= 0) {
+            return null;
+          }
+
+          const storedSymbol = normalizeTickerSymbolForStorage(String(data.symbol || symbol));
+          const changePct = Number(data.changePct || 0);
+          const quote: MoomooTickerQuote = {
+            name: String(data.name || storedSymbol),
+            price,
+            changePct: Number.isFinite(changePct) ? changePct : 0,
+            marketCap: Number.isFinite(Number(data.marketCap)) && Number(data.marketCap) > 0
+              ? Number(data.marketCap)
+              : undefined,
+          };
+          return { symbol: storedSymbol, quote };
+        } catch {
+          return null;
         }
-        queuedSymbols.add(symbol);
-        normalizedCandidates.push({
-          ...candidate,
-          symbol,
-          name: candidate.name || symbol,
-        });
-      });
+      };
 
-      if (normalizedCandidates.length === 0) {
-        setWatchlistImportMessage('有効な銘柄を読み取れませんでした。');
-        return;
-      }
+      const createUnverifiedImportResult = (candidate: WatchlistCsvCandidate & { symbol: string }) => {
+        const importedTicker: TickerInfo = {
+          symbol: candidate.symbol,
+          name: candidate.name || candidate.symbol,
+          basePrice: 0,
+          dailyChangePct: 0,
+        };
+        return {
+          kind: 'success' as const,
+          ticker: importedTicker,
+          quotes: {} satisfies Record<string, MoomooTickerQuote>,
+          quoteVerified: false,
+        };
+      };
 
-      const statusResponse = await fetch('/api/moomoo/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const statusData = await statusResponse.json();
-      if (!statusResponse.ok || !statusData.connected) {
-        throw new Error(statusData.error || 'Moomooゲートウェイへ接続できないため、CSVを照合できません。');
-      }
-
-      const quoteResults = await mapWithConcurrency(
-        normalizedCandidates,
-        WATCHLIST_IMPORT_CONCURRENCY,
-        async (candidate) => {
-          try {
-            const response = await fetch('/api/moomoo/quote', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ symbol: candidate.symbol }),
-            });
-            const data = await response.json();
-            const price = Number(data.price);
-            if (!response.ok && isMoomooGatewayFailureMessage(String(data.error || ''))) {
-              return {
-                kind: 'gateway-error' as const,
-                error: String(data.error || 'Moomooゲートウェイへ接続できません。'),
-              };
-            }
-            if (!data.success || !Number.isFinite(price) || price <= 0) {
-              return { kind: 'unavailable' as const };
+      const resolveImportCandidate = async (candidate: WatchlistCsvCandidate & { symbol: string }) => {
+        try {
+          const expression = normalizeSymbolExpressionForStorage(candidate.symbol);
+          if (expression) {
+            const [leftQuoteResult, rightQuoteResult] = await Promise.all([
+              fetchImportQuote(expression.left),
+              fetchImportQuote(expression.right),
+            ]);
+            if (!leftQuoteResult || !rightQuoteResult) {
+              return createUnverifiedImportResult(candidate);
             }
 
-            const changePct = Number(data.changePct || 0);
-            const storedSymbol = normalizeTickerSymbolForStorage(String(data.symbol || candidate.symbol));
+            const storedExpression: SymbolExpression = {
+              left: leftQuoteResult.symbol,
+              operator: expression.operator,
+              right: rightQuoteResult.symbol,
+            };
+            const calculatedQuote = calculateExpressionQuote(
+              storedExpression,
+              leftQuoteResult.quote,
+              rightQuoteResult.quote,
+            );
+            if (!calculatedQuote) {
+              return createUnverifiedImportResult(candidate);
+            }
+
+            const storedSymbol = formatSymbolExpression(storedExpression);
             const importedTicker: TickerInfo = {
               symbol: storedSymbol,
-              name: candidate.name || data.name || candidate.symbol,
-              basePrice: price,
-              dailyChangePct: Number.isFinite(changePct) ? changePct : 0,
+              name: candidate.name || `${leftQuoteResult.quote.name} ${storedExpression.operator} ${rightQuoteResult.quote.name}`,
+              basePrice: calculatedQuote.price,
+              dailyChangePct: calculatedQuote.changePct ?? 0,
             };
 
             return {
               kind: 'success' as const,
               ticker: importedTicker,
-              quote: {
-                name: importedTicker.name,
-                price: importedTicker.basePrice,
-                changePct: importedTicker.dailyChangePct,
-                marketCap: Number.isFinite(Number(data.marketCap)) && Number(data.marketCap) > 0
-                  ? Number(data.marketCap)
-                  : undefined,
-              } satisfies MoomooTickerQuote,
-            };
-          } catch (error) {
-            return {
-              kind: 'gateway-error' as const,
-              error: error instanceof Error ? error.message : String(error),
+              quotes: {
+                [leftQuoteResult.symbol]: leftQuoteResult.quote,
+                  [rightQuoteResult.symbol]: rightQuoteResult.quote,
+                } satisfies Record<string, MoomooTickerQuote>,
+              quoteVerified: true,
             };
           }
-        },
-      );
 
-      quoteResults.forEach((result) => {
-        if (result.kind === 'gateway-error') {
-          throw new Error(result.error);
-        }
-        if (result.kind === 'unavailable') {
-          unavailableCount += 1;
-          return;
-        }
-        if (!tickerBySymbol.has(result.ticker.symbol)) {
-          tickerBySymbol.set(result.ticker.symbol, result.ticker);
-          newTickers.push(result.ticker);
-          newQuotes[result.ticker.symbol] = result.quote;
-        }
-        importedSymbols.push(result.ticker.symbol);
-      });
+          const quoteResult = await fetchImportQuote(candidate.symbol);
+          if (!quoteResult) {
+            return createUnverifiedImportResult(candidate);
+          }
 
-      const finalImportedSymbols = Array.from(new Set(importedSymbols));
-      const skippedMessage = `${unavailableCount > 0 ? `${unavailableCount}件はMoomooで確認できないためスキップしました。` : ''}${invalidOrDuplicateCount > 0 ? `${invalidOrDuplicateCount}件は無効または重複のためスキップしました。` : ''}`;
+          const importedTicker: TickerInfo = {
+            symbol: quoteResult.symbol,
+            name: candidate.name || quoteResult.quote.name || candidate.symbol,
+            basePrice: quoteResult.quote.price,
+            dailyChangePct: quoteResult.quote.changePct,
+          };
 
-      if (finalImportedSymbols.length === 0) {
+          return {
+            kind: 'success' as const,
+            ticker: importedTicker,
+            quotes: {
+              [quoteResult.symbol]: quoteResult.quote,
+            } satisfies Record<string, MoomooTickerQuote>,
+            quoteVerified: true,
+          };
+        } catch (error) {
+          return createUnverifiedImportResult(candidate);
+        }
+      };
+
+      for (const file of files) {
+        const text = await readWatchlistImportText(file);
+        const candidates = extractWatchlistCsvCandidates(text);
+        if (candidates.length === 0) {
+          filesWithoutCodeColumn += 1;
+          continue;
+        }
+
+        const queuedSymbols = new Set<string>();
+        const normalizedCandidates: Array<WatchlistCsvCandidate & { symbol: string }> = [];
+        let invalidOrDuplicateCount = 0;
+        let unverifiedQuoteCount = 0;
+
+        candidates.forEach((candidate) => {
+          const symbol = normalizeImportedSymbol(candidate.code);
+          if (!symbol || queuedSymbols.has(symbol)) {
+            invalidOrDuplicateCount += 1;
+            return;
+          }
+          queuedSymbols.add(symbol);
+          normalizedCandidates.push({
+            ...candidate,
+            symbol,
+            name: candidate.name || symbol,
+          });
+        });
+
+        totalInvalidOrDuplicateCount += invalidOrDuplicateCount;
+        if (normalizedCandidates.length === 0) {
+          filesWithoutValidSymbols += 1;
+          continue;
+        }
+
+        const importedSymbols: string[] = [];
+        const quoteResults = await mapWithConcurrency(
+          normalizedCandidates,
+          WATCHLIST_IMPORT_CONCURRENCY,
+          resolveImportCandidate,
+        );
+
+        quoteResults.forEach((result) => {
+          if (!result.quoteVerified) {
+            unverifiedQuoteCount += 1;
+          }
+          if (!tickerBySymbol.has(result.ticker.symbol)) {
+            tickerBySymbol.set(result.ticker.symbol, result.ticker);
+            allNewTickers.push(result.ticker);
+          }
+          Object.assign(allNewQuotes, result.quotes);
+          importedSymbols.push(result.ticker.symbol);
+        });
+
+        totalUnverifiedQuoteCount += unverifiedQuoteCount;
+
+        const finalImportedSymbols = Array.from(new Set(importedSymbols));
+        if (finalImportedSymbols.length === 0) {
+          continue;
+        }
+
+        if (importMode === 'new-tab') {
+          addSymbolsToNewWatchlistTab(finalImportedSymbols, file.name);
+        } else {
+          addSymbolsToActiveWatchlist(finalImportedSymbols);
+        }
+
+        importedFileResults.push({
+          symbols: finalImportedSymbols,
+        });
+      }
+
+      if (importedFileResults.length === 0) {
+        const skippedMessage = `${totalInvalidOrDuplicateCount > 0 ? `${totalInvalidOrDuplicateCount}件は無効または重複のためスキップしました。` : ''}${filesWithoutCodeColumn > 0 ? `${filesWithoutCodeColumn}ファイルはコード列を読み取れませんでした。` : ''}${filesWithoutValidSymbols > 0 ? `${filesWithoutValidSymbols}ファイルは有効な銘柄を読み取れませんでした。` : ''}`;
         setWatchlistImportMessage(`インポートできる銘柄がありませんでした。${skippedMessage}`);
         return;
       }
 
-      if (newTickers.length > 0) {
+      if (allNewTickers.length > 0) {
         setTickers((currentTickers) => {
           const currentSymbols = new Set(currentTickers.map((ticker) => ticker.symbol));
           return [
             ...currentTickers,
-            ...newTickers.filter((ticker) => !currentSymbols.has(ticker.symbol)),
+            ...allNewTickers.filter((ticker) => !currentSymbols.has(ticker.symbol)),
           ];
         });
         setQuoteCache((currentQuotes) => ({
           ...currentQuotes,
-          ...newQuotes,
+          ...allNewQuotes,
         }));
         setIndicatorDatabase((currentDatabase) => {
           const nextDatabase = { ...currentDatabase };
-          newTickers.forEach((ticker) => {
+          allNewTickers.forEach((ticker) => {
             nextDatabase[ticker.symbol] = nextDatabase[ticker.symbol]
               || createDefaultIndicatorSettings(ticker.symbol);
           });
           return nextDatabase;
         });
+      } else if (Object.keys(allNewQuotes).length > 0) {
+        setQuoteCache((currentQuotes) => ({
+          ...currentQuotes,
+          ...allNewQuotes,
+        }));
       }
 
-      if (importMode === 'new-tab') {
-        addSymbolsToNewWatchlistTab(finalImportedSymbols, file.name);
-      } else {
-        addSymbolsToActiveWatchlist(finalImportedSymbols);
-      }
-
-      setSelectedSymbols(finalImportedSymbols);
-      setLastClickedSymbol(finalImportedSymbols.at(-1) ?? null);
-      const destinationLabel = importMode === 'new-tab' ? '新規タブ' : 'アクティブなウォッチリスト';
+      const lastImportedSymbols = importedFileResults.at(-1)?.symbols || [];
+      setSelectedSymbols(lastImportedSymbols);
+      setLastClickedSymbol(lastImportedSymbols.at(-1) ?? null);
+      const totalImportedCount = importedFileResults.reduce((sum, result) => sum + result.symbols.length, 0);
+      const destinationLabel = importMode === 'new-tab'
+        ? `${importedFileResults.length}個の新規タブ`
+        : 'アクティブなウォッチリスト';
+      const skippedMessage = `${totalUnverifiedQuoteCount > 0 ? `${totalUnverifiedQuoteCount}件は価格未確認のまま銘柄のみ登録しました。` : ''}${totalInvalidOrDuplicateCount > 0 ? `${totalInvalidOrDuplicateCount}件は無効または重複のためスキップしました。` : ''}${filesWithoutCodeColumn > 0 ? `${filesWithoutCodeColumn}ファイルはコード列を読み取れませんでした。` : ''}${filesWithoutValidSymbols > 0 ? `${filesWithoutValidSymbols}ファイルは有効な銘柄を読み取れませんでした。` : ''}`;
       setWatchlistImportMessage(
-        `${finalImportedSymbols.length}件を${destinationLabel}へインポートしました。${skippedMessage}`
+        `${totalImportedCount}件を${destinationLabel}へインポートしました。${skippedMessage}`
       );
     } catch (error) {
       setWatchlistImportMessage(
@@ -2847,15 +3304,18 @@ export default function App() {
       return;
     }
     
-    // Pick reference sym from available tickers list
+    const activeTab = watchlistTabs.find((tab) => tab.id === activeWatchlistTabId) ?? watchlistTabs[0];
+    const activeTabSymbols = getWatchlistTabSymbols(activeTab);
     const currentSymbols = panels.map(p => p.symbol);
     const fallbackTicker = tickers.find(t => !currentSymbols.includes(t.symbol)) || tickers[0];
-    const fallbackIsExpression = Boolean(fallbackTicker && parseSymbolExpression(fallbackTicker.symbol));
+    const fallbackSymbol = activeTabSymbols[0] || fallbackTicker?.symbol || 'VOO';
+    const fallbackIsExpression = Boolean(parseSymbolExpression(fallbackSymbol));
     
     const newId = `panel-${Date.now()}`;
-    const newPanel: ChartPanel = {
+    const basePanel: ChartPanel = {
       id: newId,
-      symbol: fallbackTicker.symbol,
+      symbol: fallbackSymbol,
+      watchlistTabId: activeTab?.id,
       timeframe: '5m',
       zoomFactor: 12,
       scrollOffsetPct: 100,
@@ -2867,6 +3327,9 @@ export default function App() {
       rsiHeightPct: 25,
       macdHeightPct: 25,
     };
+    const newPanel = activeTab
+      ? syncPanelToWatchlistTab(basePanel, activeTab.id, activeTabSymbols)
+      : basePanel;
 
     setPanels(prev => [...prev, newPanel]);
     setPanelEngineToggle(prev => ({ ...prev, [newId]: false }));
@@ -2884,6 +3347,17 @@ export default function App() {
   // Modify individual chart properties
   const handleUpdatePanel = (id: string, updates: Partial<ChartPanel>) => {
     setPanels(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+  };
+
+  const handleSelectWatchlistTabForPanel = (panelId: string, tabId: string) => {
+    const tabSymbols = watchlistTabSymbolsById.get(tabId) || [];
+    setPanels((currentPanels) =>
+      currentPanels.map((panel) =>
+        panel.id === panelId
+          ? syncPanelToWatchlistTab(panel, tabId, tabSymbols)
+          : panel
+      )
+    );
   };
 
   // Write custom indicator updates specifically for matching target symbol
@@ -2907,39 +3381,49 @@ export default function App() {
   // Evaluates live visual statistics of active cached charts
   const liveTickerStats = useMemo(() => {
     return tickers.map(t => {
+      const normalizedTicker = normalizeTickerInfo(t) || {
+        symbol: normalizeStoredSymbolValue(t.symbol || ''),
+        name: String(t.name || t.symbol || ''),
+        basePrice: 0,
+        dailyChangePct: 0,
+      };
       if (moomooRealTimeActive) {
-        const expression = normalizeSymbolExpressionForStorage(t.symbol);
+        const expression = normalizeSymbolExpressionForStorage(normalizedTicker.symbol);
         if (expression) {
           const leftQuote = quoteCache[expression.left];
           const rightQuote = quoteCache[expression.right];
           const expressionQuote = leftQuote && rightQuote
             ? calculateExpressionQuote(expression, leftQuote, rightQuote)
             : null;
+          const expressionPrice = Number(expressionQuote?.price);
+          const expressionChange = Number(expressionQuote?.changePct);
           return {
-            ...t,
-            currentPrice: expressionQuote?.price ?? null,
-            computedChange: expressionQuote?.changePct ?? null,
+            ...normalizedTicker,
+            currentPrice: Number.isFinite(expressionPrice) ? expressionPrice : null,
+            computedChange: Number.isFinite(expressionChange) ? expressionChange : null,
           };
         }
-        const quote = quoteCache[t.symbol];
+        const quote = quoteCache[normalizedTicker.symbol];
+        const quotePrice = Number(quote?.price);
+        const quoteChange = Number(quote?.changePct);
         return {
-          ...t,
-          currentPrice: quote?.price ?? null,
-          computedChange: quote?.changePct ?? null,
+          ...normalizedTicker,
+          currentPrice: Number.isFinite(quotePrice) ? quotePrice : null,
+          computedChange: Number.isFinite(quoteChange) ? quoteChange : null,
           marketCap: quote?.marketCap,
         };
       }
 
-      const cached = resolveCandlesForSymbol(t.symbol, '5m', candlesCache);
-      const curPrice = cached && cached.length > 0 ? cached[cached.length - 1].close : t.basePrice;
-      const initialPrice = cached && cached.length > 0 ? cached[0].close : t.basePrice;
+      const cached = resolveCandlesForSymbol(normalizedTicker.symbol, '5m', candlesCache);
+      const curPrice = cached && cached.length > 0 ? Number(cached[cached.length - 1].close) : normalizedTicker.basePrice;
+      const initialPrice = cached && cached.length > 0 ? Number(cached[0].close) : normalizedTicker.basePrice;
       const changePct = cached.length > 1 && initialPrice !== 0
         ? ((curPrice - initialPrice) / Math.abs(initialPrice)) * 100
-        : t.dailyChangePct;
+        : normalizedTicker.dailyChangePct;
       return {
-        ...t,
-        currentPrice: curPrice,
-        computedChange: changePct
+        ...normalizedTicker,
+        currentPrice: Number.isFinite(curPrice) ? curPrice : null,
+        computedChange: Number.isFinite(changePct) ? changePct : null,
       };
     });
   }, [tickers, candlesCache, quoteCache, moomooRealTimeActive]);
@@ -3012,12 +3496,43 @@ export default function App() {
   const activeWatchlistTab = useMemo(() => {
     return watchlistTabs.find((tab) => tab.id === activeWatchlistTabId) ?? watchlistTabs[0];
   }, [activeWatchlistTabId, watchlistTabs]);
+  const watchlistTabSymbolsById = useMemo(() => {
+    const next = new Map<string, string[]>();
+    watchlistTabs.forEach((tab) => {
+      next.set(tab.id, getWatchlistTabSymbols(tab));
+    });
+    return next;
+  }, [watchlistTabs]);
   const activeWatchlistTabIndex = watchlistTabs.findIndex((tab) => tab.id === activeWatchlistTabId);
   const canJumpToFirstWatchlistTab = watchlistTabs.length > 1 && activeWatchlistTabIndex > 0;
   const canJumpToLastWatchlistTab =
     watchlistTabs.length > 1 &&
     activeWatchlistTabIndex >= 0 &&
     activeWatchlistTabIndex < watchlistTabs.length - 1;
+
+  useEffect(() => {
+    setPanels((currentPanels) => {
+      let changed = false;
+      const nextPanels = currentPanels.map((panel) => {
+        if (!panel.watchlistTabId) return panel;
+
+        if (!watchlistTabSymbolsById.has(panel.watchlistTabId)) {
+          changed = true;
+          return { ...panel, watchlistTabId: undefined };
+        }
+
+        const syncedPanel = syncPanelToWatchlistTab(
+          panel,
+          panel.watchlistTabId,
+          watchlistTabSymbolsById.get(panel.watchlistTabId) || [],
+        );
+        if (!hasWatchlistPanelTargetChanged(panel, syncedPanel)) return panel;
+        changed = true;
+        return syncedPanel;
+      });
+      return changed ? nextPanels : currentPanels;
+    });
+  }, [watchlistTabSymbolsById]);
 
   const watchlistLayout = useMemo(
     () => calculateWatchlistLayoutColumnWidths(
@@ -3057,7 +3572,18 @@ export default function App() {
 
     return (activeWatchlistTab?.sections ?? []).map((section) => {
       const rows = section.symbols
-        .map((symbol) => tickerStatsBySymbol.get(symbol))
+        .map((symbol) => {
+          const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+          if (!normalizedSymbol) return null;
+          return tickerStatsBySymbol.get(normalizedSymbol) || {
+            symbol: normalizedSymbol,
+            name: formatWatchlistSymbol(normalizedSymbol),
+            basePrice: 0,
+            dailyChangePct: 0,
+            currentPrice: null,
+            computedChange: null,
+          };
+        })
         .filter((ticker): ticker is TickerInfo & { currentPrice: number | null; computedChange: number | null } => Boolean(ticker));
       return {
         ...section,
@@ -3114,12 +3640,14 @@ export default function App() {
     symbol,
     comparisonSymbols = [],
     onOpenIndicatorSettings,
+    onRemoveComparisonSymbol,
     focusDate,
     focusDateActive,
   }: {
     symbol: string;
     comparisonSymbols?: string[];
     onOpenIndicatorSettings?: () => void;
+    onRemoveComparisonSymbol?: (symbol: string) => void;
     focusDate?: string;
     focusDateActive?: boolean;
   }) => {
@@ -3190,6 +3718,7 @@ export default function App() {
           setValueChainChartState((current) => ({ ...current, macdHeightPct }))
         }
         onOpenIndicatorSettings={onOpenIndicatorSettings}
+        onRemoveComparisonSymbol={onRemoveComparisonSymbol}
         focusDate={focusDate}
         focusDateActive={focusDateActive}
         allowNegativeValues={Boolean(panelExpression)}
@@ -3548,20 +4077,24 @@ export default function App() {
                             <div className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none">
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
-                                {/* SYMBOL SELECT DROPDOWN */}
+                                {/* タブ選択で、そのリスト内の銘柄を比較表示に展開する */}
                                 <select
-                                  id={`select-symbol-${panel.id}`}
-                                  value={panel.symbol}
-                                  onChange={(e) => handleUpdatePanel(panel.id, { symbol: e.target.value })}
-                                  className="bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 py-0.5 font-bold uppercase outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                                  id={`select-watchlist-tab-${panel.id}`}
+                                  value={panel.watchlistTabId || ''}
+                                  onChange={(event) => handleSelectWatchlistTabForPanel(panel.id, event.target.value)}
+                                  className="max-w-[190px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 py-0.5 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                                  title="比較表示するタブを選択"
                                 >
-                                  {tickers.map(t => (
-                                    <option key={t.symbol} value={t.symbol}>{t.symbol}</option>
+                                  <option value="" disabled>リストを選択</option>
+                                  {watchlistTabs.map((tab) => (
+                                    <option key={tab.id} value={tab.id}>
+                                      {tab.name} ({watchlistTabSymbolsById.get(tab.id)?.length ?? 0})
+                                    </option>
                                   ))}
                                 </select>
 
                                 {/* ACTIVE OVERLAYS BADGES */}
-                                {panel.comparisonSymbols && panel.comparisonSymbols.length > 0 && (
+                                {false && panel.comparisonSymbols && panel.comparisonSymbols.length > 0 && (
                                   <div className="flex items-center space-x-1 pl-1.5 border-l border-[#242424] shrink-0">
                                     {panel.comparisonSymbols.map((compSym, idx) => {
                                       const color = getSeriesColor(compSym, idx);
@@ -3745,6 +4278,11 @@ export default function App() {
                                   macdHeightPct={panel.macdHeightPct ?? 25}
                                   setMacdHeightPct={(pct) => handleUpdatePanel(panel.id, { macdHeightPct: pct })}
                                   onOpenIndicatorSettings={() => openIndicatorSettingsForSymbol(panel.symbol)}
+                                  onRemoveComparisonSymbol={(symbol) => {
+                                    handleUpdatePanel(panel.id, {
+                                      comparisonSymbols: (panel.comparisonSymbols || []).filter((item) => item !== symbol),
+                                    });
+                                  }}
                                   allowNegativeValues={Boolean(panelExpression)}
                                   valuePrecision={panelExpression ? 4 : 2}
                                 />
@@ -4053,6 +4591,7 @@ export default function App() {
                   ref={csvImportInputRef}
                   type="file"
                   accept=".csv,text/csv"
+                  multiple
                   className="hidden"
                   onChange={handleImportWatchlistCsv}
                 />
@@ -4201,6 +4740,11 @@ export default function App() {
                       placeholder="AAPL,MSFT,CRM/SPY"
                       value={newSymbolInput}
                       onChange={(e) => setNewSymbolInput(e.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+                        event.preventDefault();
+                        void submitTickerInput();
+                      }}
                       className="h-7 bg-[#121212] border border-[#303030] text-white text-[10px] pl-7 pr-2 w-full outline-none focus:border-emerald-500 placeholder-gray-600"
                       autoFocus
                     />
@@ -4316,8 +4860,10 @@ export default function App() {
                     </div>
 
                     {!section.collapsed && section.rows.map((ticker) => {
-                      const hasQuote = ticker.currentPrice !== null && ticker.computedChange !== null;
-                      const isPositive = hasQuote && ticker.computedChange >= 0;
+                      const currentPrice = Number(ticker.currentPrice);
+                      const computedChange = Number(ticker.computedChange);
+                      const hasQuote = Number.isFinite(currentPrice) && Number.isFinite(computedChange);
+                      const isPositive = hasQuote && computedChange >= 0;
                       const isSelectedPrimary = panels[0]?.symbol === ticker.symbol;
                       const isMultiSelected = selectedSymbols.includes(ticker.symbol);
 
@@ -4421,11 +4967,11 @@ export default function App() {
                               !hasQuote ? 'text-gray-600' : isPositive ? 'text-[#20c7b0]' : 'text-[#ff4961]'
                             }`}
                           >
-                            {hasQuote ? `${ticker.computedChange >= 0 ? '+' : ''}${ticker.computedChange.toFixed(2)}%` : 'N/A'}
+                            {hasQuote ? `${computedChange >= 0 ? '+' : ''}${computedChange.toFixed(2)}%` : 'N/A'}
                           </span>
                           {watchlistLayout.showPrice && (
                             <span className="text-right font-mono text-[10px] text-gray-200 truncate">
-                              {formatTickerPrice(ticker.symbol, ticker.currentPrice)}
+                              {formatTickerPrice(ticker.symbol, currentPrice)}
                             </span>
                           )}
                           <button

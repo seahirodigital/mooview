@@ -192,8 +192,13 @@ async function startServer(): Promise<void> {
   }
 
   if (process.env.NODE_ENV !== 'production') {
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: hmrDisabled ? false : undefined,
+        watch: hmrDisabled ? null : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -4839,7 +4839,11 @@ export function MacroFlowMap({
               >
                 {rangeStartDate}
               </button>
-              <div className="flex min-w-[116px] flex-col items-center leading-none">
+              <div
+                className="flex min-w-[116px] flex-col items-center leading-none"
+                title={rangeProgressTitle}
+                aria-label={rangeProgressTitle}
+              >
                 <span className="text-emerald-300">{activeWindowDays}D</span>
                 {rangeProgressText && (
                   <span

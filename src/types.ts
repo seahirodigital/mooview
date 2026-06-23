@@ -1,4 +1,5 @@
 export type Timeframe = '1m' | '3m' | '5m' | '10m' | '30m' | '1h' | '4h' | '1d' | '1w' | '1mo';
+export type ChartDisplayRange = 'd' | 'w' | null;
 export type IndicatorLineStyle = 'solid' | 'dashed' | 'dotted' | 'dashdot';
 
 export interface IndicatorConfig {
@@ -45,6 +46,7 @@ export interface ChartPanel {
   watchlistTabId?: string;
   watchlistSectionId?: string;
   timeframe: Timeframe;
+  displayRange?: ChartDisplayRange;
   zoomFactor: number; // e.g. how many pixels per candle, from 2 to 40
   scrollOffsetPct: number; // scroll percentage (0=right-most/latest, 100=left-most/oldest)
   showRsi: boolean;

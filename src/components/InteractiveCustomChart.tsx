@@ -27,6 +27,7 @@ interface InteractiveCustomChartProps {
   comparisonLabelFontSize?: number;
   onComparisonLabelFontSizeChange?: (fontSize: number) => void;
   symbolDisplayNames?: Record<string, string>;
+  changePctOverrides?: Record<string, number>;
   emptyMessage?: string;
   priceScale: number;
   setPriceScale: (scale: number) => void;
@@ -38,6 +39,9 @@ interface InteractiveCustomChartProps {
   setMacdHeightPct: (pct: number) => void;
   onOpenIndicatorSettings?: () => void;
   onRemoveComparisonSymbol?: (symbol: string) => void;
+  onToggleVolume?: () => void;
+  onToggleRsi?: () => void;
+  onToggleMacd?: () => void;
   focusDate?: string;
   focusDateActive?: boolean;
   allowNegativeValues?: boolean;
@@ -164,6 +168,7 @@ export function InteractiveCustomChart({
   comparisonLabelFontSize: controlledComparisonLabelFontSize,
   onComparisonLabelFontSizeChange,
   symbolDisplayNames = {},
+  changePctOverrides = {},
   emptyMessage = 'データを取得中...',
   priceScale,
   setPriceScale,
@@ -175,6 +180,9 @@ export function InteractiveCustomChart({
   setMacdHeightPct,
   onOpenIndicatorSettings,
   onRemoveComparisonSymbol,
+  onToggleVolume,
+  onToggleRsi,
+  onToggleMacd,
   focusDate,
   focusDateActive = false,
   allowNegativeValues = false,
@@ -195,6 +203,10 @@ export function InteractiveCustomChart({
   const [comparisonLegendOpen, setComparisonLegendOpen] = useState(false);
   const [localComparisonLabelFontSize, setLocalComparisonLabelFontSize] = useState(10);
   const [legendFontMenu, setLegendFontMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const [chartContextMenu, setChartContextMenu] = useState<{
     x: number;
     y: number;
   } | null>(null);
@@ -255,14 +267,33 @@ export function InteractiveCustomChart({
     return () => window.removeEventListener('click', closeMenu);
   }, [legendFontMenu]);
 
+  useEffect(() => {
+    if (!chartContextMenu) return;
+    const closeMenu = () => setChartContextMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [chartContextMenu]);
+
   const getDisplayName = (rawSymbol: string) => (
     symbolDisplayNames[rawSymbol] || rawSymbol
   );
+
+  const getChangePctOverride = (rawSymbol: string): number | null => {
+    const directValue = changePctOverrides[rawSymbol];
+    if (Number.isFinite(directValue)) return directValue;
+    const upperValue = changePctOverrides[rawSymbol.toUpperCase()];
+    return Number.isFinite(upperValue) ? upperValue : null;
+  };
 
   const openLegendFontMenu = (event: React.MouseEvent<Element>) => {
     event.preventDefault();
     event.stopPropagation();
     setLegendFontMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  const openChartContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setChartContextMenu({ x: event.clientX, y: event.clientY });
   };
 
   const { width, height } = dimensions;
@@ -542,7 +573,7 @@ export function InteractiveCustomChart({
           y: getY(scaledPrice),
           close: compCandle.close,
           scaledPrice,
-          changePct: calculateChangePct(compCandle.close, startPrice),
+          changePct: getChangePctOverride(compSym) ?? calculateChangePct(compCandle.close, startPrice),
           sliceIndex,
           globalIndex: startIndex + sliceIndex,
         });
@@ -564,6 +595,7 @@ export function InteractiveCustomChart({
     mainHeight,
     plotWidth,
     startIndex,
+    changePctOverrides,
   ]);
 
   const rightAxisLabels = useMemo(() => {
@@ -577,7 +609,7 @@ export function InteractiveCustomChart({
         symbol,
         color: '#475569',
         y: getY(lastMainCandle.close),
-        changePct: calculateChangePct(lastMainCandle.close, firstMainCandle.close),
+        changePct: getChangePctOverride(symbol) ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
       },
       ...comparisonSymbols.flatMap((compSym, index) => {
         const points = comparisonSeriesData[compSym] || [];
@@ -639,6 +671,7 @@ export function InteractiveCustomChart({
     priceMinMax.min,
     priceMinMax.max,
     comparisonLabelFontSize,
+    changePctOverrides,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {
@@ -909,6 +942,7 @@ export function InteractiveCustomChart({
     <div 
       ref={containerRef}
       className="flex-1 w-full h-full flex flex-col min-h-0 relative select-none"
+      onContextMenu={openChartContextMenu}
     >
       
       {/* 1. FLOATING CROSSHAIR INFO BANNER */}
@@ -958,8 +992,9 @@ export function InteractiveCustomChart({
                 ? comparisonCandleMaps[compSym]?.get(getCandleAlignmentKey(activeCandle, timeframe))
                 : null;
               const startPrice = compStartPrice[compSym] || 1;
+              const overrideChangePct = getChangePctOverride(compSym);
               const changeText = compCandle
-                ? formatSignedPercent(calculateChangePct(compCandle.close, startPrice))
+                ? formatSignedPercent(overrideChangePct ?? calculateChangePct(compCandle.close, startPrice))
                 : 'N/A';
               return (
                 <div
@@ -1023,6 +1058,52 @@ export function InteractiveCustomChart({
           >
             <RotateCcw className="h-3.5 w-3.5" />
             初期値に戻す
+          </button>
+        </div>
+      )}
+
+      {chartContextMenu && (
+        <div
+          className="fixed z-[88] w-40 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+          style={{ left: chartContextMenu.x, top: chartContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              onToggleVolume?.();
+              setChartContextMenu(null);
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40"
+            disabled={!onToggleVolume}
+          >
+            <span>出来高</span>
+            <span className={showVolume ? 'text-emerald-300' : 'text-gray-500'}>{showVolume ? 'ON' : 'OFF'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onToggleRsi?.();
+              setChartContextMenu(null);
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40"
+            disabled={!onToggleRsi}
+          >
+            <span>RSI</span>
+            <span className={showRsi ? 'text-emerald-300' : 'text-gray-500'}>{showRsi ? 'ON' : 'OFF'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onToggleMacd?.();
+              setChartContextMenu(null);
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40"
+            disabled={!onToggleMacd}
+          >
+            <span>MACD</span>
+            <span className={showMacd ? 'text-emerald-300' : 'text-gray-500'}>{showMacd ? 'ON' : 'OFF'}</span>
           </button>
         </div>
       )}

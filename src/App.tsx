@@ -22,7 +22,7 @@ import {
   Upload
 } from 'lucide-react';
 
-import { Timeframe, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle } from './types';
+import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle } from './types';
 import { DEFAULT_TICKERS, generateCandles, simulateTick } from './mockData';
 import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
@@ -66,6 +66,11 @@ const CANDLES_CACHE_INDEXED_DB_CACHE_KEY = 'candles';
 const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
+const KLINE_FETCH_BATCH_LIMIT = 60;
+const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
+const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
+const WATCHLIST_QUOTE_BATCH_LIMIT = 200;
+const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 10_000;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
@@ -75,6 +80,11 @@ const VALUE_CHAIN_CHART_STATE_STORAGE_KEY = 'mooview_value_chain_chart_state_v1'
 const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v1';
 const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
+const DAY_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '5m';
+const WEEK_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '30m';
+const DEFAULT_DISPLAY_RANGE: Exclude<ChartDisplayRange, null> = 'd';
+const DAY_RANGE_ZOOM_FACTOR = 6.5;
+const WEEK_RANGE_ZOOM_FACTOR = 6.5;
 const DEFAULT_HEADER_TICKER_SYMBOLS = DEFAULT_TICKERS.slice(0, 6).map((ticker) => ticker.symbol);
 const SYMBOL_NAME_ALIASES: Record<string, string> = {
   BRCM: 'AVGO',
@@ -452,6 +462,30 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isMoomooRateLimitMessage(message: string | null | undefined): boolean {
+  return /high frequency|too frequent|too many|rate|limit|quota|frequency|429/i.test(message || '');
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function normalizeChartDisplayRange(displayRange: ChartDisplayRange | undefined): Exclude<ChartDisplayRange, null> {
+  return displayRange === 'w' ? 'w' : DEFAULT_DISPLAY_RANGE;
+}
+
+function getDisplayRangeZoomFactor(displayRange: ChartDisplayRange | undefined): number {
+  return displayRange === 'w' ? WEEK_RANGE_ZOOM_FACTOR : DAY_RANGE_ZOOM_FACTOR;
+}
+
 function normalizePanel(panel: ChartPanel): ChartPanel {
   const normalizedComparisonSymbols = Array.from(new Set(
     (panel.comparisonSymbols || [])
@@ -464,13 +498,18 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
   const watchlistSectionId = typeof panel.watchlistSectionId === 'string' && panel.watchlistSectionId.trim()
     ? panel.watchlistSectionId.trim()
     : undefined;
+  const displayRange = normalizeChartDisplayRange(panel.displayRange);
+  const displayTimeframe = getDisplayRangeSeedTimeframe(displayRange);
   return {
     ...panel,
     symbol: normalizeStoredSymbolValue(panel.symbol),
     watchlistTabId,
     watchlistSectionId,
     comparisonSymbols: normalizedComparisonSymbols.length > 0 ? normalizedComparisonSymbols : panel.comparisonSymbols,
-    timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
+    timeframe: displayTimeframe ?? ((panel.timeframe as string) === '15m' ? '10m' : panel.timeframe),
+    displayRange,
+    zoomFactor: getDisplayRangeZoomFactor(displayRange),
+    scrollOffsetPct: 100,
     priceScale: panel.priceScale ?? 1,
     priceOffsetPct: panel.priceOffsetPct ?? 0,
     rsiHeightPct: panel.rsiHeightPct ?? 25,
@@ -872,6 +911,89 @@ function resolveCandlesForSymbol(
     cache[`${expression.right}-${timeframe}`] || [],
     timeframe,
   );
+}
+
+function isJapanMarketSymbol(symbol: string): boolean {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+  return normalizedSymbol.startsWith('JP.') || /^\d{3,5}$/.test(normalizedSymbol);
+}
+
+function getDisplayRangeSeedTimeframe(displayRange?: ChartDisplayRange): Timeframe | null {
+  if (displayRange === 'd') return DAY_RANGE_OVERVIEW_TIMEFRAME;
+  if (displayRange === 'w') return WEEK_RANGE_OVERVIEW_TIMEFRAME;
+  return null;
+}
+
+function getCandleDatePart(candle: Candle): string {
+  if (candle.timeStr && /^\d{4}-\d{2}-\d{2}/.test(candle.timeStr)) {
+    return candle.timeStr.slice(0, 10);
+  }
+  return new Date(candle.time * 1000).toISOString().slice(0, 10);
+}
+
+function getCandleClockPart(candle: Candle): string {
+  if (candle.timeStr && /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(candle.timeStr)) {
+    return candle.timeStr.slice(11, 16);
+  }
+  const date = new Date(candle.time * 1000);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function dateStringToUtcMs(dateString: string): number {
+  const [year, month, day] = dateString.split('-').map(Number);
+  return Date.UTC(year, (month || 1) - 1, day || 1);
+}
+
+function formatUtcDateString(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function getWeekDateRange(dateString: string): { start: string; end: string } {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const dateMs = dateStringToUtcMs(dateString);
+  const day = new Date(dateMs).getUTCDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const mondayMs = dateMs + mondayOffset * dayMs;
+  return {
+    start: formatUtcDateString(mondayMs),
+    end: formatUtcDateString(mondayMs + 4 * dayMs),
+  };
+}
+
+function filterCandlesForDisplayRange(
+  candles: Candle[],
+  displayRange: ChartDisplayRange | undefined,
+  symbol: string,
+): Candle[] {
+  if (!displayRange || candles.length === 0) return candles;
+
+  const latestDate = candles.reduce((latest, candle) => {
+    const candleDate = getCandleDatePart(candle);
+    return candleDate > latest ? candleDate : latest;
+  }, getCandleDatePart(candles[candles.length - 1]));
+
+  if (displayRange === 'd') {
+    const session = isJapanMarketSymbol(symbol)
+      ? { start: '09:00', end: '15:30' }
+      : { start: '09:30', end: '16:00' };
+    const sameDateCandles = candles.filter((candle) => getCandleDatePart(candle) === latestDate);
+    const sessionCandles = sameDateCandles.filter((candle) => {
+      const clock = getCandleClockPart(candle);
+      return clock >= session.start && clock <= session.end;
+    });
+    return sessionCandles.length > 0 ? sessionCandles : sameDateCandles.length > 0 ? sameDateCandles : candles;
+  }
+
+  if (displayRange === 'w') {
+    const { start, end } = getWeekDateRange(latestDate);
+    const weekCandles = candles.filter((candle) => {
+      const candleDate = getCandleDatePart(candle);
+      return candleDate >= start && candleDate <= end;
+    });
+    return weekCandles.length > 0 ? weekCandles : candles;
+  }
+
+  return candles;
 }
 
 function splitTickerInputList(rawInput: string): string[] {
@@ -1524,6 +1646,7 @@ export default function App() {
   const candleFetchInFlightRef = useRef(false);
   const candleFetchPendingRef = useRef(false);
   const forceCandleRefreshRef = useRef(false);
+  const initialVisibleChartRefreshRef = useRef(true);
   const quoteFetchInFlightRef = useRef(false);
   const quoteFetchPendingRef = useRef(false);
   const quoteFetchManualTabQueueRef = useRef<string[]>([]);
@@ -1670,6 +1793,11 @@ export default function App() {
     width: number;
     maxHeight: number;
   } | null>(null);
+  const [displayRangeMenu, setDisplayRangeMenu] = useState<{
+    panelId: string;
+    x: number;
+    y: number;
+  } | null>(null);
   // Watchlist tabs overflow dropdown open state
   const [tabsDropdownOpen, setTabsDropdownOpen] = useState<boolean>(false);
   const watchlistTabsViewportRef = useRef<HTMLDivElement | null>(null);
@@ -1690,8 +1818,9 @@ export default function App() {
       {
         id: 'panel-1',
         symbol: 'VOO',
-        timeframe: '5m',
-        zoomFactor: 12,
+        timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+        displayRange: DEFAULT_DISPLAY_RANGE,
+        zoomFactor: DAY_RANGE_ZOOM_FACTOR,
         scrollOffsetPct: 100,
         showRsi: true,
         showMacd: false,
@@ -1704,8 +1833,9 @@ export default function App() {
       {
         id: 'panel-2',
         symbol: 'QQQ',
-        timeframe: '10m',
-        zoomFactor: 12,
+        timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+        displayRange: DEFAULT_DISPLAY_RANGE,
+        zoomFactor: DAY_RANGE_ZOOM_FACTOR,
         scrollOffsetPct: 100,
         showRsi: false,
         showMacd: true,
@@ -1721,8 +1851,9 @@ export default function App() {
     const defaults: ChartPanel = {
       id: 'value-chain-side-chart',
       symbol: 'NVDA',
-      timeframe: '1d',
-      zoomFactor: 8,
+      timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+      displayRange: DEFAULT_DISPLAY_RANGE,
+      zoomFactor: DAY_RANGE_ZOOM_FACTOR,
       scrollOffsetPct: 100,
       showRsi: true,
       showMacd: true,
@@ -1791,6 +1922,7 @@ export default function App() {
   );
   const [candleFetchErrors, setCandleFetchErrors] = useState<Record<string, string>>({});
   const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
+  const [quoteFetchFailures, setQuoteFetchFailures] = useState<Record<string, string>>({});
   const [quoteFetchInFlight, setQuoteFetchInFlight] = useState(false);
   const [quoteFetchTarget, setQuoteFetchTarget] = useState<WatchlistQuoteFetchTarget | null>(null);
 
@@ -1833,9 +1965,18 @@ export default function App() {
     if (appView !== 'macro-flow') return;
     forceCandleRefreshRef.current = true;
     setValueChainChartState((current) => (
-      current.timeframe === '1d'
+      current.displayRange === DEFAULT_DISPLAY_RANGE
+      && current.timeframe === DAY_RANGE_OVERVIEW_TIMEFRAME
+      && current.scrollOffsetPct === 100
+      && current.zoomFactor === DAY_RANGE_ZOOM_FACTOR
         ? current
-        : { ...current, timeframe: '1d', zoomFactor: Math.max(current.zoomFactor, 8) }
+        : {
+            ...current,
+            displayRange: DEFAULT_DISPLAY_RANGE,
+            timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+            zoomFactor: DAY_RANGE_ZOOM_FACTOR,
+            scrollOffsetPct: 100,
+          }
     ));
     setTickTrigger((current) => current + 1);
   }, [appView]);
@@ -2212,17 +2353,18 @@ export default function App() {
   }, [watchlistNameEditModal]);
 
   useEffect(() => {
-    if (!gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen && !watchlistTargetMenu) return;
+    if (!displayRangeMenu && !gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen && !watchlistTargetMenu) return;
     const handleOutsideClick = () => {
       setGridPickerOpen(false);
       setTabsDropdownOpen(false);
       setTabsDropdownAnchor(null);
       setWatchlistImportMenuOpen(false);
       setWatchlistTargetMenu(null);
+      setDisplayRangeMenu(null);
     };
     window.addEventListener('click', handleOutsideClick);
     return () => window.removeEventListener('click', handleOutsideClick);
-  }, [gridPickerOpen, tabsDropdownOpen, watchlistImportMenuOpen, watchlistTargetMenu]);
+  }, [displayRangeMenu, gridPickerOpen, tabsDropdownOpen, watchlistImportMenuOpen, watchlistTargetMenu]);
 
   useEffect(() => {
     const tabsViewport = watchlistTabsViewportRef.current;
@@ -2242,6 +2384,7 @@ export default function App() {
       setQuoteCache({});
       setMoomooStatus('connecting');
       setMoomooError(null);
+      initialVisibleChartRefreshRef.current = true;
     }
     setMoomooRealTimeActive((active) => !active);
   };
@@ -2265,13 +2408,23 @@ export default function App() {
   };
 
   const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
-    if (!tabId || !watchlistTabs.some((tab) => tab.id === tabId)) return;
+    const refreshTab = tabId ? watchlistTabs.find((tab) => tab.id === tabId) : null;
+    if (!refreshTab) return;
+    const retrySymbols = getWatchlistTabQuoteOperands(refreshTab);
     quoteFetchManualTabQueueRef.current = [
-      tabId,
-      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => queuedTabId !== tabId),
+      refreshTab.id,
+      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => queuedTabId !== refreshTab.id),
     ];
     quoteFetchAutoSweepRequestedRef.current = true;
     quoteFetchAutoAttemptedTabIdsRef.current.clear();
+    forceCandleRefreshRef.current = true;
+    setQuoteFetchFailures((current) => {
+      const next = { ...current };
+      retrySymbols.forEach((symbol) => {
+        delete next[symbol];
+      });
+      return next;
+    });
     setMoomooStatus('connecting');
     setMoomooError(null);
     if (quoteFetchInFlightRef.current) {
@@ -2327,9 +2480,9 @@ export default function App() {
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
-      const forceRefresh = forceCandleRefreshRef.current;
-      const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[] }>();
-      const addCandleRequest = (rawSymbol: string, timeframe: Timeframe) => {
+      const forceRefresh = forceCandleRefreshRef.current || initialVisibleChartRefreshRef.current;
+      const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }>();
+      const addCandleRequest = (rawSymbol: string, timeframe: Timeframe, requestPriority: number) => {
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
           const key = `${symbol}-${timeframe}`;
           const existing = requests.get(key);
@@ -2342,28 +2495,53 @@ export default function App() {
             symbol,
             timeframe,
             lookupQueries,
+            priority: Math.min(existing?.priority ?? requestPriority, requestPriority),
           });
         });
       };
 
-      panels.forEach((panel) => {
-        addCandleRequest(panel.symbol, panel.timeframe);
-        panel.comparisonSymbols?.forEach((symbol) => {
-          addCandleRequest(symbol, panel.timeframe);
+      const panelPriorityOffset = appView === 'charts' ? 0 : 5_000;
+      const valueChainPriorityOffset = appView === 'charts' ? 10_000 : 0;
+
+      panels.forEach((panel, panelIndex) => {
+        const chartSymbols = [panel.symbol, ...(panel.comparisonSymbols || [])];
+        const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
+        chartSymbols.forEach((symbol) => {
+          addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, panelPriorityBase);
+        });
+        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
+        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+          chartSymbols.forEach((symbol) => {
+            addCandleRequest(symbol, displayRangeTimeframe, panelPriorityBase + 1);
+          });
+        }
+        chartSymbols.forEach((symbol) => {
+          addCandleRequest(symbol, panel.timeframe, panelPriorityBase + 2);
         });
       });
-      valueChainChartSymbols.forEach((chartSymbol) => {
-        addCandleRequest(chartSymbol, valueChainChartState.timeframe);
+      valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
+        const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
+        addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
+        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(valueChainChartState.displayRange);
+        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+          addCandleRequest(chartSymbol, displayRangeTimeframe, symbolPriorityBase + 1);
+        }
+        addCandleRequest(chartSymbol, valueChainChartState.timeframe, symbolPriorityBase + 2);
       });
 
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
         const cachedCandles = candlesCache[key];
         const lastFetchedAt = candleFetchTimestampsRef.current[key] ?? 0;
-        return forceRefresh || !cachedCandles?.length || now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
-      });
+        if (forceRefresh) return true;
+        if (!cachedCandles?.length) {
+          return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
+        }
+        return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
+      }).sort((first, second) => first[1].priority - second[1].priority);
 
       if (requestsToFetch.length === 0) {
         forceCandleRefreshRef.current = false;
+        initialVisibleChartRefreshRef.current = false;
         setMoomooStatus('connected');
         setMoomooError(null);
         return;
@@ -2374,21 +2552,43 @@ export default function App() {
       const successfulKeys = new Set<string>();
       const failedErrors: Record<string, string> = {};
       let firstError: string | null = null;
+      let klineRequestCount = 0;
+      const waitForKlineSlot = async () => {
+        if (klineRequestCount > 0 && klineRequestCount % KLINE_FETCH_BATCH_LIMIT === 0) {
+          setMoomooStatus('connecting');
+          setMoomooError(`KLine制限待機中: ${Math.ceil(KLINE_FETCH_BATCH_COOLDOWN_MS / 1000)}秒後に次の${KLINE_FETCH_BATCH_LIMIT}件を取得します。`);
+          await sleep(KLINE_FETCH_BATCH_COOLDOWN_MS);
+        }
+        klineRequestCount += 1;
+      };
       const fetchCandlesForSymbol = async (symbol: string, timeframe: Timeframe) => {
-        const { data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbol,
-            timeframe,
-            reqNum: 150
-          })
-        }, 25_000);
-        const candles = Array.isArray(data.candles) ? data.candles as Candle[] : [];
-        return {
-          candles: data.success && candles.length > 0 ? candles : [],
-          error: data.error ? String(data.error) : null,
+        const requestCandles = async () => {
+          await waitForKlineSlot();
+          const { response, data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              symbol,
+              timeframe,
+              reqNum: 150
+            })
+          }, 25_000);
+          const candles = Array.isArray(data.candles) ? data.candles as Candle[] : [];
+          const errorMessage = data.error ? String(data.error) : response.ok ? null : `HTTP ${response.status}`;
+          return {
+            candles: response.ok && data.success && candles.length > 0 ? candles : [],
+            error: errorMessage,
+            retryable: response.status === 429 || isMoomooRateLimitMessage(errorMessage),
+          };
         };
+
+        const firstResult = await requestCandles();
+        if (firstResult.candles.length > 0 || !firstResult.retryable) return firstResult;
+
+        setMoomooStatus('connecting');
+        setMoomooError(`KLine制限待機中: ${Math.ceil(KLINE_RATE_LIMIT_RETRY_MS / 1000)}秒後に再試行します。`);
+        await sleep(KLINE_RATE_LIMIT_RETRY_MS);
+        return requestCandles();
       };
 
       const findFallbackSymbol = async (request: { symbol: string; lookupQueries: string[] }) => {
@@ -2411,13 +2611,14 @@ export default function App() {
       };
 
       try {
-        await Promise.all(requestsToFetch.map(async ([key, request]) => {
+        for (const [key, request] of requestsToFetch) {
+          if (!moomooRealTimeActiveRef.current) break;
           try {
             const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
             if (directResult.candles.length > 0) {
               updatedCache[key] = directResult.candles;
               successfulKeys.add(key);
-              return;
+              continue;
             }
 
             const fallbackSymbol = await findFallbackSymbol(request);
@@ -2429,7 +2630,7 @@ export default function App() {
                 updatedCache[fallbackKey] = fallbackResult.candles;
                 successfulKeys.add(key);
                 successfulKeys.add(fallbackKey);
-                return;
+                continue;
               }
             }
 
@@ -2441,14 +2642,18 @@ export default function App() {
             failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
             firstError ||= failedErrors[key];
           }
-        }));
+        }
 
         if (!moomooRealTimeActiveRef.current) return;
 
+        const attemptedAt = Date.now();
+        Object.keys(failedErrors).forEach((key) => {
+          candleFetchTimestampsRef.current[key] = attemptedAt;
+        });
+
         if (Object.keys(updatedCache).length > 0) {
-          const fetchedAt = Date.now();
           Object.keys(updatedCache).forEach((key) => {
-            candleFetchTimestampsRef.current[key] = fetchedAt;
+            candleFetchTimestampsRef.current[key] = attemptedAt;
           });
           setCandlesCache((currentCache) => compactCandlesCache({
             ...currentCache,
@@ -2473,6 +2678,7 @@ export default function App() {
         const shouldRefetch = candleFetchPendingRef.current;
         candleFetchPendingRef.current = false;
         forceCandleRefreshRef.current = false;
+        initialVisibleChartRefreshRef.current = false;
         if (shouldRefetch) {
           setTickTrigger((current) => current + 1);
         }
@@ -2480,7 +2686,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [panels, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [appView, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) {
@@ -2490,6 +2696,7 @@ export default function App() {
       quoteFetchPendingRef.current = false;
       setQuoteFetchInFlight(false);
       setQuoteFetchTarget(null);
+      setQuoteFetchFailures({});
       return;
     }
 
@@ -2553,6 +2760,96 @@ export default function App() {
       });
       quoteFetchAutoAttemptedTabIdsRef.current.add(quoteFetchTargetRequest.tab.id);
       try {
+        if (quoteSymbols.length >= 0) {
+          const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
+          const failedQuotes: Record<string, string> = {};
+          const successfulQuoteSymbols = new Set<string>();
+          let firstBatchError: string | null = null;
+
+          const requestQuoteBatch = async (
+            symbols: string[],
+            retryAllowed = true,
+          ): Promise<Record<string, MoomooBatchQuoteResult>> => {
+            const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ symbols }),
+            }, 35_000);
+            const errorMessage = data.error ? String(data.error) : response.ok ? '' : `HTTP ${response.status}`;
+            if (!response.ok || !data.success || !data.quotes) {
+              if (retryAllowed && (response.status === 429 || isMoomooRateLimitMessage(errorMessage))) {
+                setMoomooStatus('connecting');
+                setMoomooError(`1D制限待機中: ${Math.ceil(WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS / 1000)}秒後に再試行します。`);
+                await sleep(WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS);
+                return requestQuoteBatch(symbols, false);
+              }
+              throw new Error(errorMessage || 'Moomoo価格一覧を取得できませんでした。');
+            }
+            return data.quotes as Record<string, MoomooBatchQuoteResult>;
+          };
+
+          for (const quoteBatch of chunkArray(quoteSymbols, WATCHLIST_QUOTE_BATCH_LIMIT)) {
+            try {
+              const batchQuotes = await requestQuoteBatch(quoteBatch);
+              const returnedSymbols = new Set<string>();
+              Object.entries(batchQuotes).forEach(([quoteKey, quote]) => {
+                const storedSymbol = normalizeTickerSymbolForStorage(String(quote.symbol || quoteKey || ''));
+                if (!storedSymbol) return;
+                returnedSymbols.add(storedSymbol);
+                const price = Number(quote.price);
+                if (quote.success && Number.isFinite(price) && price > 0) {
+                  updatedQuotes[storedSymbol] = {
+                    name: quote.name || storedSymbol,
+                    price,
+                    changePct: Number(quote.changePct || 0),
+                    marketCap: Number.isFinite(Number(quote.marketCap)) && Number(quote.marketCap) > 0
+                      ? Number(quote.marketCap)
+                      : undefined,
+                  };
+                  successfulQuoteSymbols.add(storedSymbol);
+                  return;
+                }
+                updatedQuotes[storedSymbol] = null;
+                failedQuotes[storedSymbol] = quote.error || 'Moomoo価格を取得できませんでした。';
+              });
+              quoteBatch.forEach((symbol) => {
+                if (returnedSymbols.has(symbol)) return;
+                updatedQuotes[symbol] = null;
+                failedQuotes[symbol] = 'Moomoo価格の応答に含まれませんでした。';
+              });
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              firstBatchError ||= errorMessage;
+              quoteBatch.forEach((symbol) => {
+                updatedQuotes[symbol] = null;
+                failedQuotes[symbol] = errorMessage;
+              });
+            }
+          }
+
+          if (!moomooRealTimeActiveRef.current) return;
+          setQuoteCache((currentQuotes) => ({
+            ...currentQuotes,
+            ...updatedQuotes,
+          }));
+          setQuoteFetchFailures((currentFailures) => {
+            const next = { ...currentFailures, ...failedQuotes };
+            successfulQuoteSymbols.forEach((symbol) => {
+              delete next[symbol];
+            });
+            return next;
+          });
+          if (Object.keys(failedQuotes).length > 0) {
+            const failedCount = Object.keys(failedQuotes).length;
+            const successCount = successfulQuoteSymbols.size;
+            setMoomooStatus(successCount > 0 ? 'connected' : 'error');
+            setMoomooError(firstBatchError || `${failedCount}件の1D価格を取得できませんでした。`);
+          } else {
+            setMoomooStatus('connected');
+            setMoomooError(null);
+          }
+          return;
+        }
         const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4177,8 +4474,9 @@ export default function App() {
       id: newId,
       symbol: fallbackSymbol,
       watchlistTabId: activeTab?.id,
-      timeframe: '5m',
-      zoomFactor: 12,
+      timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+      displayRange: DEFAULT_DISPLAY_RANGE,
+      zoomFactor: DAY_RANGE_ZOOM_FACTOR,
       scrollOffsetPct: 100,
       showRsi: !fallbackIsExpression,
       showMacd: false,
@@ -4210,6 +4508,50 @@ export default function App() {
     setPanels(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
   };
 
+  const handleUpdatePanelTimeframe = (id: string, timeframe: Timeframe) => {
+    setPanels((currentPanels) =>
+      currentPanels.map((panel) => {
+        if (panel.id !== id || panel.displayRange) return panel;
+        const updates: Partial<ChartPanel> = {
+          timeframe,
+          scrollOffsetPct: 100,
+        };
+        if (timeframe === '1d' || timeframe === '1w' || timeframe === '1mo') {
+          updates.displayRange = null;
+        }
+        return { ...panel, ...updates };
+      })
+    );
+  };
+
+  const handleApplyPanelDisplayRange = (id: string, displayRange: Exclude<ChartDisplayRange, null>) => {
+    forceCandleRefreshRef.current = true;
+    setPanels((currentPanels) =>
+      currentPanels.map((panel) => {
+        if (panel.id !== id) return panel;
+        return {
+          ...panel,
+          displayRange,
+          timeframe: displayRange === 'd' ? DAY_RANGE_OVERVIEW_TIMEFRAME : WEEK_RANGE_OVERVIEW_TIMEFRAME,
+          zoomFactor: getDisplayRangeZoomFactor(displayRange),
+          scrollOffsetPct: 100,
+        };
+      })
+    );
+    setDisplayRangeMenu(null);
+  };
+
+  const handleClearPanelDisplayRange = (id: string) => {
+    setPanels((currentPanels) =>
+      currentPanels.map((panel) =>
+        panel.id === id
+          ? { ...panel, displayRange: null, scrollOffsetPct: 100 }
+          : panel
+      )
+    );
+    setDisplayRangeMenu(null);
+  };
+
   const handleSelectWatchlistTargetForPanel = (panelId: string, targetValue: string) => {
     const target = decodeWatchlistTargetValue(targetValue);
     if (!target) return;
@@ -4218,6 +4560,7 @@ export default function App() {
     const symbols = target.sectionId
       ? getWatchlistSectionSymbols(tab, target.sectionId)
       : getWatchlistTabSymbols(tab);
+    forceCandleRefreshRef.current = true;
     setPanels((currentPanels) =>
       currentPanels.map((panel) =>
         panel.id === panelId
@@ -4375,6 +4718,130 @@ export default function App() {
     return names;
   };
 
+  const getQuoteSnapshotForChartSymbol = (rawSymbol: string): { price: number; changePct: number | null } | null => {
+    const expression = normalizeSymbolExpressionForStorage(rawSymbol);
+    if (expression) {
+      const leftQuote = quoteCache[expression.left];
+      const rightQuote = quoteCache[expression.right];
+      return leftQuote && rightQuote
+        ? calculateExpressionQuote(expression, leftQuote, rightQuote)
+        : null;
+    }
+
+    const symbol = normalizeStoredSymbolValue(rawSymbol);
+    const quote = quoteCache[symbol];
+    const quotePrice = Number(quote?.price);
+    const quoteChangePct = Number(quote?.changePct);
+    if (Number.isFinite(quotePrice) && quotePrice > 0) {
+      return {
+        price: quotePrice,
+        changePct: Number.isFinite(quoteChangePct) ? quoteChangePct : null,
+      };
+    }
+
+    const ticker = tickerStatsBySymbol.get(symbol);
+    const tickerPrice = Number(ticker?.currentPrice);
+    const tickerChangePct = Number(ticker?.computedChange);
+    if (Number.isFinite(tickerPrice) && tickerPrice > 0) {
+      return {
+        price: tickerPrice,
+        changePct: Number.isFinite(tickerChangePct) ? tickerChangePct : null,
+      };
+    }
+
+    return null;
+  };
+
+  const createChartChangePctOverrides = (
+    symbols: string[],
+    displayRange?: ChartDisplayRange,
+  ): Record<string, number> => {
+    if (displayRange !== 'd') return {};
+
+    const overrides: Record<string, number> = {};
+    symbols.forEach((rawSymbol) => {
+      const snapshot = getQuoteSnapshotForChartSymbol(rawSymbol);
+      const changePct = Number(snapshot?.changePct);
+      if (!Number.isFinite(changePct)) return;
+
+      const normalizedSymbol = normalizeStoredSymbolValue(rawSymbol);
+      if (rawSymbol) overrides[rawSymbol] = changePct;
+      if (normalizedSymbol) overrides[normalizedSymbol] = changePct;
+    });
+    return overrides;
+  };
+
+  const createQuoteFallbackCandlesForSymbol = (rawSymbol: string): Candle[] => {
+    const snapshot = getQuoteSnapshotForChartSymbol(rawSymbol);
+    if (!snapshot || !Number.isFinite(snapshot.price) || snapshot.price <= 0) return [];
+
+    const changePct = Number(snapshot.changePct);
+    const previousClose = Number.isFinite(changePct) && Math.abs(1 + changePct / 100) > 0.000001
+      ? snapshot.price / (1 + changePct / 100)
+      : snapshot.price;
+    const high = Math.max(snapshot.price, previousClose);
+    const low = Math.min(snapshot.price, previousClose);
+    const now = new Date();
+    const dateString = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, '0'),
+      String(now.getDate()).padStart(2, '0'),
+    ].join('-');
+    const session = isJapanMarketSymbol(rawSymbol)
+      ? { start: '09:00', end: '15:30' }
+      : { start: '09:30', end: '16:00' };
+    const toTimestamp = (clock: string) => Math.floor(new Date(`${dateString}T${clock}:00`).getTime() / 1000);
+
+    return [
+      {
+        time: toTimestamp(session.start),
+        timeStr: `${dateString} ${session.start}`,
+        open: previousClose,
+        high,
+        low,
+        close: previousClose,
+        volume: 0,
+      },
+      {
+        time: toTimestamp(session.end),
+        timeStr: `${dateString} ${session.end}`,
+        open: previousClose,
+        high,
+        low,
+        close: snapshot.price,
+        volume: 0,
+      },
+    ];
+  };
+
+  const resolveChartCandlesForSymbol = (
+    rawSymbol: string,
+    timeframe: Timeframe,
+    displayRange: ChartDisplayRange | undefined,
+    useDemoFallback = false,
+  ): Candle[] => {
+    const seedTimeframes = Array.from(new Set([
+      getDisplayRangeSeedTimeframe(displayRange),
+      DAY_RANGE_OVERVIEW_TIMEFRAME,
+    ].filter((seedTimeframe): seedTimeframe is Timeframe => Boolean(seedTimeframe))));
+
+    let chartCandles = resolveCandlesForSymbol(rawSymbol, timeframe, candlesCache);
+    for (const seedTimeframe of seedTimeframes) {
+      if (chartCandles.length > 0 || seedTimeframe === timeframe) continue;
+      chartCandles = resolveCandlesForSymbol(rawSymbol, seedTimeframe, candlesCache);
+    }
+
+    if (chartCandles.length === 0) {
+      chartCandles = createQuoteFallbackCandlesForSymbol(rawSymbol);
+    }
+
+    if (chartCandles.length === 0 && useDemoFallback) {
+      chartCandles = generateCandles(rawSymbol, timeframe, 220);
+    }
+
+    return filterCandlesForDisplayRange(chartCandles, displayRange, rawSymbol);
+  };
+
   const headerTickerStats = useMemo(() => (
     headerTickerSymbols
       .map((symbol) => tickerStatsBySymbol.get(symbol))
@@ -4459,37 +4926,43 @@ export default function App() {
         && currentPrice > 0
         && Number.isFinite(computedChange);
     };
+    const isQuoteFailed = (symbol: string) => Boolean(quoteFetchFailures[symbol]);
     const tabName = progressWatchlistTab?.name ?? 'ウォッチリスト';
     const sectionProgresses = (progressWatchlistTab?.sections ?? []).map((section) => {
       const symbols = getQuoteOperandSymbolsForWatchlistSymbols(section.symbols);
       const total = symbols.length;
       const fetched = symbols.filter(isQuoteResolved).length;
+      const failed = symbols.filter((symbol) => !isQuoteResolved(symbol) && isQuoteFailed(symbol)).length;
       return {
         id: section.id,
         name: section.name,
         symbols,
         total,
         fetched,
-        remaining: Math.max(0, total - fetched),
+        failed,
+        remaining: Math.max(0, total - fetched - failed),
       };
     });
-    const tabSymbols = Array.from(new Set(sectionProgresses.flatMap((section) => section.symbols)));
+    const tabSymbols = Array.from(new Set<string>(sectionProgresses.flatMap((section) => section.symbols)));
     const total = tabSymbols.length;
     const fetched = tabSymbols.filter(isQuoteResolved).length;
-    const remaining = Math.max(0, total - fetched);
+    const failed = tabSymbols.filter((symbol) => !isQuoteResolved(symbol) && isQuoteFailed(symbol)).length;
+    const remaining = Math.max(0, total - fetched - failed);
     const currentSection = sectionProgresses.find((section) => section.remaining > 0)
+      ?? sectionProgresses.find((section) => section.failed > 0)
       ?? sectionProgresses[0]
       ?? null;
     const scopeTotal = currentSection?.total ?? total;
     const scopeFetched = currentSection?.fetched ?? fetched;
+    const scopeFailed = currentSection?.failed ?? failed;
     const scopeRemaining = currentSection?.remaining ?? remaining;
     const status = total === 0
       ? 'idle'
       : quoteFetchInFlight
         ? 'loading'
         : remaining === 0
-          ? 'done'
-          : 'stale';
+          ? failed > 0 ? 'error' : 'done'
+          : failed > 0 ? 'partial' : 'stale';
     const scopePhase = scopeTotal === 0
       ? '1D対象'
       : quoteFetchInFlight
@@ -4505,21 +4978,39 @@ export default function App() {
           ? '1D完了'
           : '1D未取得';
     const scopeLabel = currentSection ? `${tabName} / ${currentSection.name}` : tabName;
+    const displayScopePhase = scopeTotal === 0
+      ? '1D対象'
+      : quoteFetchInFlight
+        ? '1D取得中'
+        : scopeRemaining === 0
+          ? scopeFailed > 0 ? '1D失敗' : '1D完了'
+          : scopeFailed > 0 ? '1D一部失敗' : '1D未取得';
+    const displayTabPhase = total === 0
+      ? '1D対象'
+      : quoteFetchInFlight
+        ? '1D取得中'
+        : remaining === 0
+          ? failed > 0 ? '1D失敗' : '1D完了'
+          : failed > 0 ? '1D一部失敗' : '1D未取得';
+    const scopeFailedText = scopeFailed > 0 ? ` 失敗${scopeFailed}` : '';
+    const failedText = failed > 0 ? ` 失敗${failed}` : '';
     return {
       total,
       fetched,
+      failed,
       remaining,
       scopeLabel,
       scopeTotal,
       scopeFetched,
+      scopeFailed,
       scopeRemaining,
       status,
-      text: `${scopePhase} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}`,
-      title: `${tabName} タブ合計 ${tabPhase} ${fetched}/${total} 残${remaining}${
-        currentSection ? ` / 現在 ${currentSection.name} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}` : ''
+      text: `${displayScopePhase} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}${scopeFailedText}`,
+      title: `${tabName} タブ合計 ${displayTabPhase} ${fetched}/${total} 残${remaining}${failedText}${
+        currentSection ? ` / 現在 ${currentSection.name} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}${scopeFailedText}` : ''
       }`,
     };
-  }, [activeWatchlistTab, quoteCache, quoteFetchInFlight, quoteFetchTarget, tickerStatsBySymbol, watchlistTabs]);
+  }, [activeWatchlistTab, quoteCache, quoteFetchFailures, quoteFetchInFlight, quoteFetchTarget, tickerStatsBySymbol, watchlistTabs]);
   const activeWatchlistTabIndex = watchlistTabs.findIndex((tab) => tab.id === activeWatchlistTabId);
   const canJumpToFirstWatchlistTab = watchlistTabs.length > 1 && activeWatchlistTabIndex > 0;
   const canJumpToLastWatchlistTab =
@@ -4683,7 +5174,12 @@ export default function App() {
     focusDateActive?: boolean;
   }) => {
     const panelExpression = normalizeSymbolExpressionForStorage(symbol);
-    const resolvedChartCandles = resolveCandlesForSymbol(symbol, valueChainChartState.timeframe, candlesCache);
+    const resolvedChartCandles = resolveChartCandlesForSymbol(
+      symbol,
+      valueChainChartState.timeframe,
+      valueChainChartState.displayRange,
+      !moomooRealTimeActive,
+    );
     const chartFetchError = getCandleFetchError(symbol, valueChainChartState.timeframe);
     const chartCandles = moomooRealTimeActive
       ? resolvedChartCandles
@@ -4717,12 +5213,17 @@ export default function App() {
         comparisonLabelFontSize={comparisonLabelFontSize}
         onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
         symbolDisplayNames={createChartSymbolDisplayNames([symbol, ...comparableSymbols])}
+        changePctOverrides={createChartChangePctOverrides(
+          [symbol, ...comparableSymbols],
+          valueChainChartState.displayRange,
+        )}
         comparisonCandles={
           comparableSymbols.reduce((acc, comparisonSymbol) => {
-            const candles = resolveCandlesForSymbol(
+            const candles = resolveChartCandlesForSymbol(
               comparisonSymbol,
               valueChainChartState.timeframe,
-              candlesCache,
+              valueChainChartState.displayRange,
+              !moomooRealTimeActive,
             );
             if (moomooRealTimeActive) {
               if (candles.length > 0) acc[comparisonSymbol] = candles;
@@ -4753,6 +5254,15 @@ export default function App() {
         }
         onOpenIndicatorSettings={onOpenIndicatorSettings}
         onRemoveComparisonSymbol={onRemoveComparisonSymbol}
+        onToggleVolume={!panelExpression
+          ? () => setValueChainChartState((current) => ({ ...current, showVolume: !current.showVolume }))
+          : undefined}
+        onToggleRsi={!panelExpression
+          ? () => setValueChainChartState((current) => ({ ...current, showRsi: !current.showRsi }))
+          : undefined}
+        onToggleMacd={!panelExpression
+          ? () => setValueChainChartState((current) => ({ ...current, showMacd: !current.showMacd }))
+          : undefined}
         focusDate={focusDate}
         focusDateActive={focusDateActive}
         allowNegativeValues={Boolean(panelExpression)}
@@ -5021,7 +5531,12 @@ export default function App() {
                 >
                   {col.map((panel, pIdx) => {
                     const panelExpression = normalizeSymbolExpressionForStorage(panel.symbol);
-                    const pCandles = resolveCandlesForSymbol(panel.symbol, panel.timeframe, candlesCache);
+                    const pCandles = resolveChartCandlesForSymbol(
+                      panel.symbol,
+                      panel.timeframe,
+                      panel.displayRange,
+                      !moomooRealTimeActive,
+                    );
                     const pCandleError = getCandleFetchError(panel.symbol, panel.timeframe);
                     const pSettings = panelExpression
                       ? createDefaultIndicatorSettings(panel.symbol)
@@ -5146,7 +5661,7 @@ export default function App() {
                                             }
                                       ));
                                     }}
-                                    className="h-7 max-w-[230px] min-w-[150px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer flex items-center justify-between gap-2"
+                                    className="h-7 w-[150px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer flex items-center justify-between gap-2"
                                     title="比較表示するSectorまたはBasketを選択"
                                   >
                                     <span className="min-w-0 truncate">{getWatchlistTargetLabelForPanel(panel)}</span>
@@ -5274,15 +5789,97 @@ export default function App() {
  
                                 {/* TIMEFRAME INTERVAL PICKER */}
                                 <div className="flex items-center p-0.5 space-x-0.5">
-                                  {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
+                                  <div className="relative flex items-center shrink-0">
                                     <button
-                                      key={tf}
-                                      onClick={() => handleUpdatePanel(panel.id, { timeframe: tf })}
-                                      className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors ${
-                                        panel.timeframe === tf 
+                                      type="button"
+                                      onClick={() => handleApplyPanelDisplayRange(panel.id, panel.displayRange === 'w' ? 'w' : 'd')}
+                                      className={`h-5 min-w-6 px-1.5 text-[10px] rounded-l font-bold transition-colors ${
+                                        panel.displayRange === 'd'
+                                          ? 'bg-emerald-500 text-black'
+                                          : panel.displayRange === 'w'
+                                            ? 'bg-[#202020] text-emerald-300'
+                                            : 'text-gray-300 hover:text-white hover:bg-[#111111]'
+                                      }`}
+                                      title="今日の取引時間を表示"
+                                    >
+                                      {panel.displayRange === 'w' ? 'W' : 'D'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        const rect = event.currentTarget.getBoundingClientRect();
+                                        setDisplayRangeMenu((current) => (
+                                          current?.panelId === panel.id
+                                            ? null
+                                            : {
+                                                panelId: panel.id,
+                                                x: Math.min(rect.left, Math.max(8, window.innerWidth - 116)),
+                                                y: rect.bottom + 4,
+                                              }
+                                        ));
+                                      }}
+                                      className={`h-5 w-5 rounded-r border-l border-black/30 flex items-center justify-center transition-colors ${
+                                        panel.displayRange
                                           ? 'bg-emerald-500 text-black'
                                           : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                                       }`}
+                                      title="D/W表示を選択"
+                                    >
+                                      <ChevronDown className="w-3 h-3" />
+                                    </button>
+                                    {displayRangeMenu?.panelId === panel.id && (
+                                      <div
+                                        className="fixed z-[125] w-28 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+                                        style={{ left: displayRangeMenu.x, top: displayRangeMenu.y }}
+                                        onClick={(event) => event.stopPropagation()}
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => handleApplyPanelDisplayRange(panel.id, 'd')}
+                                          className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] ${
+                                            panel.displayRange === 'd' ? 'text-emerald-300' : ''
+                                          }`}
+                                        >
+                                          <span className="font-bold">D</span>
+                                          <span className="text-[9px] text-gray-500">今日</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleApplyPanelDisplayRange(panel.id, 'w')}
+                                          className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] ${
+                                            panel.displayRange === 'w' ? 'text-emerald-300' : ''
+                                          }`}
+                                        >
+                                          <span className="font-bold">W</span>
+                                          <span className="text-[9px] text-gray-500">今週</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleClearPanelDisplayRange(panel.id)}
+                                          className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] ${
+                                            !panel.displayRange ? 'text-emerald-300' : ''
+                                          }`}
+                                        >
+                                          <span className="font-bold">通常</span>
+                                          <span className="text-[9px] text-gray-500">時間足</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
+                                    <button
+                                      key={tf}
+                                      disabled={Boolean(panel.displayRange)}
+                                      onClick={() => handleUpdatePanelTimeframe(panel.id, tf)}
+                                      className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors ${
+                                        panel.displayRange
+                                          ? 'text-gray-600 cursor-not-allowed opacity-45'
+                                          : panel.timeframe === tf
+                                          ? 'bg-emerald-500 text-black'
+                                          : 'text-gray-400 hover:text-white hover:bg-[#111111]'
+                                      }`}
+                                      title={panel.displayRange ? 'D/W表示中は時間足を固定しています' : undefined}
                                     >
                                       {tf === '1mo' ? '1M' : tf === '1d' ? 'day' : tf === '1w' ? 'Week' : tf}
                                     </button>
@@ -5315,7 +5912,7 @@ export default function App() {
                               <div className="flex items-center space-x-2 shrink-0">
                                 
                                 {/* Quick setting indicators toggles */}
-                                {!isTvEmbed && (
+                                {false && !isTvEmbed && (
                                   <div className="hidden sm:flex items-center space-x-1.5 bg-[#171717]/70 px-2 py-0.5 rounded text-[10px]">
                                     <button
                                       onClick={() => {
@@ -5409,12 +6006,17 @@ export default function App() {
                                   comparisonLabelFontSize={comparisonLabelFontSize}
                                   onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
                                   symbolDisplayNames={createChartSymbolDisplayNames([panel.symbol, ...(panel.comparisonSymbols || [])])}
+                                  changePctOverrides={createChartChangePctOverrides(
+                                    [panel.symbol, ...(panel.comparisonSymbols || [])],
+                                    panel.displayRange,
+                                  )}
                                   comparisonCandles={
                                     (panel.comparisonSymbols || []).reduce((acc, compSym) => {
-                                      const candles = resolveCandlesForSymbol(
+                                      const candles = resolveChartCandlesForSymbol(
                                         compSym,
                                         panel.timeframe,
-                                        candlesCache,
+                                        panel.displayRange,
+                                        !moomooRealTimeActive,
                                       );
                                       if (candles.length > 0) {
                                         acc[compSym] = candles;
@@ -5437,6 +6039,9 @@ export default function App() {
                                       comparisonSymbols: (panel.comparisonSymbols || []).filter((item) => item !== symbol),
                                     });
                                   }}
+                                  onToggleVolume={!panelExpression ? () => handleUpdatePanel(panel.id, { showVolume: !panel.showVolume }) : undefined}
+                                  onToggleRsi={!panelExpression ? () => handleUpdatePanel(panel.id, { showRsi: !panel.showRsi }) : undefined}
+                                  onToggleMacd={!panelExpression ? () => handleUpdatePanel(panel.id, { showMacd: !panel.showMacd }) : undefined}
                                   allowNegativeValues={Boolean(panelExpression)}
                                   valuePrecision={panelExpression ? 4 : 2}
                                 />
@@ -5509,6 +6114,10 @@ export default function App() {
                         ? 'text-cyan-300'
                         : activeWatchlistQuoteProgress.status === 'stale'
                           ? 'text-amber-300'
+                          : activeWatchlistQuoteProgress.status === 'partial'
+                            ? 'text-orange-300'
+                            : activeWatchlistQuoteProgress.status === 'error'
+                              ? 'text-red-300'
                           : 'text-gray-600'
                   }`}
                   title={activeWatchlistQuoteProgress.title}

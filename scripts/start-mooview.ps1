@@ -179,7 +179,7 @@ function Restart-StaleMooViewServer {
         }
     }
 
-    Write-Step "応答しない古いMooViewサーバーを終了し、自動復旧します。"
+    Write-Step "既存のMooViewサーバーを終了し、最新コードで起動し直します。"
     $listenerProcessIds.Keys | ForEach-Object {
         Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
     }
@@ -342,13 +342,13 @@ try {
     }
     Write-Host "Node.js依存関係: 正常" -ForegroundColor Green
 
+    if (Test-TcpPort -HostName "127.0.0.1" -Port 3000) {
+        Restart-StaleMooViewServer | Out-Null
+    }
+
     $webReady = Test-MooViewWeb
     $status = if ($webReady) { Get-MooViewStatus } else { $null }
     if (-not $webReady) {
-        if (Test-TcpPort -HostName "127.0.0.1" -Port 3000) {
-            Restart-StaleMooViewServer | Out-Null
-        }
-
         Write-Step "MooViewサーバーを起動しています。"
         New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"

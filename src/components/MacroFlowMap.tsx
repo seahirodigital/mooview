@@ -250,6 +250,7 @@ interface MacroImportDecisionState {
 }
 
 interface StockEditModalState {
+  mode: 'add' | 'edit';
   groupId: string;
   originalSymbol: string;
   symbol: string;
@@ -264,6 +265,13 @@ interface StockContextMenuState {
   y: number;
   groupId: string;
   symbol: string;
+  label: string;
+}
+
+interface BasketContextMenuState {
+  x: number;
+  y: number;
+  groupId: string;
   label: string;
 }
 
@@ -376,11 +384,13 @@ interface MacroFlowMapProps {
     symbol: string;
     comparisonSymbols?: string[];
     onOpenIndicatorSettings?: () => void;
+    onRemoveComparisonSymbol?: (symbol: string) => void;
     focusDate?: string;
     focusDateActive?: boolean;
   }) => React.ReactNode;
   renderIndicatorSettings: (symbol: string) => React.ReactNode;
   onChartSymbolsChange: (symbols: string[]) => void;
+  onSyncBasketsToWatchlist?: (chain: unknown) => void;
 }
 
 const FLOW_START_DATE = '2026-06-10';
@@ -568,6 +578,10 @@ const FALLBACK_BASKETS: MacroBasket[] = [
     ],
   },
 ];
+
+export function getMacroFlowDefaultWatchlistChain(): unknown {
+  return createChainFromBaskets('Macro Flow', FALLBACK_BASKETS);
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -1816,11 +1830,32 @@ function readSyncedMacroScopeOptions(): MacroScopeOption[] {
       chain: null,
     },
   ];
+  const seenIds = new Set<string>();
   const seenLabels = new Set<string>(['マクロ全体']);
   readValueChainHistory().forEach((entry, index) => {
-    const label = entry.chain?.name?.trim();
-    if (!label || seenLabels.has(label)) return;
     const historyId = String(entry.id || `history-${index}`);
+    if (seenIds.has(historyId)) return;
+    seenIds.add(historyId);
+
+    const baseLabel = entry.chain?.name?.trim() || `履歴 ${index + 1}`;
+    let label = baseLabel;
+    if (seenLabels.has(baseLabel)) {
+      if (entry.importedAt) {
+        try {
+          const date = new Date(entry.importedAt);
+          const y = date.getFullYear();
+          const m = String(date.getMonth() + 1).padStart(2, '0');
+          const d = String(date.getDate()).padStart(2, '0');
+          const hh = String(date.getHours()).padStart(2, '0');
+          const mm = String(date.getMinutes()).padStart(2, '0');
+          label = `${baseLabel} (${y}/${m}/${d} ${hh}:${mm})`;
+        } catch {
+          label = `${baseLabel} (${historyId.slice(0, 4)})`;
+        }
+      } else {
+        label = `${baseLabel} (${historyId.slice(0, 4)})`;
+      }
+    }
     seenLabels.add(label);
     options.push({
       id: `value-chain-history-${historyId}`,
@@ -2661,6 +2696,7 @@ export function MacroFlowMap({
   renderTickerChart,
   renderIndicatorSettings,
   onChartSymbolsChange,
+  onSyncBasketsToWatchlist,
 }: MacroFlowMapProps) {
   const rangeTrackRef = useRef<HTMLDivElement | null>(null);
   const macroQuoteFetchInFlightRef = useRef(false);
@@ -2671,6 +2707,7 @@ export function MacroFlowMap({
   const sparklineFetchKeysRef = useRef<Set<string>>(new Set());
   const sparklineFetchedKeysRef = useRef<Set<string>>(new Set());
   const klineQueueRunIdRef = useRef(0);
+  const syncBasketsToWatchlistRef = useRef(onSyncBasketsToWatchlist);
   const [macroScopeOptions, setMacroScopeOptions] = useState<MacroScopeOption[]>(() => readSyncedMacroScopeOptions());
   const [rangeStartDate, setRangeStartDate] = useState(FLOW_END_DATE);
   const [rangeEndDate, setRangeEndDate] = useState(FLOW_END_DATE);
@@ -2715,6 +2752,7 @@ export function MacroFlowMap({
   const [quoteRefreshToken, setQuoteRefreshToken] = useState(0);
   const [cacheTransferStatus, setCacheTransferStatus] = useState<string | null>(null);
   const [stockContextMenu, setStockContextMenu] = useState<StockContextMenuState | null>(null);
+  const [basketContextMenu, setBasketContextMenu] = useState<BasketContextMenuState | null>(null);
   const basketDbImportInputRef = useRef<HTMLInputElement | null>(null);
   const [basketEditor, setBasketEditor] = useState<BasketEditorState | null>(null);
   const [stockEditModal, setStockEditModal] = useState<StockEditModalState | null>(null);
@@ -2810,6 +2848,14 @@ export function MacroFlowMap({
   ), [editableBasketChain.categories]);
 
   useEffect(() => {
+    syncBasketsToWatchlistRef.current = onSyncBasketsToWatchlist;
+  }, [onSyncBasketsToWatchlist]);
+
+  useEffect(() => {
+    syncBasketsToWatchlistRef.current?.(editableBasketChain);
+  }, [editableBasketChain]);
+
+  useEffect(() => {
     const refreshScopeOptions = () => setMacroScopeOptions(readSyncedMacroScopeOptions());
     window.addEventListener('focus', refreshScopeOptions);
     window.addEventListener('storage', refreshScopeOptions);
@@ -2892,23 +2938,28 @@ export function MacroFlowMap({
   }, [basketDbExportMenuAnchor]);
 
   useEffect(() => {
-    if (!stockContextMenu) return undefined;
-    const close = () => setStockContextMenu(null);
+    if (!stockContextMenu && !basketContextMenu) return undefined;
+    const close = () => {
+      setStockContextMenu(null);
+      setBasketContextMenu(null);
+    };
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
-  }, [stockContextMenu]);
+  }, [basketContextMenu, stockContextMenu]);
 
   useEffect(() => {
-    if (!basketEditor && !basketDbImportDecision && !stockEditModal) return undefined;
+    if (!basketEditor && !basketDbImportDecision && !stockEditModal && !basketContextMenu && !stockContextMenu) return undefined;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setBasketEditor(null);
       setBasketDbImportDecision(null);
+      setBasketContextMenu(null);
+      setStockContextMenu(null);
       if (!stockEditModal?.loading) setStockEditModal(null);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [basketDbImportDecision, basketEditor, stockEditModal]);
+  }, [basketContextMenu, basketDbImportDecision, basketEditor, stockContextMenu, stockEditModal]);
 
   useEffect(() => {
     if (!macroQuoteSignature || !quoteCacheHydrated) return undefined;
@@ -3895,8 +3946,14 @@ export function MacroFlowMap({
       || 'Custom Sector'
   );
 
+  const findEditableBasketGroup = (groupId: string): ValueChainGroup | null => (
+    editableBasketChain.groups?.find((item) => item.id === groupId) ?? null
+  );
+
   const openBasketEditor = (group?: ValueChainGroup) => {
     const selectedSectorName = orderedSectors.find((sector) => sector.id === selectedSectorId)?.name;
+    setSidePanelOpen(true);
+    setSidePanelMode('basket-db');
     setBasketEditor({
       id: group?.id || null,
       name: group?.name || '',
@@ -3954,11 +4011,12 @@ export function MacroFlowMap({
       groups: (base.groups || []).filter((group) => group.id !== groupId),
     }, selectedMacroScopeOption?.historyId ? 'replace-current' : 'new-history');
     if (selectedBasketId === groupId) setSelectedBasketId(null);
+    setBasketContextMenu(null);
   };
 
   const findEditableStock = (groupId: string, symbol: string): MacroStock | null => {
     const normalizedSymbol = normalizeSymbol(symbol);
-    const group = editableBasketChain.groups?.find((item) => item.id === groupId);
+    const group = findEditableBasketGroup(groupId);
     return group?.stocks.find((stock) => normalizeSymbol(stock.symbol) === normalizedSymbol) ?? null;
   };
 
@@ -4008,6 +4066,7 @@ export function MacroFlowMap({
     const stock = findEditableStock(groupId, symbol);
     if (!stock) return;
     setStockEditModal({
+      mode: 'edit',
       groupId,
       originalSymbol: stock.symbol,
       symbol: stock.symbol,
@@ -4018,30 +4077,81 @@ export function MacroFlowMap({
     });
   };
 
-  const deleteEditableStock = (groupId: string, symbol: string) => {
+  const openStockAddModal = (groupId: string) => {
+    const group = findEditableBasketGroup(groupId);
+    if (!group) return;
+    setStockEditModal({
+      mode: 'add',
+      groupId,
+      originalSymbol: '',
+      symbol: '',
+      name: '',
+      market: group.market || (marketFilter === 'all' ? '' : marketFilter.toUpperCase()),
+      loading: false,
+      error: null,
+    });
+    setBasketContextMenu(null);
+    setStockContextMenu(null);
+  };
+
+  const deleteEditableStock = (_groupId: string, symbol: string) => {
     const normalizedSymbol = normalizeSymbol(symbol);
-    const stock = findEditableStock(groupId, symbol);
-    if (!stock) return;
-    const base = normalizeStoredChain(editableBasketChain, editableBasketChain.name || 'マクロ全体');
-    const nextGroups = (base.groups || []).map((group) => {
-      if (group.id !== groupId) return group;
+
+    // 1. 現在のメイン構成 (VALUE_CHAIN_STORAGE_KEY) から該当銘柄を削除して保存
+    // currentChain が null の場合（初期デフォルト状態）は、rawBaskets から chain を構築して保存する
+    const currentChain = readStoredValueChain()
+      ?? normalizeStoredChain(createChainFromBaskets(selectedMacroScopeOption?.label || 'マクロ全体', rawBaskets));
+    const nextGroups = (currentChain.groups || []).map((group) => {
+      const nextStocks = (group.stocks || []).filter(
+        (item) => normalizeSymbol(item.symbol) !== normalizedSymbol
+      );
       return {
         ...group,
-        stocks: group.stocks.filter((item) => normalizeSymbol(item.symbol) !== normalizedSymbol),
+        stocks: nextStocks,
       };
     });
-    persistBasketDbChain({
-      ...base,
-      groups: nextGroups,
-    }, selectedMacroScopeOption?.historyId ? 'replace-current' : 'new-history');
-    clearStockDataCache([stock.symbol, symbol]);
-    if (selectedStockKey === `${groupId}:${normalizedSymbol}`) {
+    localStorage.setItem(VALUE_CHAIN_STORAGE_KEY, JSON.stringify({ ...currentChain, groups: nextGroups }));
+
+    // 2. 履歴データ (CHAIN_HISTORY_STORAGE_KEY) の全エントリーから該当銘柄を削除して保存
+    const history = readValueChainHistory();
+    const nextHistory = history.map((entry) => {
+      if (!entry.chain) return entry;
+      const nextGroups = (entry.chain.groups || []).map((group) => {
+        const nextStocks = (group.stocks || []).filter(
+          (item) => normalizeSymbol(item.symbol) !== normalizedSymbol
+        );
+        return {
+          ...group,
+          stocks: nextStocks,
+        };
+      });
+      return {
+        ...entry,
+        chain: { ...entry.chain, groups: nextGroups },
+      };
+    });
+    writeValueChainHistory(nextHistory);
+
+    // 3. 表示用の現在のデータキャッシュをクリア
+    clearStockDataCache([symbol, normalizedSymbol]);
+
+    // 4. アプリケーション全体に削除イベントを通知
+    window.dispatchEvent(new CustomEvent('mooview:delete-global-stock', { detail: { symbol } }));
+
+    // 5. 選択状態のクリア
+    const selectedStockSymbol = selectedStockKey?.split(':').slice(1).join(':') || '';
+    if (normalizeSymbol(selectedStockSymbol) === normalizedSymbol) {
       setSelectedStockKey(null);
     }
     if (normalizeSymbol(activeSymbol) === normalizedSymbol) {
       setActiveSymbol('NVDA');
     }
     setStockContextMenu(null);
+
+    // 6. 同期イベントを発火して表示を即時更新（storage イベントリスナーが拾う）
+    dispatchValueChainSync();
+    // さらに React state を直接更新して確実に再レンダリングを保証する
+    setMacroScopeOptions(readSyncedMacroScopeOptions());
   };
 
   const resolveStockInput = async (
@@ -4104,16 +4214,23 @@ export function MacroFlowMap({
   const submitStockEdit = async () => {
     if (!stockEditModal || stockEditModal.loading) return;
     const modal = stockEditModal;
-    const fallbackStock = findEditableStock(modal.groupId, modal.originalSymbol);
+    const fallbackStock = modal.mode === 'edit' ? findEditableStock(modal.groupId, modal.originalSymbol) : null;
     setStockEditModal({ ...modal, loading: true, error: null });
     try {
       const stock = await resolveStockInput(modal.symbol, modal.name, modal.market, fallbackStock);
       const base = normalizeStoredChain(editableBasketChain, editableBasketChain.name || 'マクロ全体');
       const nextGroups = (base.groups || []).map((group) => {
         if (group.id !== modal.groupId) return group;
-        const nextStocks = group.stocks.map((item) => (
-          normalizeSymbol(item.symbol) === normalizeSymbol(modal.originalSymbol) ? stock : item
-        ));
+        const normalizedStockSymbol = normalizeSymbol(stock.symbol);
+        const normalizedOriginalSymbol = normalizeSymbol(modal.originalSymbol);
+        const existingIndex = group.stocks.findIndex((item) => normalizeSymbol(item.symbol) === normalizedStockSymbol);
+        const nextStocks = modal.mode === 'add'
+          ? (existingIndex >= 0
+            ? group.stocks.map((item) => (normalizeSymbol(item.symbol) === normalizedStockSymbol ? stock : item))
+            : [...group.stocks, stock])
+          : group.stocks.map((item) => (
+            normalizeSymbol(item.symbol) === normalizedOriginalSymbol ? stock : item
+          ));
         return { ...group, stocks: nextStocks };
       });
       persistBasketDbChain({
@@ -4137,7 +4254,7 @@ export function MacroFlowMap({
   const fillStockFromSearch = async () => {
     if (!stockEditModal || stockEditModal.loading) return;
     const modal = stockEditModal;
-    const fallbackStock = findEditableStock(modal.groupId, modal.originalSymbol);
+    const fallbackStock = modal.mode === 'edit' ? findEditableStock(modal.groupId, modal.originalSymbol) : null;
     setStockEditModal({ ...modal, loading: true, error: null });
     try {
       const stock = await resolveStockInput(modal.symbol, modal.name, modal.market, fallbackStock);
@@ -5083,6 +5200,20 @@ export function MacroFlowMap({
                     type="button"
                     onClick={() => selectBasket(basket)}
                     onDoubleClick={() => openColorSettings({ id: basket.id, label: basket.name, kind: 'basket' })}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setSelectedBasketId(basket.id);
+                      setSelectedSectorId(getBasketParentSectorId(basket));
+                      setSelectedStockKey(null);
+                      setBasketContextMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        groupId: basket.id,
+                        label: basket.name,
+                      });
+                      setStockContextMenu(null);
+                    }}
                     className={`w-full px-3 py-2.5 text-left transition ${
                       selectedBasketId === basket.id
                         ? 'bg-[#101820] ring-1 ring-inset ring-sky-700/70'
@@ -5150,6 +5281,7 @@ export function MacroFlowMap({
                           symbol: stock.symbol,
                           label: stock.name,
                         });
+                        setBasketContextMenu(null);
                       }}
                       className={`w-full px-3 py-2 text-left transition ${selected ? 'bg-sky-950/20 ring-1 ring-inset ring-sky-700/60' : 'hover:bg-[#101010]'}`}
                     >
@@ -5464,6 +5596,20 @@ export function MacroFlowMap({
                         type="button"
                         onClick={() => selectBasket(basket)}
                         onDoubleClick={() => openColorSettings({ id: `flow-basket-${basket.id}`, label: basket.name, kind: 'basket' })}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setSelectedBasketId(basket.id);
+                          setSelectedSectorId(getBasketParentSectorId(basket));
+                          setSelectedStockKey(null);
+                          setBasketContextMenu({
+                            x: event.clientX,
+                            y: event.clientY,
+                            groupId: basket.id,
+                            label: basket.name,
+                          });
+                          setStockContextMenu(null);
+                        }}
                         title={`${basket.name}\n${basket.sector}\nVol ${formatFlow(basket.nodeVolume)}\nFlow ${formatFlow(basket.flowValue)}\nRelative Return ${formatPctMaybe(basket.relativeReturn, basket.dataCoverage > 0)}`}
                         className={`absolute overflow-hidden border px-1 py-0.5 text-left transition ${
                           selected
@@ -5538,6 +5684,7 @@ export function MacroFlowMap({
                             symbol: stock.symbol,
                             label: stock.name,
                           });
+                          setBasketContextMenu(null);
                         }}
                         title={`${stock.symbol} ${stock.name}\nVol ${formatStockMetric(stock.nodeVolume)}\nFlow ${formatStockMetric(stock.flowValue)}\nAlpha ${formatStockPctMaybe(stock.alpha, stock.hasLiveQuote)}\nMomentum ${stock.momentum.toFixed(2)}`}
                         className={`absolute overflow-hidden border px-1 py-0.5 text-left transition ${
@@ -5584,11 +5731,63 @@ export function MacroFlowMap({
         </div>
       </div>
 
+      {basketContextMenu && (
+        <div
+          className="fixed z-[95] w-52 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+          style={{ left: basketContextMenu.x, top: basketContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onMouseUp={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerUp={(event) => event.stopPropagation()}
+        >
+          <div className="border-b border-[#242424] px-2.5 py-1.5 text-[9px] text-gray-500">
+            <span className="block truncate">{basketContextMenu.label}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              openStockAddModal(basketContextMenu.groupId);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            銘柄を追加
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const group = findEditableBasketGroup(basketContextMenu.groupId);
+              if (group) openBasketEditor(group);
+              setBasketContextMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            グルーピング名編集
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              deleteBasketGroup(basketContextMenu.groupId);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left text-red-300 hover:bg-red-950/30 hover:text-red-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Themeを削除
+          </button>
+        </div>
+      )}
+
       {stockContextMenu && (
         <div
           className="fixed z-[95] w-44 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
           style={{ left: stockContextMenu.x, top: stockContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onMouseUp={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerUp={(event) => event.stopPropagation()}
         >
           <button
             type="button"
@@ -5857,7 +6056,7 @@ export function MacroFlowMap({
                       </button>
                     </div>
                   </div>
-                  {chartComparisonSymbols.length > 0 && (
+                  {false && chartComparisonSymbols.length > 0 && (
                     <div className="mt-2 flex items-center gap-1 overflow-x-auto border-t border-[#161616] pt-1">
                       {chartComparisonSymbols.map((symbol, index) => (
                         <span
@@ -5892,6 +6091,7 @@ export function MacroFlowMap({
                     renderTickerChart({
                       symbol: activeSymbol,
                       comparisonSymbols: chartComparisonSymbols,
+                      onRemoveComparisonSymbol: (symbol) => setChartComparisonSymbols((current) => current.filter((item) => item !== symbol)),
                       onOpenIndicatorSettings: () => {
                         setSidePanelOpen(true);
                         setSidePanelMode('settings');

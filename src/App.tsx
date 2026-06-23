@@ -17,6 +17,8 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Menu,
+  Pencil,
+  RotateCcw,
   Upload
 } from 'lucide-react';
 
@@ -26,7 +28,7 @@ import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
 import { ValueChainMap } from './components/ValueChainMap';
-import { MacroFlowMap } from './components/MacroFlowMap';
+import { MacroFlowMap, getMacroFlowDefaultWatchlistChain } from './components/MacroFlowMap';
 import {
   calculateExpressionQuote,
   combineExpressionCandles,
@@ -42,12 +44,16 @@ const MIN_SIDEBAR_WIDTH = 164;
 const SIDEBAR_NAV_WIDTH = 44;
 const DEFAULT_WATCHLIST_TAB_ID = 'watchlist-default';
 const DEFAULT_WATCHLIST_SECTION_ID = 'section-default';
+const WATCHLIST_TARGET_SEPARATOR = '::section::';
 const INDICATOR_LINE_STYLES: IndicatorLineStyle[] = ['solid', 'dashed', 'dotted', 'dashdot'];
 
 type SidebarView = 'watchlist' | 'indicators' | 'settings';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
+type WatchlistQuoteFetchMode = 'manual' | 'auto';
+type WatchlistQuoteFetchSource = 'manual' | 'auto';
+type WatchlistTabDropPosition = 'before' | 'after';
 type AppView = 'charts' | 'value-chain' | 'macro-flow';
 
 const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
@@ -61,7 +67,14 @@ const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
+const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
+const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
+const ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY = 'mooview_value_chain_active_history_id';
+const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
 const VALUE_CHAIN_CHART_STATE_STORAGE_KEY = 'mooview_value_chain_chart_state_v1';
+const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v1';
+const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
+const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
 const DEFAULT_HEADER_TICKER_SYMBOLS = DEFAULT_TICKERS.slice(0, 6).map((ticker) => ticker.symbol);
 const SYMBOL_NAME_ALIASES: Record<string, string> = {
   BRCM: 'AVGO',
@@ -98,6 +111,8 @@ interface WatchlistSection {
   name: string;
   collapsed: boolean;
   symbols: string[];
+  sourceSectorId?: string;
+  sourceBasketId?: string;
 }
 
 interface WatchlistTab {
@@ -158,6 +173,51 @@ interface WatchlistCsvCandidate {
   market: string;
 }
 
+interface WatchlistSyncStock {
+  symbol?: string;
+  name?: string;
+  market?: string;
+  marketCap?: number;
+  baseChangePct?: number;
+}
+
+interface WatchlistSyncGroup {
+  id?: string;
+  name?: string;
+  categoryId?: string;
+  parentSectorId?: string;
+  parentSectorNameJa?: string;
+  parentSectorNameEn?: string;
+  stocks?: WatchlistSyncStock[];
+}
+
+interface WatchlistSyncCategory {
+  id?: string;
+  name?: string;
+}
+
+interface WatchlistSyncChain {
+  name?: string;
+  categories?: WatchlistSyncCategory[];
+  groups?: WatchlistSyncGroup[];
+}
+
+interface WatchlistSyncHistoryEntry {
+  id?: string;
+  importedAt?: string;
+  chain?: WatchlistSyncChain | null;
+}
+
+interface WatchlistPanelTarget {
+  tabId: string;
+  sectionId?: string;
+}
+
+interface WatchlistQuoteFetchTarget {
+  tabId: string;
+  source: WatchlistQuoteFetchSource;
+}
+
 interface RegisterTickerResult {
   success: boolean;
   symbol?: string;
@@ -181,6 +241,32 @@ function readStoredValue<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function normalizeWatchlistQuoteFetchModes(raw: unknown): Record<string, WatchlistQuoteFetchMode> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([tabId]) => Boolean(tabId))
+      .map(([tabId, mode]) => [tabId, mode === 'auto' ? 'auto' : 'manual']),
+  );
+}
+
+function getWatchlistQuoteFetchMode(
+  modes: Record<string, WatchlistQuoteFetchMode>,
+  tabId: string,
+): WatchlistQuoteFetchMode {
+  return modes[tabId] === 'auto' ? 'auto' : 'manual';
+}
+
+function areWatchlistQuoteFetchModesEqual(
+  first: Record<string, WatchlistQuoteFetchMode>,
+  second: Record<string, WatchlistQuoteFetchMode>,
+): boolean {
+  const firstKeys = Object.keys(first);
+  const secondKeys = Object.keys(second);
+  return firstKeys.length === secondKeys.length
+    && firstKeys.every((key) => first[key] === second[key]);
 }
 
 function isStorageQuotaError(error: unknown): boolean {
@@ -375,10 +461,14 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
   const watchlistTabId = typeof panel.watchlistTabId === 'string' && panel.watchlistTabId.trim()
     ? panel.watchlistTabId.trim()
     : undefined;
+  const watchlistSectionId = typeof panel.watchlistSectionId === 'string' && panel.watchlistSectionId.trim()
+    ? panel.watchlistSectionId.trim()
+    : undefined;
   return {
     ...panel,
     symbol: normalizeStoredSymbolValue(panel.symbol),
     watchlistTabId,
+    watchlistSectionId,
     comparisonSymbols: normalizedComparisonSymbols.length > 0 ? normalizedComparisonSymbols : panel.comparisonSymbols,
     timeframe: (panel.timeframe as string) === '15m' ? '10m' : panel.timeframe,
     priceScale: panel.priceScale ?? 1,
@@ -676,16 +766,71 @@ function getWatchlistTabSymbols(tab?: WatchlistTab | null): string[] {
   return symbols;
 }
 
+function getWatchlistSectionSymbols(tab: WatchlistTab | null | undefined, sectionId: string | null | undefined): string[] {
+  if (!tab || !sectionId) return [];
+  const section = tab.sections.find((item) => item.id === sectionId);
+  if (!section) return [];
+  const symbols: string[] = [];
+  const seen = new Set<string>();
+  section.symbols.forEach((rawSymbol) => {
+    const symbol = normalizeStoredSymbolValue(rawSymbol);
+    if (!symbol || seen.has(symbol)) return;
+    seen.add(symbol);
+    symbols.push(symbol);
+  });
+  return symbols;
+}
+
+function getQuoteOperandSymbolsForWatchlistSymbols(symbols: string[]): string[] {
+  const normalizedSymbols: string[] = [];
+  const seen = new Set<string>();
+  symbols.forEach((symbol) => {
+    getStoredSymbolOperands(symbol).forEach((operand) => {
+      const normalizedOperand = normalizeStoredSymbolValue(operand);
+      if (!normalizedOperand || seen.has(normalizedOperand)) return;
+      seen.add(normalizedOperand);
+      normalizedSymbols.push(normalizedOperand);
+    });
+  });
+  return normalizedSymbols;
+}
+
+function getQuoteOperandSymbolsForWatchlistTabs(tabs: WatchlistTab[]): string[] {
+  return getQuoteOperandSymbolsForWatchlistSymbols(
+    tabs.flatMap((tab) => tab.sections.flatMap((section) => section.symbols)),
+  );
+}
+
+function encodeWatchlistTargetValue(tabId: string | null | undefined, sectionId?: string | null): string {
+  if (!tabId) return '';
+  return sectionId ? `${tabId}${WATCHLIST_TARGET_SEPARATOR}${sectionId}` : tabId;
+}
+
+function decodeWatchlistTargetValue(value: string): WatchlistPanelTarget | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const separatorIndex = trimmed.indexOf(WATCHLIST_TARGET_SEPARATOR);
+  if (separatorIndex === -1) return { tabId: trimmed };
+  const tabId = trimmed.slice(0, separatorIndex);
+  const sectionId = trimmed.slice(separatorIndex + WATCHLIST_TARGET_SEPARATOR.length);
+  return tabId ? { tabId, sectionId: sectionId || undefined } : null;
+}
+
 function areSymbolListsEqual(first: string[] = [], second: string[] = []): boolean {
   if (first.length !== second.length) return false;
   return first.every((symbol, index) => symbol === second[index]);
 }
 
-function syncPanelToWatchlistTab(panel: ChartPanel, tabId: string, symbols: string[]): ChartPanel {
+function syncPanelToWatchlistTarget(
+  panel: ChartPanel,
+  target: WatchlistPanelTarget,
+  symbols: string[],
+): ChartPanel {
   if (symbols.length === 0) {
     return {
       ...panel,
-      watchlistTabId: tabId,
+      watchlistTabId: target.tabId,
+      watchlistSectionId: target.sectionId,
       comparisonSymbols: [],
     };
   }
@@ -694,14 +839,20 @@ function syncPanelToWatchlistTab(panel: ChartPanel, tabId: string, symbols: stri
   return {
     ...panel,
     symbol: primarySymbol,
-    watchlistTabId: tabId,
+    watchlistTabId: target.tabId,
+    watchlistSectionId: target.sectionId,
     comparisonSymbols,
   };
+}
+
+function syncPanelToWatchlistTab(panel: ChartPanel, tabId: string, symbols: string[]): ChartPanel {
+  return syncPanelToWatchlistTarget(panel, { tabId }, symbols);
 }
 
 function hasWatchlistPanelTargetChanged(current: ChartPanel, next: ChartPanel): boolean {
   return current.symbol !== next.symbol
     || current.watchlistTabId !== next.watchlistTabId
+    || current.watchlistSectionId !== next.watchlistSectionId
     || !areSymbolListsEqual(current.comparisonSymbols || [], next.comparisonSymbols || []);
 }
 
@@ -861,6 +1012,19 @@ function normalizeWatchlistSort(raw: unknown): WatchlistSortState {
     : { column: null, direction: null };
 }
 
+function normalizeWatchlistNameOverrides(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object') return {};
+  const next: Record<string, string> = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([rawSymbol, rawName]) => {
+    const symbol = normalizeStoredSymbolValue(rawSymbol);
+    const name = typeof rawName === 'string' ? rawName.trim() : '';
+    if (symbol && name) {
+      next[symbol] = name;
+    }
+  });
+  return next;
+}
+
 function createDefaultWatchlistTabs(tickers: TickerInfo[]): WatchlistTab[] {
   const symbols = tickers.map((ticker) => ticker.symbol);
   const firstSectionSymbols = symbols.slice(0, Math.min(2, symbols.length));
@@ -915,6 +1079,8 @@ function normalizeWatchlistTabs(raw: unknown, tickers: TickerInfo[]): WatchlistT
               : `セクション${sectionIndex + 1}`,
             collapsed: Boolean(sourceSection.collapsed),
             symbols,
+            sourceSectorId: typeof sourceSection.sourceSectorId === 'string' ? sourceSection.sourceSectorId : undefined,
+            sourceBasketId: typeof sourceSection.sourceBasketId === 'string' ? sourceSection.sourceBasketId : undefined,
           };
         })
         .filter((section): section is WatchlistSection => Boolean(section));
@@ -937,6 +1103,222 @@ function normalizeWatchlistTabs(raw: unknown, tickers: TickerInfo[]): WatchlistT
     .filter((tab): tab is WatchlistTab => Boolean(tab));
 
   return tabs.length > 0 ? tabs : createDefaultWatchlistTabs(tickers);
+}
+
+function stableWatchlistHash(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function createStableWatchlistId(prefix: string, value: string): string {
+  const clean = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `${prefix}-${clean || stableWatchlistHash(value || prefix)}`;
+}
+
+function normalizeWatchlistSyncChain(value: unknown): WatchlistSyncChain | null {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as WatchlistSyncChain;
+  if (!Array.isArray(source.groups)) return null;
+  return source;
+}
+
+function getWatchlistGroupSectorName(
+  group: WatchlistSyncGroup,
+  categoryNames: Map<string, string>,
+): string {
+  return (
+    group.parentSectorNameJa?.trim()
+    || group.parentSectorNameEn?.trim()
+    || categoryNames.get(String(group.categoryId || ''))?.trim()
+    || '未分類'
+  );
+}
+
+function createWatchlistTabsFromSyncChain(
+  chain: WatchlistSyncChain | null | undefined,
+  sourcePrefix: string,
+): WatchlistTab[] {
+  if (!chain || !Array.isArray(chain.groups)) return [];
+  const categoryNames = new Map<string, string>(
+    (chain.categories || []).map((category) => [
+      String(category.id || ''),
+      String(category.name || ''),
+    ]),
+  );
+  const tabsBySectorId = new Map<string, WatchlistTab>();
+
+  chain.groups.forEach((group, groupIndex) => {
+    if (!Array.isArray(group.stocks) || group.stocks.length === 0) return;
+    const symbols = Array.from(new Set(
+      group.stocks
+        .map((stock) => normalizeStoredSymbolValue(stock.symbol || ''))
+        .filter(Boolean),
+    ));
+    if (symbols.length === 0) return;
+
+    const sectorName = getWatchlistGroupSectorName(group, categoryNames);
+    const rawSectorId = group.parentSectorId?.trim() || sectorName;
+    const sourceSectorId = `${sourcePrefix}:${rawSectorId}`;
+    const sourceBasketId = `${sourcePrefix}:${group.id || `${sectorName}:${group.name || groupIndex}`}`;
+    const tabId = createStableWatchlistId(`watchlist-${sourcePrefix}`, rawSectorId || sectorName);
+    const sectionId = createStableWatchlistId(`section-${sourcePrefix}`, group.id || `${sectorName}-${group.name || groupIndex}`);
+    const existingTab = tabsBySectorId.get(tabId);
+    const tab = existingTab ?? {
+      id: tabId,
+      name: sectorName,
+      sections: [],
+    };
+
+    tab.sections.push({
+      id: sectionId,
+      name: group.name?.trim() || `Basket ${groupIndex + 1}`,
+      collapsed: false,
+      symbols,
+      sourceSectorId,
+      sourceBasketId,
+    });
+    tabsBySectorId.set(tabId, tab);
+  });
+
+  return Array.from(tabsBySectorId.values());
+}
+
+function mergeSyncedWatchlistTabs(currentTabs: WatchlistTab[], syncedTabs: WatchlistTab[]): WatchlistTab[] {
+  if (syncedTabs.length === 0) return currentTabs;
+  let nextTabs = [...currentTabs];
+
+  syncedTabs.forEach((syncedTab) => {
+    const tabIndex = nextTabs.findIndex((tab) => tab.id === syncedTab.id);
+    if (tabIndex === -1) {
+      nextTabs.push(syncedTab);
+      return;
+    }
+
+    const currentTab = nextTabs[tabIndex];
+    const nextSections = [...currentTab.sections];
+    syncedTab.sections.forEach((syncedSection) => {
+      const sectionIndex = nextSections.findIndex((section) => (
+        section.id === syncedSection.id
+        || (
+          syncedSection.sourceBasketId
+          && section.sourceBasketId === syncedSection.sourceBasketId
+        )
+      ));
+      if (sectionIndex === -1) {
+        nextSections.push(syncedSection);
+        return;
+      }
+      nextSections[sectionIndex] = {
+        ...nextSections[sectionIndex],
+        name: syncedSection.name,
+        symbols: syncedSection.symbols,
+        sourceSectorId: syncedSection.sourceSectorId,
+        sourceBasketId: syncedSection.sourceBasketId,
+      };
+    });
+
+    nextTabs[tabIndex] = {
+      ...currentTab,
+      name: syncedTab.name,
+      sections: nextSections,
+    };
+  });
+
+  return nextTabs;
+}
+
+function areWatchlistTabsEqual(first: WatchlistTab[], second: WatchlistTab[]): boolean {
+  return JSON.stringify(first) === JSON.stringify(second);
+}
+
+function extractTickersFromSyncChain(chain: WatchlistSyncChain | null | undefined): TickerInfo[] {
+  if (!chain || !Array.isArray(chain.groups)) return [];
+  const tickersBySymbol = new Map<string, TickerInfo>();
+  chain.groups.forEach((group) => {
+    (group.stocks || []).forEach((stock) => {
+      const symbol = normalizeStoredSymbolValue(stock.symbol || '');
+      if (!symbol || tickersBySymbol.has(symbol)) return;
+      tickersBySymbol.set(symbol, {
+        symbol,
+        name: stock.name?.trim() || symbol,
+        basePrice: 0,
+        dailyChangePct: Number.isFinite(Number(stock.baseChangePct)) ? Number(stock.baseChangePct) : 0,
+      });
+    });
+  });
+  return Array.from(tickersBySymbol.values());
+}
+
+function createWatchlistSyncSignature(chain: WatchlistSyncChain | null | undefined, sourcePrefix: string): string {
+  if (!chain || !Array.isArray(chain.groups)) return `${sourcePrefix}:empty`;
+  return JSON.stringify({
+    sourcePrefix,
+    groups: chain.groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      parentSectorId: group.parentSectorId,
+      parentSectorNameJa: group.parentSectorNameJa,
+      parentSectorNameEn: group.parentSectorNameEn,
+      symbols: (group.stocks || []).map((stock) => normalizeStoredSymbolValue(stock.symbol || '')).filter(Boolean),
+    })),
+  });
+}
+
+function readStoredWatchlistSyncChain(): WatchlistSyncChain | null {
+  return normalizeWatchlistSyncChain(readStoredValue<unknown>(VALUE_CHAIN_STORAGE_KEY, null));
+}
+
+function readStoredWatchlistSyncHistory(): WatchlistSyncHistoryEntry[] {
+  const value = readStoredValue<unknown>(CHAIN_HISTORY_STORAGE_KEY, []);
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry, index): WatchlistSyncHistoryEntry | null => {
+      if (!entry || typeof entry !== 'object') return null;
+      const source = entry as Partial<WatchlistSyncHistoryEntry>;
+      const chain = normalizeWatchlistSyncChain(source.chain);
+      if (!chain) return null;
+      return {
+        id: typeof source.id === 'string' ? source.id : `history-${index}`,
+        importedAt: typeof source.importedAt === 'string' ? source.importedAt : undefined,
+        chain,
+      };
+    })
+    .filter((entry): entry is WatchlistSyncHistoryEntry => Boolean(entry));
+}
+
+function readStoredActiveWatchlistSyncHistoryId(): string | null {
+  const value = localStorage.getItem(ACTIVE_CHAIN_HISTORY_ID_STORAGE_KEY);
+  return value && value.trim() ? value.trim() : null;
+}
+
+function readStoredWatchlistSyncChains(): WatchlistSyncChain[] {
+  const chains: WatchlistSyncChain[] = [];
+  const seen = new Set<string>();
+  const addChain = (rawChain: unknown) => {
+    const chain = normalizeWatchlistSyncChain(rawChain);
+    if (!chain) return;
+    const signature = createWatchlistSyncSignature(chain, 'value-chain');
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    chains.push(chain);
+  };
+
+  const history = readStoredWatchlistSyncHistory();
+  const activeHistoryId = readStoredActiveWatchlistSyncHistoryId();
+  const activeHistoryEntry = history.find((entry) => entry.id === activeHistoryId);
+
+  addChain(activeHistoryEntry?.chain);
+  addChain(readStoredWatchlistSyncChain());
+  history.forEach((entry) => addChain(entry.chain));
+
+  return chains;
 }
 
 // Local default indicator generator to keep things resilient
@@ -1143,8 +1525,14 @@ export default function App() {
   const candleFetchPendingRef = useRef(false);
   const forceCandleRefreshRef = useRef(false);
   const quoteFetchInFlightRef = useRef(false);
+  const quoteFetchPendingRef = useRef(false);
+  const quoteFetchManualTabQueueRef = useRef<string[]>([]);
+  const quoteFetchAutoSweepRequestedRef = useRef(false);
+  const quoteFetchAutoAttemptedTabIdsRef = useRef<Set<string>>(new Set());
+  const watchlistTabSuppressClickRef = useRef(false);
   const moomooRealTimeActiveRef = useRef(true);
   const candlesCacheIndexedDbHydratedRef = useRef(false);
+  const watchlistSyncSignatureRef = useRef<string | null>(null);
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
@@ -1198,6 +1586,9 @@ export default function App() {
   const [activeWatchlistTabId, setActiveWatchlistTabId] = useState<string>(() =>
     readStoredValue('tv_dashboard_active_watchlist_tab', DEFAULT_WATCHLIST_TAB_ID)
   );
+  const [watchlistQuoteFetchModes, setWatchlistQuoteFetchModes] = useState<Record<string, WatchlistQuoteFetchMode>>(() =>
+    normalizeWatchlistQuoteFetchModes(readStoredValue<unknown>(WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY, {}))
+  );
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
   const [sectionNameDraft, setSectionNameDraft] = useState('');
@@ -1210,12 +1601,20 @@ export default function App() {
   const [watchlistSort, setWatchlistSort] = useState<WatchlistSortState>(() =>
     normalizeWatchlistSort(readStoredValue<unknown>('tv_dashboard_watchlist_sort', null))
   );
+  const [watchlistNameOverrides, setWatchlistNameOverrides] = useState<Record<string, string>>(() =>
+    normalizeWatchlistNameOverrides(readStoredValue<unknown>(WATCHLIST_NAME_OVERRIDES_STORAGE_KEY, {}))
+  );
   const [draggedTicker, setDraggedTicker] = useState<{
     symbol: string;
     symbols: string[];
     sectionId: string;
   } | null>(null);
+  const [draggedBasket, setDraggedBasket] = useState<{
+    sectionId: string;
+    symbols: string[];
+  } | null>(null);
   const [draggedSectionId, setDraggedSectionId] = useState<string | null>(null);
+  const [draggedWatchlistTabId, setDraggedWatchlistTabId] = useState<string | null>(null);
   const [sectionMenu, setSectionMenu] = useState<{
     sectionId: string;
     x: number;
@@ -1244,11 +1643,33 @@ export default function App() {
     symbols: string[];
     sectionId: string;
   } | null>(null);
+  const [watchlistEmptyMenu, setWatchlistEmptyMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const [watchlistNameEditModal, setWatchlistNameEditModal] = useState<{
+    symbol: string;
+    sectionId: string;
+    draftName: string;
+    defaultName: string;
+  } | null>(null);
 
   // Custom Grid Layout dimensions (max 9x9)
   const [gridRows, setGridRows] = useState<number>(() => readStoredValue('tv_dashboard_grid_rows', 2));
   const [gridCols, setGridCols] = useState<number>(() => readStoredValue('tv_dashboard_grid_cols', 2));
   const [gridPickerOpen, setGridPickerOpen] = useState<boolean>(false);
+  const [tabsDropdownAnchor, setTabsDropdownAnchor] = useState<{
+    x: number;
+    y: number;
+    width: number;
+  } | null>(null);
+  const [watchlistTargetMenu, setWatchlistTargetMenu] = useState<{
+    panelId: string;
+    x: number;
+    y: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
   // Watchlist tabs overflow dropdown open state
   const [tabsDropdownOpen, setTabsDropdownOpen] = useState<boolean>(false);
   const watchlistTabsViewportRef = useRef<HTMLDivElement | null>(null);
@@ -1319,6 +1740,12 @@ export default function App() {
     });
   });
   const [valueChainChartSymbols, setValueChainChartSymbols] = useState<string[]>(['NVDA']);
+  const [comparisonLabelFontSize, setComparisonLabelFontSize] = useState<number>(() =>
+    Math.round(clampStoredNumber(readStoredValue<unknown>(COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY, 10), 10, 8, 18))
+  );
+  const updateComparisonLabelFontSize = (fontSize: number) => {
+    setComparisonLabelFontSize(Math.round(clampStoredNumber(fontSize, 10, 8, 18)));
+  };
 
   // Symbol specific indicator settings
   const [indicatorDatabase, setIndicatorDatabase] = useState<Record<string, SymbolIndicatorSettings>>(() => {
@@ -1364,6 +1791,8 @@ export default function App() {
   );
   const [candleFetchErrors, setCandleFetchErrors] = useState<Record<string, string>>({});
   const [quoteCache, setQuoteCache] = useState<Record<string, MoomooTickerQuote | null>>({});
+  const [quoteFetchInFlight, setQuoteFetchInFlight] = useState(false);
+  const [quoteFetchTarget, setQuoteFetchTarget] = useState<WatchlistQuoteFetchTarget | null>(null);
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
   const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>(() =>
@@ -1591,6 +2020,20 @@ export default function App() {
   }, [watchlistTabs]);
 
   useEffect(() => {
+    setWatchlistQuoteFetchModes((currentModes) => {
+      const nextModes: Record<string, WatchlistQuoteFetchMode> = {};
+      watchlistTabs.forEach((tab) => {
+        nextModes[tab.id] = getWatchlistQuoteFetchMode(currentModes, tab.id);
+      });
+      return areWatchlistQuoteFetchModesEqual(currentModes, nextModes) ? currentModes : nextModes;
+    });
+  }, [watchlistTabs]);
+
+  useEffect(() => {
+    writeStoredJson(WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY, watchlistQuoteFetchModes);
+  }, [watchlistQuoteFetchModes]);
+
+  useEffect(() => {
     writeStoredJson('tv_dashboard_active_watchlist_tab', activeWatchlistTabId);
   }, [activeWatchlistTabId]);
 
@@ -1601,6 +2044,10 @@ export default function App() {
   useEffect(() => {
     writeStoredJson(VALUE_CHAIN_CHART_STATE_STORAGE_KEY, valueChainChartState);
   }, [valueChainChartState]);
+
+  useEffect(() => {
+    writeStoredJson(COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY, comparisonLabelFontSize);
+  }, [comparisonLabelFontSize]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -1711,6 +2158,10 @@ export default function App() {
   }, [watchlistSort]);
 
   useEffect(() => {
+    writeStoredJson(WATCHLIST_NAME_OVERRIDES_STORAGE_KEY, watchlistNameOverrides);
+  }, [watchlistNameOverrides]);
+
+  useEffect(() => {
     if (!watchlistTabs.some((tab) => tab.id === activeWatchlistTabId)) {
       setActiveWatchlistTabId(watchlistTabs[0]?.id ?? DEFAULT_WATCHLIST_TAB_ID);
     }
@@ -1745,15 +2196,33 @@ export default function App() {
   }, [watchlistContextMenu]);
 
   useEffect(() => {
-    if (!gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen) return;
+    if (!watchlistEmptyMenu) return;
+    const closeMenu = () => setWatchlistEmptyMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [watchlistEmptyMenu]);
+
+  useEffect(() => {
+    if (!watchlistNameEditModal) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setWatchlistNameEditModal(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [watchlistNameEditModal]);
+
+  useEffect(() => {
+    if (!gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen && !watchlistTargetMenu) return;
     const handleOutsideClick = () => {
       setGridPickerOpen(false);
       setTabsDropdownOpen(false);
+      setTabsDropdownAnchor(null);
       setWatchlistImportMenuOpen(false);
+      setWatchlistTargetMenu(null);
     };
     window.addEventListener('click', handleOutsideClick);
     return () => window.removeEventListener('click', handleOutsideClick);
-  }, [gridPickerOpen, tabsDropdownOpen, watchlistImportMenuOpen]);
+  }, [gridPickerOpen, tabsDropdownOpen, watchlistImportMenuOpen, watchlistTargetMenu]);
 
   useEffect(() => {
     const tabsViewport = watchlistTabsViewportRef.current;
@@ -1775,6 +2244,50 @@ export default function App() {
       setMoomooError(null);
     }
     setMoomooRealTimeActive((active) => !active);
+  };
+
+  const getWatchlistTabQuoteOperands = (tab: WatchlistTab | null | undefined): string[] => {
+    return Array.from(new Set(
+      getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab))
+        .map((symbol) => normalizeStoredSymbolValue(symbol))
+        .filter(Boolean),
+    ));
+  };
+
+  const isQuoteOperandResolved = (symbol: string): boolean => {
+    const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+    const quote = quoteCache[normalizedSymbol];
+    const price = Number(quote?.price);
+    const changePct = Number(quote?.changePct);
+    return Number.isFinite(price)
+      && price > 0
+      && Number.isFinite(changePct);
+  };
+
+  const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
+    if (!tabId || !watchlistTabs.some((tab) => tab.id === tabId)) return;
+    quoteFetchManualTabQueueRef.current = [
+      tabId,
+      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => queuedTabId !== tabId),
+    ];
+    quoteFetchAutoSweepRequestedRef.current = true;
+    quoteFetchAutoAttemptedTabIdsRef.current.clear();
+    setMoomooStatus('connecting');
+    setMoomooError(null);
+    if (quoteFetchInFlightRef.current) {
+      quoteFetchPendingRef.current = true;
+    }
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    setTickTrigger((current) => current + 1);
+  };
+
+  const handleRefreshWatchlistQuotes = () => {
+    const refreshTabId = watchlistTabs.some((tab) => tab.id === activeWatchlistTabId)
+      ? activeWatchlistTabId
+      : watchlistTabs[0]?.id;
+    queueWatchlistQuoteRefresh(refreshTabId);
   };
 
   // OpenDへの接続状態はサーバー側ゲートウェイを通して確認する
@@ -1970,14 +2483,76 @@ export default function App() {
   }, [panels, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
-    if (!moomooRealTimeActive || quoteFetchInFlightRef.current || tickers.length === 0) return;
+    if (!moomooRealTimeActive) {
+      quoteFetchManualTabQueueRef.current = [];
+      quoteFetchAutoSweepRequestedRef.current = false;
+      quoteFetchAutoAttemptedTabIdsRef.current.clear();
+      quoteFetchPendingRef.current = false;
+      setQuoteFetchInFlight(false);
+      setQuoteFetchTarget(null);
+      return;
+    }
+
+    if (quoteFetchInFlightRef.current) {
+      quoteFetchPendingRef.current = true;
+      return;
+    }
+
+    const dequeueManualQuoteFetchTarget = (): {
+      tab: WatchlistTab;
+      symbols: string[];
+      source: WatchlistQuoteFetchSource;
+    } | null => {
+      while (quoteFetchManualTabQueueRef.current.length > 0) {
+        const tabId = quoteFetchManualTabQueueRef.current.shift();
+        const tab = watchlistTabs.find((item) => item.id === tabId);
+        if (!tab) continue;
+        const symbols = getWatchlistTabQuoteOperands(tab);
+        if (symbols.length === 0) continue;
+        return { tab, symbols, source: 'manual' };
+      }
+      return null;
+    };
+
+    const findNextAutoQuoteFetchTarget = (): {
+      tab: WatchlistTab;
+      symbols: string[];
+      source: WatchlistQuoteFetchSource;
+    } | null => {
+      if (!quoteFetchAutoSweepRequestedRef.current) return null;
+      for (const tab of watchlistTabs) {
+        if (getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tab.id) !== 'auto') continue;
+        if (quoteFetchAutoAttemptedTabIdsRef.current.has(tab.id)) continue;
+        const symbols = getWatchlistTabQuoteOperands(tab).filter((symbol) => !isQuoteOperandResolved(symbol));
+        if (symbols.length > 0) {
+          return { tab, symbols, source: 'auto' };
+        }
+      }
+      quoteFetchAutoSweepRequestedRef.current = false;
+      quoteFetchAutoAttemptedTabIdsRef.current.clear();
+      return null;
+    };
+
+    const quoteFetchTargetRequest = dequeueManualQuoteFetchTarget() ?? findNextAutoQuoteFetchTarget();
+    if (!quoteFetchTargetRequest) {
+      setQuoteFetchInFlight(false);
+      setQuoteFetchTarget(null);
+      quoteFetchPendingRef.current = false;
+      return;
+    }
 
     const fetchMoomooQuotes = async () => {
+      const quoteSymbols = quoteFetchTargetRequest.symbols;
+      if (quoteSymbols.length === 0) return;
+
       quoteFetchInFlightRef.current = true;
+      setQuoteFetchInFlight(true);
+      setQuoteFetchTarget({
+        tabId: quoteFetchTargetRequest.tab.id,
+        source: quoteFetchTargetRequest.source,
+      });
+      quoteFetchAutoAttemptedTabIdsRef.current.add(quoteFetchTargetRequest.tab.id);
       try {
-        const quoteSymbols = Array.from(new Set(
-          tickers.flatMap((ticker) => getStoredSymbolOperands(ticker.symbol)),
-        ));
         const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2015,11 +2590,20 @@ export default function App() {
         setMoomooError(error instanceof Error ? error.message : String(error));
       } finally {
         quoteFetchInFlightRef.current = false;
+        setQuoteFetchInFlight(false);
+        setQuoteFetchTarget(null);
+        const shouldRefetch = quoteFetchPendingRef.current;
+        const shouldContinueQueue = quoteFetchManualTabQueueRef.current.length > 0
+          || quoteFetchAutoSweepRequestedRef.current;
+        quoteFetchPendingRef.current = false;
+        if (shouldRefetch || shouldContinueQueue) {
+          setTickTrigger((current) => current + 1);
+        }
       }
     };
 
     fetchMoomooQuotes();
-  }, [tickers, moomooRealTimeActive, tickTrigger]);
+  }, [watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
   // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
@@ -2292,6 +2876,50 @@ export default function App() {
     );
   };
 
+  const syncChainToWatchlist = (
+    rawChain: unknown,
+    sourcePrefix: string,
+    options: { selectFirstTab?: boolean } = {},
+  ) => {
+    const chain = normalizeWatchlistSyncChain(rawChain);
+    if (!chain) return;
+    const signature = createWatchlistSyncSignature(chain, sourcePrefix);
+    const syncedTabs = createWatchlistTabsFromSyncChain(chain, sourcePrefix);
+    if (syncedTabs.length === 0) return;
+    const syncedTickers = extractTickersFromSyncChain(chain);
+
+    watchlistSyncSignatureRef.current = signature;
+    setTickers((currentTickers) => {
+      const currentSymbols = new Set(currentTickers.map((ticker) => ticker.symbol));
+      const additions = syncedTickers.filter((ticker) => !currentSymbols.has(ticker.symbol));
+      return additions.length > 0 ? [...currentTickers, ...additions] : currentTickers;
+    });
+    setWatchlistTabs((currentTabs) => {
+      const nextTabs = mergeSyncedWatchlistTabs(currentTabs, syncedTabs);
+      return areWatchlistTabsEqual(currentTabs, nextTabs) ? currentTabs : nextTabs;
+    });
+    if (options.selectFirstTab) {
+      setActiveWatchlistTabId(syncedTabs[0].id);
+      setSidebarView('watchlist');
+      setSidebarOpen(true);
+    }
+  };
+
+  const syncStoredMacroFlowToWatchlist = () => {
+    const storedChains = readStoredWatchlistSyncChains();
+    if (storedChains.length > 0) {
+      storedChains.forEach((storedChain) => syncChainToWatchlist(storedChain, 'value-chain'));
+      return;
+    }
+    syncChainToWatchlist(getMacroFlowDefaultWatchlistChain(), 'macro-flow');
+  };
+
+  useEffect(() => {
+    syncStoredMacroFlowToWatchlist();
+    window.addEventListener(VALUE_CHAIN_SYNC_EVENT, syncStoredMacroFlowToWatchlist);
+    return () => window.removeEventListener(VALUE_CHAIN_SYNC_EVENT, syncStoredMacroFlowToWatchlist);
+  }, []);
+
   const handleAddWatchlistTab = () => {
     const newTabId = createId('tab');
     const newSectionId = createId('section');
@@ -2324,26 +2952,219 @@ export default function App() {
 
   const handleDeleteWatchlistTab = (tabId: string) => {
     if (watchlistTabs.length <= 1) return;
+    const deleteIndex = watchlistTabs.findIndex((tab) => tab.id === tabId);
     const remainingTabs = watchlistTabs.filter((tab) => tab.id !== tabId);
     setWatchlistTabs(remainingTabs);
     if (activeWatchlistTabId === tabId) {
-      setActiveWatchlistTabId(remainingTabs[0]?.id ?? DEFAULT_WATCHLIST_TAB_ID);
+      const stayTab = remainingTabs[Math.min(Math.max(deleteIndex, 0), remainingTabs.length - 1)];
+      setActiveWatchlistTabId(stayTab?.id ?? DEFAULT_WATCHLIST_TAB_ID);
     }
+    setDraggedWatchlistTabId((current) => current === tabId ? null : current);
   };
 
   const selectWatchlistTab = (tabId: string) => {
     setActiveWatchlistTabId(tabId);
   };
 
+  const moveWatchlistTab = (
+    sourceTabId: string | null | undefined,
+    targetTabId: string | null | undefined,
+    position: WatchlistTabDropPosition,
+  ) => {
+    if (!sourceTabId || !targetTabId || sourceTabId === targetTabId) return;
+    setWatchlistTabs((currentTabs) => {
+      const sourceTab = currentTabs.find((tab) => tab.id === sourceTabId);
+      if (!sourceTab || !currentTabs.some((tab) => tab.id === targetTabId)) return currentTabs;
+
+      const tabsWithoutSource = currentTabs.filter((tab) => tab.id !== sourceTabId);
+      const targetIndex = tabsWithoutSource.findIndex((tab) => tab.id === targetTabId);
+      if (targetIndex === -1) return currentTabs;
+
+      const insertIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+      const nextTabs = [...tabsWithoutSource];
+      nextTabs.splice(insertIndex, 0, sourceTab);
+      return nextTabs;
+    });
+  };
+
+  const handleWatchlistTabDragStart = (
+    event: React.DragEvent<HTMLElement>,
+    tab: WatchlistTab,
+  ) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-mooview-watchlist-tab', tab.id);
+    event.dataTransfer.setData('text/plain', tab.name);
+    setDraggedWatchlistTabId(tab.id);
+  };
+
+  const handleWatchlistTabDragOver = (
+    event: React.DragEvent<HTMLElement>,
+    targetTabId: string,
+  ) => {
+    const sourceTabId = draggedWatchlistTabId
+      || event.dataTransfer.getData('application/x-mooview-watchlist-tab');
+    if (!sourceTabId || sourceTabId === targetTabId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleWatchlistTabDrop = (
+    event: React.DragEvent<HTMLElement>,
+    targetTabId: string,
+    axis: 'x' | 'y',
+  ) => {
+    const sourceTabId = draggedWatchlistTabId
+      || event.dataTransfer.getData('application/x-mooview-watchlist-tab');
+    if (!sourceTabId || sourceTabId === targetTabId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const midpoint = axis === 'x'
+      ? rect.left + rect.width / 2
+      : rect.top + rect.height / 2;
+    const pointer = axis === 'x' ? event.clientX : event.clientY;
+    moveWatchlistTab(sourceTabId, targetTabId, pointer >= midpoint ? 'after' : 'before');
+    setDraggedWatchlistTabId(null);
+  };
+
+  const handleWatchlistTabMouseDown = (
+    event: React.MouseEvent<HTMLElement>,
+    sourceTabId: string,
+  ) => {
+    if (event.button !== 0 || editingTabId === sourceTabId) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let isDragging = false;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (distance < 5) return;
+      isDragging = true;
+      setDraggedWatchlistTabId(sourceTabId);
+    };
+
+    const handleMouseUp = (upEvent: MouseEvent) => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      const endDistance = Math.hypot(upEvent.clientX - startX, upEvent.clientY - startY);
+      const completedDrag = isDragging || endDistance >= 5;
+      if (!completedDrag) return;
+
+      const targetElement = document
+        .elementFromPoint(upEvent.clientX, upEvent.clientY)
+        ?.closest('[data-watchlist-tab-id]') as HTMLElement | null;
+      const targetTabId = targetElement?.dataset.watchlistTabId;
+      if (targetTabId && targetTabId !== sourceTabId) {
+        const rect = targetElement.getBoundingClientRect();
+        moveWatchlistTab(
+          sourceTabId,
+          targetTabId,
+          upEvent.clientX >= rect.left + rect.width / 2 ? 'after' : 'before',
+        );
+      }
+      setDraggedWatchlistTabId(null);
+      watchlistTabSuppressClickRef.current = true;
+      window.setTimeout(() => {
+        watchlistTabSuppressClickRef.current = false;
+      }, 0);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleWatchlistTabPointerDown = (
+    event: React.PointerEvent<HTMLElement>,
+    sourceTabId: string,
+  ) => {
+    if (event.button !== 0 || editingTabId === sourceTabId) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const pointerId = event.pointerId;
+    let isDragging = false;
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (distance < 5) return;
+      isDragging = true;
+      setDraggedWatchlistTabId(sourceTabId);
+    };
+
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      const endDistance = Math.hypot(upEvent.clientX - startX, upEvent.clientY - startY);
+      const completedDrag = isDragging || endDistance >= 5;
+      if (!completedDrag) return;
+
+      const targetElement = document
+        .elementFromPoint(upEvent.clientX, upEvent.clientY)
+        ?.closest('[data-watchlist-tab-id]') as HTMLElement | null;
+      const targetTabId = targetElement?.dataset.watchlistTabId;
+      if (targetTabId && targetTabId !== sourceTabId) {
+        const rect = targetElement.getBoundingClientRect();
+        moveWatchlistTab(
+          sourceTabId,
+          targetTabId,
+          upEvent.clientX >= rect.left + rect.width / 2 ? 'after' : 'before',
+        );
+      }
+      setDraggedWatchlistTabId(null);
+      watchlistTabSuppressClickRef.current = true;
+      window.setTimeout(() => {
+        watchlistTabSuppressClickRef.current = false;
+      }, 0);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
+
+  const openWatchlistEmptyMenu = (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-watchlist-menu-target],button,input,select,textarea,a')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setWatchlistContextMenu(null);
+    setSectionMenu(null);
+    setWatchlistHeaderMenu(null);
+    setWatchlistTabMenu(null);
+    setWatchlistEmptyMenu({ x: event.clientX, y: event.clientY });
+  };
+
   const handleWatchlistTabContextMenu = (event: React.MouseEvent, tabId: string) => {
     event.preventDefault();
     event.stopPropagation();
     setTabsDropdownOpen(false);
+    setTabsDropdownAnchor(null);
     setWatchlistTabMenu({
       tabId,
       x: event.clientX,
       y: event.clientY,
     });
+  };
+
+  const toggleTabsDropdown = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const dropdownWidth = 192;
+    setTabsDropdownAnchor({
+      x: Math.max(8, Math.min(window.innerWidth - dropdownWidth - 8, rect.right - dropdownWidth)),
+      y: Math.min(window.innerHeight - 8, rect.bottom + 2),
+      width: dropdownWidth,
+    });
+    setTabsDropdownOpen((open) => !open);
+  };
+
+  const toggleWatchlistTabQuoteFetchMode = (tabId: string) => {
+    setWatchlistQuoteFetchModes((currentModes) => ({
+      ...currentModes,
+      [tabId]: getWatchlistQuoteFetchMode(currentModes, tabId) === 'auto' ? 'manual' : 'auto',
+    }));
+    setWatchlistTabMenu(null);
   };
 
   const handleJumpToFirstWatchlistTab = () => {
@@ -2449,6 +3270,43 @@ export default function App() {
     setSectionMenu(null);
   };
 
+  const handleDeleteWatchlistSectionFromTab = (tabId: string, sectionId: string) => {
+    setWatchlistTabs((currentTabs) =>
+      currentTabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const remainingSections = tab.sections.filter((section) => section.id !== sectionId);
+        return {
+          ...tab,
+          sections: remainingSections.length > 0
+            ? remainingSections
+            : [{
+                id: createId('section'),
+                name: 'バスケット',
+                collapsed: false,
+                symbols: [],
+              }],
+        };
+      })
+    );
+    setSectionMenu(null);
+    setWatchlistTargetMenu(null);
+  };
+
+  const handleDeleteWatchlistTargetFromMenu = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    tabId: string,
+    sectionId?: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (sectionId) {
+      handleDeleteWatchlistSectionFromTab(tabId, sectionId);
+      return;
+    }
+    handleDeleteWatchlistTab(tabId);
+    setWatchlistTargetMenu(null);
+  };
+
   const handleDropWatchlistSection = (
     event: React.DragEvent<HTMLDivElement>,
     targetSectionId: string,
@@ -2470,6 +3328,7 @@ export default function App() {
       return { ...tab, sections: reorderedSections };
     });
     setDraggedSectionId(null);
+    setDraggedBasket(null);
   };
 
   const addSymbolsToActiveWatchlist = (symbols: string[]) => {
@@ -2574,6 +3433,7 @@ export default function App() {
       };
     });
     setDraggedTicker(null);
+    setDraggedBasket(null);
   };
 
   const cycleWatchlistSort = (column: WatchlistColumnKey) => {
@@ -2614,6 +3474,7 @@ export default function App() {
               ...panel,
               symbol,
               watchlistTabId: undefined,
+              watchlistSectionId: undefined,
               comparisonSymbols: (panel.comparisonSymbols || []).filter(
                 (comparisonSymbol) => comparisonSymbol !== symbol
               ),
@@ -3349,15 +4210,30 @@ export default function App() {
     setPanels(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
   };
 
-  const handleSelectWatchlistTabForPanel = (panelId: string, tabId: string) => {
-    const tabSymbols = watchlistTabSymbolsById.get(tabId) || [];
+  const handleSelectWatchlistTargetForPanel = (panelId: string, targetValue: string) => {
+    const target = decodeWatchlistTargetValue(targetValue);
+    if (!target) return;
+    const tab = watchlistTabs.find((item) => item.id === target.tabId);
+    if (!tab) return;
+    const symbols = target.sectionId
+      ? getWatchlistSectionSymbols(tab, target.sectionId)
+      : getWatchlistTabSymbols(tab);
     setPanels((currentPanels) =>
       currentPanels.map((panel) =>
         panel.id === panelId
-          ? syncPanelToWatchlistTab(panel, tabId, tabSymbols)
+          ? syncPanelToWatchlistTarget(panel, target, symbols)
           : panel
       )
     );
+    setWatchlistTargetMenu(null);
+  };
+
+  const getWatchlistTargetLabelForPanel = (panel: ChartPanel): string => {
+    const tab = watchlistTabs.find((item) => item.id === panel.watchlistTabId);
+    if (!tab) return 'Sector / Basket';
+    if (!panel.watchlistSectionId) return tab.name;
+    const section = tab.sections.find((item) => item.id === panel.watchlistSectionId);
+    return section ? `${tab.name} / ${section.name}` : tab.name;
   };
 
   // Write custom indicator updates specifically for matching target symbol
@@ -3387,6 +4263,10 @@ export default function App() {
         basePrice: 0,
         dailyChangePct: 0,
       };
+      const displayTicker = {
+        ...normalizedTicker,
+        name: watchlistNameOverrides[normalizedTicker.symbol] || normalizedTicker.name,
+      };
       if (moomooRealTimeActive) {
         const expression = normalizeSymbolExpressionForStorage(normalizedTicker.symbol);
         if (expression) {
@@ -3398,7 +4278,7 @@ export default function App() {
           const expressionPrice = Number(expressionQuote?.price);
           const expressionChange = Number(expressionQuote?.changePct);
           return {
-            ...normalizedTicker,
+            ...displayTicker,
             currentPrice: Number.isFinite(expressionPrice) ? expressionPrice : null,
             computedChange: Number.isFinite(expressionChange) ? expressionChange : null,
           };
@@ -3407,7 +4287,7 @@ export default function App() {
         const quotePrice = Number(quote?.price);
         const quoteChange = Number(quote?.changePct);
         return {
-          ...normalizedTicker,
+          ...displayTicker,
           currentPrice: Number.isFinite(quotePrice) ? quotePrice : null,
           computedChange: Number.isFinite(quoteChange) ? quoteChange : null,
           marketCap: quote?.marketCap,
@@ -3421,16 +4301,79 @@ export default function App() {
         ? ((curPrice - initialPrice) / Math.abs(initialPrice)) * 100
         : normalizedTicker.dailyChangePct;
       return {
-        ...normalizedTicker,
+        ...displayTicker,
         currentPrice: Number.isFinite(curPrice) ? curPrice : null,
         computedChange: Number.isFinite(changePct) ? changePct : null,
       };
     });
-  }, [tickers, candlesCache, quoteCache, moomooRealTimeActive]);
+  }, [tickers, candlesCache, quoteCache, moomooRealTimeActive, watchlistNameOverrides]);
 
   const tickerStatsBySymbol = useMemo(() => {
     return new Map(liveTickerStats.map((ticker) => [ticker.symbol, ticker]));
   }, [liveTickerStats]);
+
+  const getDefaultWatchlistName = (symbol: string): string => {
+    const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+    return tickers.find((ticker) => ticker.symbol === normalizedSymbol)?.name
+      || quoteCache[normalizedSymbol]?.name
+      || formatWatchlistSymbol(normalizedSymbol);
+  };
+
+  const getWatchlistDisplayName = (symbol: string): string => {
+    const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+    return watchlistNameOverrides[normalizedSymbol]
+      || tickerStatsBySymbol.get(normalizedSymbol)?.name
+      || getDefaultWatchlistName(normalizedSymbol);
+  };
+
+  const openWatchlistNameEditor = (symbol: string, sectionId: string) => {
+    const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+    const defaultName = getDefaultWatchlistName(normalizedSymbol);
+    setWatchlistNameEditModal({
+      symbol: normalizedSymbol,
+      sectionId,
+      draftName: watchlistNameOverrides[normalizedSymbol] || defaultName,
+      defaultName,
+    });
+    setWatchlistContextMenu(null);
+  };
+
+  const saveWatchlistDisplayName = () => {
+    if (!watchlistNameEditModal) return;
+    const symbol = normalizeStoredSymbolValue(watchlistNameEditModal.symbol);
+    const nextName = watchlistNameEditModal.draftName.trim();
+    setWatchlistNameOverrides((current) => {
+      const next = { ...current };
+      if (!nextName || nextName === watchlistNameEditModal.defaultName) {
+        delete next[symbol];
+      } else {
+        next[symbol] = nextName;
+      }
+      return next;
+    });
+    setWatchlistNameEditModal(null);
+  };
+
+  const resetWatchlistDisplayName = (symbol: string) => {
+    const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+    setWatchlistNameOverrides((current) => {
+      if (!current[normalizedSymbol]) return current;
+      const next = { ...current };
+      delete next[normalizedSymbol];
+      return next;
+    });
+    setWatchlistNameEditModal(null);
+    setWatchlistContextMenu(null);
+  };
+
+  const createChartSymbolDisplayNames = (symbols: string[]): Record<string, string> => {
+    const names: Record<string, string> = {};
+    symbols.forEach((rawSymbol) => {
+      const symbol = normalizeStoredSymbolValue(rawSymbol);
+      if (symbol) names[symbol] = getWatchlistDisplayName(symbol);
+    });
+    return names;
+  };
 
   const headerTickerStats = useMemo(() => (
     headerTickerSymbols
@@ -3503,12 +4446,89 @@ export default function App() {
     });
     return next;
   }, [watchlistTabs]);
+  const activeWatchlistQuoteProgress = useMemo(() => {
+    const progressWatchlistTab = quoteFetchInFlight && quoteFetchTarget
+      ? watchlistTabs.find((tab) => tab.id === quoteFetchTarget.tabId) ?? activeWatchlistTab
+      : activeWatchlistTab;
+    const isQuoteResolved = (symbol: string) => {
+      const ticker = tickerStatsBySymbol.get(symbol);
+      const quote = quoteCache[symbol];
+      const currentPrice = Number(ticker?.currentPrice ?? quote?.price);
+      const computedChange = Number(ticker?.computedChange ?? quote?.changePct);
+      return Number.isFinite(currentPrice)
+        && currentPrice > 0
+        && Number.isFinite(computedChange);
+    };
+    const tabName = progressWatchlistTab?.name ?? 'ウォッチリスト';
+    const sectionProgresses = (progressWatchlistTab?.sections ?? []).map((section) => {
+      const symbols = getQuoteOperandSymbolsForWatchlistSymbols(section.symbols);
+      const total = symbols.length;
+      const fetched = symbols.filter(isQuoteResolved).length;
+      return {
+        id: section.id,
+        name: section.name,
+        symbols,
+        total,
+        fetched,
+        remaining: Math.max(0, total - fetched),
+      };
+    });
+    const tabSymbols = Array.from(new Set(sectionProgresses.flatMap((section) => section.symbols)));
+    const total = tabSymbols.length;
+    const fetched = tabSymbols.filter(isQuoteResolved).length;
+    const remaining = Math.max(0, total - fetched);
+    const currentSection = sectionProgresses.find((section) => section.remaining > 0)
+      ?? sectionProgresses[0]
+      ?? null;
+    const scopeTotal = currentSection?.total ?? total;
+    const scopeFetched = currentSection?.fetched ?? fetched;
+    const scopeRemaining = currentSection?.remaining ?? remaining;
+    const status = total === 0
+      ? 'idle'
+      : quoteFetchInFlight
+        ? 'loading'
+        : remaining === 0
+          ? 'done'
+          : 'stale';
+    const scopePhase = scopeTotal === 0
+      ? '1D対象'
+      : quoteFetchInFlight
+        ? '1D取得中'
+        : scopeRemaining === 0
+          ? '1D完了'
+          : '1D未取得';
+    const tabPhase = total === 0
+      ? '1D対象'
+      : quoteFetchInFlight
+        ? '1D取得中'
+        : remaining === 0
+          ? '1D完了'
+          : '1D未取得';
+    const scopeLabel = currentSection ? `${tabName} / ${currentSection.name}` : tabName;
+    return {
+      total,
+      fetched,
+      remaining,
+      scopeLabel,
+      scopeTotal,
+      scopeFetched,
+      scopeRemaining,
+      status,
+      text: `${scopePhase} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}`,
+      title: `${tabName} タブ合計 ${tabPhase} ${fetched}/${total} 残${remaining}${
+        currentSection ? ` / 現在 ${currentSection.name} ${scopeFetched}/${scopeTotal} 残${scopeRemaining}` : ''
+      }`,
+    };
+  }, [activeWatchlistTab, quoteCache, quoteFetchInFlight, quoteFetchTarget, tickerStatsBySymbol, watchlistTabs]);
   const activeWatchlistTabIndex = watchlistTabs.findIndex((tab) => tab.id === activeWatchlistTabId);
   const canJumpToFirstWatchlistTab = watchlistTabs.length > 1 && activeWatchlistTabIndex > 0;
   const canJumpToLastWatchlistTab =
     watchlistTabs.length > 1 &&
     activeWatchlistTabIndex >= 0 &&
     activeWatchlistTabIndex < watchlistTabs.length - 1;
+  const watchlistTabMenuFetchMode = watchlistTabMenu
+    ? getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, watchlistTabMenu.tabId)
+    : 'manual';
 
   useEffect(() => {
     setPanels((currentPanels) => {
@@ -3516,15 +4536,23 @@ export default function App() {
       const nextPanels = currentPanels.map((panel) => {
         if (!panel.watchlistTabId) return panel;
 
-        if (!watchlistTabSymbolsById.has(panel.watchlistTabId)) {
+        const tab = watchlistTabs.find((item) => item.id === panel.watchlistTabId);
+        if (!tab) {
           changed = true;
-          return { ...panel, watchlistTabId: undefined };
+          return { ...panel, watchlistTabId: undefined, watchlistSectionId: undefined };
         }
 
-        const syncedPanel = syncPanelToWatchlistTab(
+        const validSectionId = panel.watchlistSectionId
+          && tab.sections.some((section) => section.id === panel.watchlistSectionId)
+          ? panel.watchlistSectionId
+          : undefined;
+        const symbols = validSectionId
+          ? getWatchlistSectionSymbols(tab, validSectionId)
+          : getWatchlistTabSymbols(tab);
+        const syncedPanel = syncPanelToWatchlistTarget(
           panel,
-          panel.watchlistTabId,
-          watchlistTabSymbolsById.get(panel.watchlistTabId) || [],
+          { tabId: panel.watchlistTabId, sectionId: validSectionId },
+          symbols,
         );
         if (!hasWatchlistPanelTargetChanged(panel, syncedPanel)) return panel;
         changed = true;
@@ -3532,7 +4560,7 @@ export default function App() {
       });
       return changed ? nextPanels : currentPanels;
     });
-  }, [watchlistTabSymbolsById]);
+  }, [watchlistTabs]);
 
   const watchlistLayout = useMemo(
     () => calculateWatchlistLayoutColumnWidths(
@@ -3577,7 +4605,7 @@ export default function App() {
           if (!normalizedSymbol) return null;
           return tickerStatsBySymbol.get(normalizedSymbol) || {
             symbol: normalizedSymbol,
-            name: formatWatchlistSymbol(normalizedSymbol),
+            name: watchlistNameOverrides[normalizedSymbol] || formatWatchlistSymbol(normalizedSymbol),
             basePrice: 0,
             dailyChangePct: 0,
             currentPrice: null,
@@ -3590,7 +4618,7 @@ export default function App() {
         rows: watchlistSort.column ? [...rows].sort(compareRows) : rows,
       };
     });
-  }, [activeWatchlistTab, tickerStatsBySymbol, watchlistSort]);
+  }, [activeWatchlistTab, tickerStatsBySymbol, watchlistNameOverrides, watchlistSort]);
 
   const getComparableSymbolsForPanel = (
     panel: ChartPanel,
@@ -3600,7 +4628,9 @@ export default function App() {
     return Array.from(new Set(symbols)).filter((symbol) => {
       if (!symbol || symbol === panel.symbol || currentComparisons.has(symbol)) return false;
       const ticker = tickerStatsBySymbol.get(symbol);
-      return !moomooRealTimeActive || ticker?.currentPrice !== null;
+      const currentPrice = Number(ticker?.currentPrice);
+      return !moomooRealTimeActive
+        || (ticker?.currentPrice !== null && Number.isFinite(currentPrice) && currentPrice > 0);
     });
   };
 
@@ -3620,6 +4650,7 @@ export default function App() {
   };
 
   const getDraggedTickerSymbols = () => {
+    if (draggedBasket?.symbols.length) return draggedBasket.symbols;
     if (!draggedTicker) return [];
     return draggedTicker.symbols.length > 0 ? draggedTicker.symbols : [draggedTicker.symbol];
   };
@@ -3683,6 +4714,9 @@ export default function App() {
         showRsi={!panelExpression && valueChainChartState.showRsi}
         showMacd={!panelExpression && valueChainChartState.showMacd}
         comparisonSymbols={comparableSymbols}
+        comparisonLabelFontSize={comparisonLabelFontSize}
+        onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
+        symbolDisplayNames={createChartSymbolDisplayNames([symbol, ...comparableSymbols])}
         comparisonCandles={
           comparableSymbols.reduce((acc, comparisonSymbol) => {
             const candles = resolveCandlesForSymbol(
@@ -3944,6 +4978,7 @@ export default function App() {
           renderIndicatorSettings={renderValueChainIndicatorSettings}
           onOpenTickerInChart={openValueChainTickerInChart}
           onAddSymbolsToWatchlist={addSymbolsToActiveWatchlist}
+          onSyncValueChainToWatchlist={(chain) => syncChainToWatchlist(chain, 'value-chain', { selectFirstTab: true })}
           onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : appView === 'macro-flow' ? (
@@ -3963,6 +4998,7 @@ export default function App() {
           }}
           renderTickerChart={renderValueChainTickerChart}
           renderIndicatorSettings={renderValueChainIndicatorSettings}
+          onSyncBasketsToWatchlist={(chain) => syncChainToWatchlist(chain, 'value-chain', { selectFirstTab: true })}
           onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : (
@@ -4001,17 +5037,19 @@ export default function App() {
                             height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
                           onDragOver={(event) => {
-                            if (draggedTicker && !isTvEmbed) {
+                            if ((draggedTicker || draggedBasket) && !isTvEmbed) {
                               event.preventDefault();
                               event.dataTransfer.dropEffect = 'copy';
                             }
                           }}
                           onDrop={(event) => {
-                            if (!draggedTicker || isTvEmbed) return;
+                            if ((!draggedTicker && !draggedBasket) || isTvEmbed) return;
                             event.preventDefault();
                             event.stopPropagation();
                             addComparisonSymbolsToPanel(panel, getDraggedTickerSymbols());
                             setDraggedTicker(null);
+                            setDraggedBasket(null);
+                            setDraggedSectionId(null);
                           }}
                           className="w-full flex flex-col shrink-0"
                         >
@@ -4033,7 +5071,9 @@ export default function App() {
                                     .filter(t => t.symbol !== panel.symbol)
                                     .map(t => {
                                       const isAdded = (panel.comparisonSymbols || []).includes(t.symbol);
-                                      const canCompare = !moomooRealTimeActive || t.currentPrice !== null;
+                                      const currentPrice = Number(t.currentPrice);
+                                      const canCompare = !moomooRealTimeActive
+                                        || (t.currentPrice !== null && Number.isFinite(currentPrice) && currentPrice > 0);
                                       return (
                                         <label
                                           key={t.symbol}
@@ -4078,20 +5118,131 @@ export default function App() {
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
                                 {/* タブ選択で、そのリスト内の銘柄を比較表示に展開する */}
-                                <select
-                                  id={`select-watchlist-tab-${panel.id}`}
-                                  value={panel.watchlistTabId || ''}
-                                  onChange={(event) => handleSelectWatchlistTabForPanel(panel.id, event.target.value)}
-                                  className="max-w-[190px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 py-0.5 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-                                  title="比較表示するタブを選択"
-                                >
-                                  <option value="" disabled>リストを選択</option>
-                                  {watchlistTabs.map((tab) => (
-                                    <option key={tab.id} value={tab.id}>
-                                      {tab.name} ({watchlistTabSymbolsById.get(tab.id)?.length ?? 0})
-                                    </option>
-                                  ))}
-                                </select>
+                                <div className="relative shrink-0">
+                                  <button
+                                    id={`select-watchlist-tab-${panel.id}`}
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      const rect = event.currentTarget.getBoundingClientRect();
+                                      const menuWidth = 320;
+                                      const x = Math.min(
+                                        Math.max(8, rect.left),
+                                        Math.max(8, window.innerWidth - menuWidth - 8),
+                                      );
+                                      const y = Math.min(
+                                        rect.bottom + 4,
+                                        Math.max(8, window.innerHeight - 260),
+                                      );
+                                      setWatchlistTargetMenu((current) => (
+                                        current?.panelId === panel.id
+                                          ? null
+                                          : {
+                                              panelId: panel.id,
+                                              x,
+                                              y,
+                                              width: menuWidth,
+                                              maxHeight: Math.max(180, window.innerHeight - y - 12),
+                                            }
+                                      ));
+                                    }}
+                                    className="h-7 max-w-[230px] min-w-[150px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer flex items-center justify-between gap-2"
+                                    title="比較表示するSectorまたはBasketを選択"
+                                  >
+                                    <span className="min-w-0 truncate">{getWatchlistTargetLabelForPanel(panel)}</span>
+                                    <ChevronDown className="w-3.5 h-3.5 shrink-0 text-gray-400" />
+                                  </button>
+                                  {watchlistTargetMenu?.panelId === panel.id && (
+                                    <div
+                                      className="fixed z-[120] overflow-y-auto border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+                                      style={{
+                                        left: watchlistTargetMenu.x,
+                                        top: watchlistTargetMenu.y,
+                                        width: watchlistTargetMenu.width,
+                                        maxHeight: watchlistTargetMenu.maxHeight,
+                                      }}
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      {watchlistTabs.map((tab) => {
+                                        const tabSymbols = watchlistTabSymbolsById.get(tab.id) ?? [];
+                                        const tabSelected = panel.watchlistTabId === tab.id && !panel.watchlistSectionId;
+                                        return (
+                                          <div key={tab.id} className="border-b border-[#1e1e1e] last:border-b-0">
+                                            <div
+                                              className={`group flex items-center gap-1 px-1.5 py-1 ${
+                                                tabSelected ? 'bg-emerald-950/60 text-emerald-200' : 'hover:bg-[#171717]'
+                                              }`}
+                                            >
+                                              <button
+                                                type="button"
+                                                onClick={() => handleSelectWatchlistTargetForPanel(
+                                                  panel.id,
+                                                  encodeWatchlistTargetValue(tab.id),
+                                                )}
+                                                className="min-w-0 flex-1 text-left"
+                                                title={tab.name}
+                                              >
+                                                <div className="truncate text-[11px] font-bold text-white">{tab.name}</div>
+                                                <div className="truncate text-[9px] text-gray-500">Sector全体</div>
+                                              </button>
+                                              <span className="w-9 shrink-0 text-right font-mono text-[9px] text-emerald-300">
+                                                {tabSymbols.length}
+                                              </span>
+                                              <button
+                                                type="button"
+                                                onClick={(event) => handleDeleteWatchlistTargetFromMenu(event, tab.id)}
+                                                disabled={watchlistTabs.length <= 1}
+                                                className="h-5 w-5 shrink-0 flex items-center justify-center rounded text-gray-600 opacity-0 transition group-hover:opacity-100 hover:bg-red-950/70 hover:text-red-200 disabled:opacity-20 disabled:hover:bg-transparent disabled:hover:text-gray-600"
+                                                title="Sectorを削除"
+                                                aria-label={`${tab.name}を削除`}
+                                              >
+                                                <X className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                            {tab.sections.map((section) => {
+                                              const sectionSelected =
+                                                panel.watchlistTabId === tab.id
+                                                && panel.watchlistSectionId === section.id;
+                                              return (
+                                                <div
+                                                  key={section.id}
+                                                  className={`group flex items-center gap-1 px-1.5 py-1 pl-5 ${
+                                                    sectionSelected ? 'bg-emerald-950/45 text-emerald-200' : 'hover:bg-[#141414]'
+                                                  }`}
+                                                >
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleSelectWatchlistTargetForPanel(
+                                                      panel.id,
+                                                      encodeWatchlistTargetValue(tab.id, section.id),
+                                                    )}
+                                                    className="min-w-0 flex-1 text-left"
+                                                    title={`${tab.name} / ${section.name}`}
+                                                  >
+                                                    <div className="truncate text-[10px] font-bold text-gray-100">{section.name}</div>
+                                                    <div className="truncate text-[9px] text-gray-600">{tab.name}</div>
+                                                  </button>
+                                                  <span className="w-9 shrink-0 text-right font-mono text-[9px] text-gray-400">
+                                                    {section.symbols.length}
+                                                  </span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={(event) => handleDeleteWatchlistTargetFromMenu(event, tab.id, section.id)}
+                                                    className="h-5 w-5 shrink-0 flex items-center justify-center rounded text-gray-600 opacity-0 transition group-hover:opacity-100 hover:bg-red-950/70 hover:text-red-200"
+                                                    title="Basketを削除"
+                                                    aria-label={`${section.name}を削除`}
+                                                  >
+                                                    <X className="w-3 h-3" />
+                                                  </button>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
 
                                 {/* ACTIVE OVERLAYS BADGES */}
                                 {false && panel.comparisonSymbols && panel.comparisonSymbols.length > 0 && (
@@ -4255,6 +5406,9 @@ export default function App() {
                                   showRsi={!panelExpression && panel.showRsi}
                                   showMacd={!panelExpression && panel.showMacd}
                                   comparisonSymbols={panel.comparisonSymbols || []}
+                                  comparisonLabelFontSize={comparisonLabelFontSize}
+                                  onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
+                                  symbolDisplayNames={createChartSymbolDisplayNames([panel.symbol, ...(panel.comparisonSymbols || [])])}
                                   comparisonCandles={
                                     (panel.comparisonSymbols || []).reduce((acc, compSym) => {
                                       const candles = resolveCandlesForSymbol(
@@ -4335,6 +5489,46 @@ export default function App() {
 
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
           <div className="shrink-0 p-2 border-b border-[#242424] relative">
+            <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] font-bold">
+              <span
+                className={`min-w-0 truncate ${
+                  quoteFetchInFlight ? 'text-cyan-300' : 'text-gray-500'
+                }`}
+                title={activeWatchlistQuoteProgress.title}
+              >
+                {quoteFetchInFlight
+                  ? `${activeWatchlistQuoteProgress.scopeLabel} を更新中`
+                  : ''}
+              </span>
+              <div className="shrink-0 flex items-center gap-1">
+                <span
+                  className={`font-mono ${
+                    activeWatchlistQuoteProgress.status === 'done'
+                      ? 'text-emerald-400'
+                      : activeWatchlistQuoteProgress.status === 'loading'
+                        ? 'text-cyan-300'
+                        : activeWatchlistQuoteProgress.status === 'stale'
+                          ? 'text-amber-300'
+                          : 'text-gray-600'
+                  }`}
+                  title={activeWatchlistQuoteProgress.title}
+                >
+                  {activeWatchlistQuoteProgress.text}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRefreshWatchlistQuotes}
+                  className={`h-4 px-1.5 border text-[10px] leading-none font-bold transition ${
+                    quoteFetchInFlight
+                      ? 'border-cyan-700 bg-cyan-950/50 text-cyan-200'
+                      : 'border-[#303030] bg-[#101010] text-gray-300 hover:text-white hover:border-emerald-500 hover:bg-emerald-950/40'
+                  }`}
+                  title="ウォッチリストの価格データを再取得"
+                >
+                  {quoteFetchInFlight ? '更新中' : '更新'}
+                </button>
+              </div>
+            </div>
             <div className="grid grid-cols-4 gap-1 bg-[#080808] p-1 border border-[#242424]">
               <div className="relative">
                 <button
@@ -4416,7 +5610,10 @@ export default function App() {
 
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
           {sidebarView === 'watchlist' && (
-          <div className="flex-1 min-h-0 bg-[#0b0b0b] overflow-hidden flex flex-col relative">
+          <div
+            className="flex-1 min-h-0 bg-[#0b0b0b] overflow-hidden flex flex-col relative"
+            onContextMenu={openWatchlistEmptyMenu}
+          >
             <div className="h-8 shrink-0 border-b border-[#242424] bg-[#080808] flex items-center gap-1 px-1 overflow-visible relative">
               <button
                 type="button"
@@ -4441,20 +5638,35 @@ export default function App() {
               <div className="flex items-end gap-0.5 h-full min-w-max pr-1.5">
                 {watchlistTabs.map((tab) => {
                   const active = tab.id === activeWatchlistTabId;
+                  const tabFetchMode = getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tab.id);
+                  const isAutoFetchTab = tabFetchMode === 'auto';
+                  const tabToneClass = active
+                    ? isAutoFetchTab
+                      ? 'bg-emerald-800/90 border-emerald-400 text-white font-bold shadow-[inset_0_2px_0_rgba(16,185,129,0.85)]'
+                      : 'bg-[#0b0b0b] border-[#343434] text-white font-bold'
+                    : isAutoFetchTab
+                      ? 'bg-emerald-950/70 border-emerald-700 text-emerald-100 hover:bg-emerald-900/80 hover:text-white'
+                      : 'bg-[#070707] border-[#202020] text-gray-500 hover:text-gray-200';
                   return (
                     <div
                       key={tab.id}
+                      data-watchlist-menu-target="tab"
+                      data-watchlist-tab-id={tab.id}
                       ref={(element) => {
                         watchlistTabRefs.current[tab.id] = element;
                       }}
-                      className={`h-7 shrink-0 min-w-[44px] max-w-28 px-2 border border-b-0 flex items-center transition-all ${
-                        active
-                          ? 'bg-[#0b0b0b] border-[#343434] text-white font-bold'
-                          : 'bg-[#070707] border-[#202020] text-gray-500 hover:text-gray-200'
+                      draggable={false}
+                      className={`h-7 shrink-0 min-w-[44px] max-w-28 px-2 border border-b-0 flex items-center transition-all cursor-grab active:cursor-grabbing ${tabToneClass} ${
+                        draggedWatchlistTabId === tab.id ? 'opacity-45' : ''
                       }`}
                       style={{ width: 'auto' }}
                       onDoubleClick={() => setEditingTabId(tab.id)}
                       onContextMenu={(event) => handleWatchlistTabContextMenu(event, tab.id)}
+                      onPointerDown={(event) => handleWatchlistTabPointerDown(event, tab.id)}
+                      onDragStart={(event) => handleWatchlistTabDragStart(event, tab)}
+                      onDragEnd={() => setDraggedWatchlistTabId(null)}
+                      onDragOver={(event) => handleWatchlistTabDragOver(event, tab.id)}
+                      onDrop={(event) => handleWatchlistTabDrop(event, tab.id, 'x')}
                     >
                       {editingTabId === tab.id ? (
                         <input
@@ -4470,9 +5682,27 @@ export default function App() {
                       ) : (
                         <button
                           type="button"
-                          onClick={() => selectWatchlistTab(tab.id)}
+                          draggable={false}
+                          onDragStart={(event) => {
+                            event.stopPropagation();
+                            handleWatchlistTabDragStart(event, tab);
+                          }}
+                          onDragEnd={() => setDraggedWatchlistTabId(null)}
+                          onDragOver={(event) => handleWatchlistTabDragOver(event, tab.id)}
+                          onDrop={(event) => handleWatchlistTabDrop(event, tab.id, 'x')}
+                          onPointerDown={(event) => {
+                            event.stopPropagation();
+                            handleWatchlistTabPointerDown(event, tab.id);
+                          }}
+                          onClick={(event) => {
+                            if (watchlistTabSuppressClickRef.current) {
+                              event.preventDefault();
+                              return;
+                            }
+                            selectWatchlistTab(tab.id);
+                          }}
                           className="w-full min-w-0 text-[10px] text-left truncate cursor-pointer"
-                          title={tab.name}
+                          title={`${tab.name} / ${tabFetchMode === 'auto' ? '自動取得' : '手動取得'}`}
                         >
                           {tab.name}
                         </button>
@@ -4504,7 +5734,8 @@ export default function App() {
                   <div className="relative">
                     <button
                       type="button"
-                      onClick={(e) => { e.stopPropagation(); setTabsDropdownOpen((v) => !v); }}
+                      onMouseDown={toggleTabsDropdown}
+                      onClick={(event) => event.stopPropagation()}
                       className={`w-7 h-7 border border-b-0 border-[#1e2232] flex items-center justify-center cursor-pointer transition-colors ${
                         tabsDropdownOpen ? 'text-white bg-[#171717]' : 'text-gray-400 hover:text-white hover:bg-[#171717]'
                       }`}
@@ -4514,21 +5745,50 @@ export default function App() {
                     </button>
                     {tabsDropdownOpen && (
                       <div
-                        className="absolute right-0 top-full w-40 bg-[#080808] border border-[#343434] py-1 shadow-2xl z-50"
+                        className="fixed bg-[#080808] border border-[#343434] py-1 shadow-2xl z-50 max-h-[62vh] overflow-y-auto"
+                        style={{
+                          left: tabsDropdownAnchor?.x ?? 8,
+                          top: tabsDropdownAnchor?.y ?? 48,
+                          width: tabsDropdownAnchor?.width ?? 192,
+                        }}
                         onClick={(e) => e.stopPropagation()}
+                        onContextMenu={(event) => event.stopPropagation()}
                       >
-                        {watchlistTabs.map((t) => (
-                          <button
-                            key={t.id}
-                            type="button"
-                            onClick={() => { selectWatchlistTab(t.id); setTabsDropdownOpen(false); }}
-                            className={`w-full text-left px-2.5 py-1.5 text-[10px] hover:bg-[#171717] truncate cursor-pointer block ${
-                              t.id === activeWatchlistTabId ? 'text-emerald-400 font-bold bg-[#10251f]' : 'text-gray-300'
-                            }`}
-                          >
-                            {t.name}
-                          </button>
-                        ))}
+                        {watchlistTabs.map((t) => {
+                          const active = t.id === activeWatchlistTabId;
+                          const tabFetchMode = getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, t.id);
+                          const isAutoFetchTab = tabFetchMode === 'auto';
+                          const dropdownToneClass = active
+                            ? isAutoFetchTab
+                              ? 'text-white font-bold bg-emerald-800/80'
+                              : 'text-emerald-400 font-bold bg-[#10251f]'
+                            : isAutoFetchTab
+                              ? 'text-emerald-100 bg-emerald-950/60 hover:bg-emerald-900/70'
+                              : 'text-gray-300 hover:bg-[#171717]';
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              draggable
+                              onDragStart={(event) => handleWatchlistTabDragStart(event, t)}
+                              onDragEnd={() => setDraggedWatchlistTabId(null)}
+                              onDragOver={(event) => handleWatchlistTabDragOver(event, t.id)}
+                              onDrop={(event) => handleWatchlistTabDrop(event, t.id, 'y')}
+                              onContextMenu={(event) => handleWatchlistTabContextMenu(event, t.id)}
+                              onClick={() => {
+                                selectWatchlistTab(t.id);
+                                setTabsDropdownOpen(false);
+                                setTabsDropdownAnchor(null);
+                              }}
+                              className={`w-full text-left px-2.5 py-1.5 text-[10px] truncate cursor-grab active:cursor-grabbing block ${dropdownToneClass} ${
+                                draggedWatchlistTabId === t.id ? 'opacity-45' : ''
+                              }`}
+                              title={`${t.name} / ${tabFetchMode === 'auto' ? '自動取得' : '手動取得'}`}
+                            >
+                              {t.name}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -4600,10 +5860,18 @@ export default function App() {
 
             {watchlistTabMenu && (
               <div
-                className="fixed z-50 w-36 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: watchlistTabMenu.x, top: watchlistTabMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
+                <button
+                  type="button"
+                  onClick={() => toggleWatchlistTabQuoteFetchMode(watchlistTabMenu.tabId)}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717] text-cyan-200"
+                >
+                  {watchlistTabMenuFetchMode === 'auto' ? '手動取得に切り替え' : '自動取得に切り替え'}
+                </button>
+                <div className="my-1 h-px bg-[#242424]" />
                 <button
                   type="button"
                   onClick={() => {
@@ -4641,6 +5909,7 @@ export default function App() {
                 style={{ gridTemplateColumns: watchlistGridTemplate }}
                 onContextMenu={(event) => {
                   event.preventDefault();
+                  event.stopPropagation();
                   setWatchlistHeaderMenu({ x: event.clientX, y: event.clientY });
                 }}
               >
@@ -4789,7 +6058,10 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+            <div
+              className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+              onContextMenu={openWatchlistEmptyMenu}
+            >
               <div className="w-full min-w-0">
                 {visibleWatchlistSections.map((section) => (
                   <div
@@ -4802,13 +6074,21 @@ export default function App() {
                     }}
                   >
                     <div
+                      data-watchlist-menu-target="section"
                       draggable={editingSectionId !== section.id}
                       onDragStart={(event) => {
+                        const basketSymbols = section.symbols.map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean);
                         event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', basketSymbols.join(','));
+                        event.dataTransfer.setData('application/x-mooview-symbols', JSON.stringify(basketSymbols));
                         setDraggedTicker(null);
                         setDraggedSectionId(section.id);
+                        setDraggedBasket({ sectionId: section.id, symbols: basketSymbols });
                       }}
-                      onDragEnd={() => setDraggedSectionId(null)}
+                      onDragEnd={() => {
+                        setDraggedSectionId(null);
+                        setDraggedBasket(null);
+                      }}
                       onDragOver={(event) => {
                         if (draggedSectionId) {
                           event.preventDefault();
@@ -4821,6 +6101,7 @@ export default function App() {
                       }`}
                       onContextMenu={(event) => {
                         event.preventDefault();
+                        event.stopPropagation();
                         setSectionMenu({ sectionId: section.id, x: event.clientX, y: event.clientY });
                       }}
                     >
@@ -4862,7 +6143,11 @@ export default function App() {
                     {!section.collapsed && section.rows.map((ticker) => {
                       const currentPrice = Number(ticker.currentPrice);
                       const computedChange = Number(ticker.computedChange);
-                      const hasQuote = Number.isFinite(currentPrice) && Number.isFinite(computedChange);
+                      const hasQuote = ticker.currentPrice !== null
+                        && ticker.computedChange !== null
+                        && Number.isFinite(currentPrice)
+                        && currentPrice > 0
+                        && Number.isFinite(computedChange);
                       const isPositive = hasQuote && computedChange >= 0;
                       const isSelectedPrimary = panels[0]?.symbol === ticker.symbol;
                       const isMultiSelected = selectedSymbols.includes(ticker.symbol);
@@ -4919,6 +6204,7 @@ export default function App() {
 
                       return (
                         <div
+                          data-watchlist-menu-target="ticker"
                           key={`${section.id}-${ticker.symbol}`}
                           draggable
                           onDragStart={(event) => {
@@ -4971,7 +6257,7 @@ export default function App() {
                           </span>
                           {watchlistLayout.showPrice && (
                             <span className="text-right font-mono text-[10px] text-gray-200 truncate">
-                              {formatTickerPrice(ticker.symbol, currentPrice)}
+                              {hasQuote ? formatTickerPrice(ticker.symbol, currentPrice) : 'N/A'}
                             </span>
                           )}
                           <button
@@ -4996,10 +6282,36 @@ export default function App() {
 
             {watchlistContextMenu && (
               <div
-                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-48 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: watchlistContextMenu.x, top: watchlistContextMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (watchlistContextMenu.symbols.length === 1) {
+                      openWatchlistNameEditor(watchlistContextMenu.symbols[0], watchlistContextMenu.sectionId);
+                    }
+                  }}
+                  disabled={watchlistContextMenu.symbols.length !== 1}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  表示名を変更
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (watchlistContextMenu.symbols.length === 1) {
+                      resetWatchlistDisplayName(watchlistContextMenu.symbols[0]);
+                    }
+                  }}
+                  disabled={watchlistContextMenu.symbols.length !== 1}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  デフォルト名に戻す
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -5011,6 +6323,63 @@ export default function App() {
                   <span>選択した銘柄を削除</span>
                   <span className="bg-red-950/60 px-1 rounded text-[8px] font-mono text-red-200">
                     {watchlistContextMenu.symbols.length}
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {watchlistEmptyMenu && (
+              <div
+                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                style={{ left: watchlistEmptyMenu.x, top: watchlistEmptyMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleAddWatchlistSection();
+                    setWatchlistEmptyMenu(null);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717] flex items-center gap-2"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  バスケット追加
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTickerSearchOpen(true);
+                    setTickerSearchError(null);
+                    setTickerSearchCandidates([]);
+                    setWatchlistEmptyMenu(null);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-left hover:bg-[#171717] flex items-center gap-2"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  個別銘柄追加
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateActiveWatchlistTab((tab) => ({
+                      ...tab,
+                      sections: tab.sections.map((section) => ({
+                        ...section,
+                        symbols: section.symbols.filter((symbol) => !selectedSymbols.includes(symbol)),
+                      })),
+                    }));
+                    setSelectedSymbols([]);
+                    setWatchlistEmptyMenu(null);
+                  }}
+                  disabled={selectedSymbols.length === 0}
+                  className="w-full px-2.5 py-1.5 text-left text-red-300 hover:bg-red-950/30 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Trash2 className="w-3.5 h-3.5" />
+                    個別銘柄削除
+                  </span>
+                  <span className="bg-red-950/60 px-1 rounded text-[8px] font-mono text-red-200">
+                    {selectedSymbols.length}
                   </span>
                 </button>
               </div>
@@ -5051,6 +6420,80 @@ export default function App() {
                 >
                   セクション削除
                 </button>
+              </div>
+            )}
+
+            {watchlistNameEditModal && (
+              <div
+                className="fixed inset-0 z-[80] bg-black/55 flex items-center justify-center px-4"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) setWatchlistNameEditModal(null);
+                }}
+              >
+                <div
+                  className="w-full max-w-sm border border-[#343434] bg-[#080808] shadow-2xl p-4 text-xs text-gray-200"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3 border-b border-[#242424] pb-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white">銘柄表示名を変更</div>
+                      <div className="mt-1 font-mono text-[10px] text-gray-500 truncate">
+                        {formatWatchlistSymbol(watchlistNameEditModal.symbol)}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setWatchlistNameEditModal(null)}
+                      className="h-7 w-7 flex items-center justify-center text-gray-500 hover:text-white hover:bg-[#171717]"
+                      aria-label="閉じる"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <label className="mt-3 block text-[10px] text-gray-500">
+                    表示名
+                    <input
+                      value={watchlistNameEditModal.draftName}
+                      onChange={(event) => setWatchlistNameEditModal((current) => (
+                        current ? { ...current, draftName: event.target.value } : current
+                      ))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') saveWatchlistDisplayName();
+                      }}
+                      className="mt-1 h-9 w-full bg-[#121212] border border-[#303030] text-white text-xs px-2 outline-none focus:border-emerald-500"
+                      autoFocus
+                    />
+                  </label>
+                  <div className="mt-2 text-[10px] text-gray-500">
+                    Moomoo登録名: <span className="text-gray-300">{watchlistNameEditModal.defaultName}</span>
+                  </div>
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => resetWatchlistDisplayName(watchlistNameEditModal.symbol)}
+                      className="h-8 px-2.5 border border-[#303030] text-gray-300 hover:text-white hover:bg-[#171717] flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      デフォルトに戻す
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setWatchlistNameEditModal(null)}
+                        className="h-8 px-3 border border-[#303030] text-gray-400 hover:text-white hover:bg-[#171717]"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="button"
+                        onClick={saveWatchlistDisplayName}
+                        className="h-8 px-3 bg-emerald-600 text-white font-bold hover:bg-emerald-500"
+                      >
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 

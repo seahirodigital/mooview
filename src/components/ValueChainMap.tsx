@@ -115,12 +115,14 @@ interface ValueChainMapProps {
     symbol: string;
     comparisonSymbols?: string[];
     onOpenIndicatorSettings?: () => void;
+    onRemoveComparisonSymbol?: (symbol: string) => void;
     focusDate?: string;
     focusDateActive?: boolean;
   }) => React.ReactNode;
   renderIndicatorSettings: (symbol: string) => React.ReactNode;
   onOpenTickerInChart: (symbol: string) => void;
   onAddSymbolsToWatchlist: (symbols: string[]) => void;
+  onSyncValueChainToWatchlist?: (chain: ValueChainData) => void;
   onChartSymbolsChange: (symbols: string[]) => void;
 }
 
@@ -1128,6 +1130,7 @@ export function ValueChainMap({
   renderIndicatorSettings,
   onOpenTickerInChart,
   onAddSymbolsToWatchlist,
+  onSyncValueChainToWatchlist,
   onChartSymbolsChange,
 }: ValueChainMapProps) {
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -2171,6 +2174,7 @@ export function ValueChainMap({
       }
       setChain(importedChain);
     }
+    onSyncValueChainToWatchlist?.(importedChain);
     setImportDecisionModal(null);
   };
 
@@ -4238,7 +4242,7 @@ export function ValueChainMap({
                 )}
               </div>
 
-              {sidePanelComparisonSymbols.length > 0 && (
+              {false && sidePanelComparisonSymbols.length > 0 && (
                 <div className="min-w-0 flex items-center gap-1 overflow-x-auto scrollbar-none">
                   {sidePanelComparisonSymbols.map((symbol) => (
                     <span
@@ -4351,6 +4355,7 @@ export function ValueChainMap({
               renderTickerChart({
                 symbol: sidePanelPrimarySymbol,
                 comparisonSymbols: sidePanelComparisonSymbols,
+                onRemoveComparisonSymbol: (symbol) => setSelectedSymbols((current) => current.filter((item) => item !== symbol)),
                 focusDate: displayDate,
                 focusDateActive: dateSliderDragging,
               })
@@ -4361,7 +4366,7 @@ export function ValueChainMap({
             )}
           </div>
 
-          {comparisonPanelOpen && selectedSymbols.length > 0 && (
+          {false && comparisonPanelOpen && selectedSymbols.length > 0 && (
             <div className="max-h-36 shrink-0 overflow-y-auto border-t border-[#242424] bg-[#080808] p-2 space-y-1">
               {selectedSymbols.map((symbol) => {
                 const stock = chain.groups.flatMap((group) => group.stocks).find((item) => item.symbol === symbol);

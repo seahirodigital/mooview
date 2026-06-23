@@ -42,6 +42,8 @@ export interface Candle {
 export interface ChartPanel {
   id: string;
   symbol: string;
+  watchlistTabId?: string;
+  watchlistSectionId?: string;
   timeframe: Timeframe;
   zoomFactor: number; // e.g. how many pixels per candle, from 2 to 40
   scrollOffsetPct: number; // scroll percentage (0=right-most/latest, 100=left-most/oldest)

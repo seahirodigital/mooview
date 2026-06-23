@@ -7,7 +7,7 @@ import {
   calculateRSI, 
   calculateMACD 
 } from '../indicators';
-import { Plus, Minus, RotateCcw } from 'lucide-react';
+import { List, Minus, Plus, RotateCcw, X } from 'lucide-react';
 import { getSeriesColor } from '../chartSeriesColors';
 
 interface InteractiveCustomChartProps {
@@ -24,6 +24,9 @@ interface InteractiveCustomChartProps {
   showMacd: boolean;
   comparisonSymbols?: string[];
   comparisonCandles?: Record<string, Candle[]>;
+  comparisonLabelFontSize?: number;
+  onComparisonLabelFontSizeChange?: (fontSize: number) => void;
+  symbolDisplayNames?: Record<string, string>;
   emptyMessage?: string;
   priceScale: number;
   setPriceScale: (scale: number) => void;
@@ -34,6 +37,7 @@ interface InteractiveCustomChartProps {
   macdHeightPct: number;
   setMacdHeightPct: (pct: number) => void;
   onOpenIndicatorSettings?: () => void;
+  onRemoveComparisonSymbol?: (symbol: string) => void;
   focusDate?: string;
   focusDateActive?: boolean;
   allowNegativeValues?: boolean;
@@ -87,6 +91,20 @@ function formatSignedPercent(value: number): string {
 
 function compactAxisSymbol(symbol: string): string {
   return symbol.length > 8 ? `${symbol.slice(0, 7)}..` : symbol;
+}
+
+function estimateLegendTextWidth(text: string, fontSize: number, horizontalPadding = 14): number {
+  const units = Array.from(text).reduce((sum, char) => {
+    const codePoint = char.codePointAt(0) ?? 0;
+    if (codePoint <= 0x007f) {
+      return sum + (/[MW@#%&]/.test(char) ? 0.72 : 0.56);
+    }
+    if (codePoint >= 0xff61 && codePoint <= 0xff9f) {
+      return sum + 0.72;
+    }
+    return sum + 1.02;
+  }, 0);
+  return Math.ceil(units * fontSize + horizontalPadding);
 }
 
 function distanceToSegment(
@@ -143,6 +161,9 @@ export function InteractiveCustomChart({
   showMacd,
   comparisonSymbols = [],
   comparisonCandles = {},
+  comparisonLabelFontSize: controlledComparisonLabelFontSize,
+  onComparisonLabelFontSizeChange,
+  symbolDisplayNames = {},
   emptyMessage = 'データを取得中...',
   priceScale,
   setPriceScale,
@@ -153,6 +174,7 @@ export function InteractiveCustomChart({
   macdHeightPct,
   setMacdHeightPct,
   onOpenIndicatorSettings,
+  onRemoveComparisonSymbol,
   focusDate,
   focusDateActive = false,
   allowNegativeValues = false,
@@ -170,6 +192,24 @@ export function InteractiveCustomChart({
     rsi: false,
     macd: false,
   });
+  const [comparisonLegendOpen, setComparisonLegendOpen] = useState(false);
+  const [localComparisonLabelFontSize, setLocalComparisonLabelFontSize] = useState(10);
+  const [legendFontMenu, setLegendFontMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const comparisonLabelFontSize = controlledComparisonLabelFontSize ?? localComparisonLabelFontSize;
+  const setComparisonLabelFontSize = (nextValue: React.SetStateAction<number>) => {
+    const resolvedValue = typeof nextValue === 'function'
+      ? nextValue(comparisonLabelFontSize)
+      : nextValue;
+    const clampedValue = Math.max(8, Math.min(18, Math.round(resolvedValue)));
+    if (onComparisonLabelFontSizeChange) {
+      onComparisonLabelFontSizeChange(clampedValue);
+    } else {
+      setLocalComparisonLabelFontSize(clampedValue);
+    }
+  };
 
   // Drag state for panning
   const [isDragging, setIsDragging] = useState(false);
@@ -197,11 +237,39 @@ export function InteractiveCustomChart({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (comparisonSymbols.length === 0) {
+      setComparisonLegendOpen(false);
+      setLegendFontMenu(null);
+      return;
+    }
+    setMinimizedIndicators((current) => (
+      current.rsi && current.macd ? current : { ...current, rsi: true, macd: true }
+    ));
+  }, [comparisonSymbols.length]);
+
+  useEffect(() => {
+    if (!legendFontMenu) return;
+    const closeMenu = () => setLegendFontMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [legendFontMenu]);
+
+  const getDisplayName = (rawSymbol: string) => (
+    symbolDisplayNames[rawSymbol] || rawSymbol
+  );
+
+  const openLegendFontMenu = (event: React.MouseEvent<Element>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setLegendFontMenu({ x: event.clientX, y: event.clientY });
+  };
+
   const { width, height } = dimensions;
 
   // Amount of candles to fit in chart width
   // The right-side axis column also hosts the comparison ranking tabs.
-  const priceAxisWidth = 60;
+  const priceAxisWidth = comparisonSymbols.length > 0 ? 108 : 60;
   const plotWidth = Math.max(80, width - priceAxisWidth);
   const rightAxisWidth = width - plotWidth;
   const maxVisibleCount = Math.floor(plotWidth / zoomFactor);
@@ -527,7 +595,7 @@ export function InteractiveCustomChart({
 
     const minCenterY = 12;
     const maxCenterY = Math.max(minCenterY, mainHeight - 36);
-    const minGap = 22;
+    const minGap = Math.max(15, comparisonLabelFontSize + 8);
     const adjusted = rawLabels.map((label) => ({
       ...label,
       adjustedY: Math.max(minCenterY, Math.min(maxCenterY, label.y)),
@@ -570,6 +638,7 @@ export function InteractiveCustomChart({
     mainHeight,
     priceMinMax.min,
     priceMinMax.max,
+    comparisonLabelFontSize,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {
@@ -844,7 +913,7 @@ export function InteractiveCustomChart({
       
       {/* 1. FLOATING CROSSHAIR INFO BANNER */}
       {currentCandle && (
-        <div className="absolute top-2 left-3 bg-[#050505]/95 border border-[#2a2a2a] px-2.5 py-1 rounded text-[10px] text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
+        <div className="absolute top-2 left-3 right-12 bg-[#050505]/95 border border-[#2a2a2a] px-2.5 py-1 rounded text-[10px] text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
           <span className="text-white font-bold">{symbol}</span>
           <span>日付: <b className="text-gray-100">{currentCandle.timeStr}</b></span>
           <span>始: <b className="text-white">{currentCandle.open.toFixed(valuePrecision)}</b></span>
@@ -852,23 +921,109 @@ export function InteractiveCustomChart({
           <span>安: <b className="text-[#ef5350]">{currentCandle.low.toFixed(valuePrecision)}</b></span>
           <span>終: <b className="text-white">{currentCandle.close.toFixed(valuePrecision)}</b></span>
           <span className="hidden sm:inline">出来高: <b className="text-gray-300">{currentCandle.volume.toLocaleString()}</b></span>
-          
-          {/* Legend for comparison symbols */}
-          {comparisonSymbols.map((compSym, index) => {
-            const color = getSeriesColor(compSym, index);
-            const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
-            const compCandle = activeCandle
-              ? comparisonCandleMaps[compSym]?.get(getCandleAlignmentKey(activeCandle, timeframe))
-              : null;
-            const startPrice = compStartPrice[compSym] || 1;
-            if (!compCandle) return null;
-            const changePct = calculateChangePct(compCandle.close, startPrice);
-            return (
-              <span key={compSym} style={{ color }} className="font-bold border-l border-gray-800 pl-2">
-                {compSym}: {compCandle.close.toFixed(valuePrecision)} ({formatSignedPercent(changePct)})
-              </span>
-            );
-          })}
+        </div>
+      )}
+
+      {comparisonSymbols.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setComparisonLegendOpen((open) => !open)}
+          onContextMenu={(event) => {
+            openLegendFontMenu(event);
+            setComparisonLegendOpen(true);
+          }}
+          className={`absolute top-2 right-3 z-20 h-7 w-7 flex items-center justify-center rounded border transition ${
+            comparisonLegendOpen
+              ? 'border-emerald-500/60 bg-emerald-950/60 text-emerald-200'
+              : 'border-[#2a2a2a] bg-[#050505]/95 text-gray-400 hover:text-white hover:border-[#454545]'
+          }`}
+          title="比較凡例"
+          aria-label="比較凡例"
+          aria-pressed={comparisonLegendOpen}
+        >
+          <List size={14} strokeWidth={2.4} />
+        </button>
+      )}
+
+      {comparisonLegendOpen && comparisonSymbols.length > 0 && (
+        <div
+          className="absolute top-10 left-3 right-14 z-20 max-h-36 overflow-y-auto rounded border border-[#2a2a2a] bg-[#050505]/96 p-1.5 shadow-2xl"
+          onContextMenu={openLegendFontMenu}
+        >
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-1">
+            {comparisonSymbols.map((compSym, index) => {
+              const color = getSeriesColor(compSym, index);
+              const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
+              const compCandle = activeCandle
+                ? comparisonCandleMaps[compSym]?.get(getCandleAlignmentKey(activeCandle, timeframe))
+                : null;
+              const startPrice = compStartPrice[compSym] || 1;
+              const changeText = compCandle
+                ? formatSignedPercent(calculateChangePct(compCandle.close, startPrice))
+                : 'N/A';
+              return (
+                <div
+                  key={compSym}
+                  className="group min-w-0 h-6 flex items-center gap-1 rounded border border-[#242424] bg-[#0b0b0b] px-1.5 text-[9px] font-bold"
+                  style={{ color, borderColor: `${color}40`, fontSize: comparisonLabelFontSize }}
+                >
+                  <span className="min-w-0 flex-1 truncate">{getDisplayName(compSym)}</span>
+                  <span className="shrink-0 font-mono">{changeText}</span>
+                  {onRemoveComparisonSymbol && (
+                    <button
+                      type="button"
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRemoveComparisonSymbol(compSym);
+                      }}
+                      className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded text-gray-500 opacity-0 transition hover:bg-red-950/60 hover:text-red-200 group-hover:opacity-100 focus:opacity-100"
+                      title="比較から削除"
+                      aria-label={`${compSym}を比較から削除`}
+                    >
+                      <X size={10} strokeWidth={2.5} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {legendFontMenu && (
+        <div
+          className="fixed z-[90] w-44 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+          style={{ left: legendFontMenu.x, top: legendFontMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="border-b border-[#242424] px-2.5 py-1.5 text-[9px] text-gray-500">
+            比較ラベル文字サイズ: {comparisonLabelFontSize}px
+          </div>
+          <button
+            type="button"
+            onClick={() => setComparisonLabelFontSize((size) => Math.max(8, size - 1))}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <Minus className="h-3.5 w-3.5" />
+            小さく
+          </button>
+          <button
+            type="button"
+            onClick={() => setComparisonLabelFontSize((size) => Math.min(18, size + 1))}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            大きく
+          </button>
+          <button
+            type="button"
+            onClick={() => setComparisonLabelFontSize(10)}
+            className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-[#171717]"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            初期値に戻す
+          </button>
         </div>
       )}
 
@@ -1216,24 +1371,29 @@ export function InteractiveCustomChart({
               )}
 
               {rightAxisLabels.length > 0 && (
-                <g className="pointer-events-none">
+                <g>
                   {rightAxisLabels.map((axisLabel) => {
-                    const symbolText = compactAxisSymbol(axisLabel.symbol);
+                    const symbolText = compactAxisSymbol(getDisplayName(axisLabel.symbol));
                     const percentText = formatSignedPercent(axisLabel.changePct);
+                    const labelText = `${symbolText} ${percentText}`;
                     const tabWidth = Math.min(
-                      rightAxisWidth,
+                      rightAxisWidth + 2,
                       Math.max(
-                        32,
-                        Math.max(symbolText.length * 4.8, percentText.length * 4.5) + 5,
+                        44,
+                        estimateLegendTextWidth(labelText, comparisonLabelFontSize, 9),
                       ),
                     );
-                    const tabHeight = 20;
-                    const tabX = plotWidth;
+                    const tabHeight = Math.max(17, comparisonLabelFontSize + 8);
+                    const tabX = plotWidth - 2;
                     const tabY = axisLabel.adjustedY - tabHeight / 2;
                     const moved = Math.abs(axisLabel.adjustedY - axisLabel.y) > 2;
 
                     return (
-                      <g key={axisLabel.key}>
+                      <g
+                        key={axisLabel.key}
+                        onContextMenu={openLegendFontMenu}
+                        style={{ pointerEvents: 'all' }}
+                      >
                         {moved && (
                             <line
                           x1={plotWidth - 3}
@@ -1257,28 +1417,17 @@ export function InteractiveCustomChart({
                           strokeWidth="0.5"
                         />
                         <text
-                          x={tabX + tabWidth / 2}
-                          y={axisLabel.adjustedY - 1.5}
-                          textAnchor="middle"
+                          x={tabX + 4}
+                          y={axisLabel.adjustedY + comparisonLabelFontSize * 0.35}
+                          textAnchor="start"
                           fill="#ffffff"
-                          fontSize="7.5"
+                          fontSize={comparisonLabelFontSize}
                           fontFamily={CHART_FONT_FAMILY}
                           fontWeight="700"
                         >
-                          {symbolText}
+                          {labelText}
                         </text>
-                        <text
-                          x={tabX + tabWidth / 2}
-                          y={axisLabel.adjustedY + 7.5}
-                          textAnchor="middle"
-                          fill="#ffffff"
-                          fontSize="7"
-                          fontFamily={CHART_FONT_FAMILY}
-                          fontWeight="700"
-                        >
-                          {percentText}
-                        </text>
-                        <title>{axisLabel.symbol} {formatSignedPercent(axisLabel.changePct)}</title>
+                        <title>{getDisplayName(axisLabel.symbol)} {formatSignedPercent(axisLabel.changePct)}</title>
                       </g>
                     );
                   })}
@@ -1552,26 +1701,34 @@ export function InteractiveCustomChart({
             )}
 
             {hoveredComparisonSeries && (
-              <g className="pointer-events-none">
+              <g>
                 {(() => {
+                  const hoverLabel = getDisplayName(hoveredComparisonSeries.symbol);
+                  const hoverFontSize = Math.max(9, comparisonLabelFontSize);
+                  const maxLabelWidth = Math.max(70, plotWidth - 16);
                   const labelWidth = Math.min(
-                    180,
-                    Math.max(46, hoveredComparisonSeries.symbol.length * 6.2 + 14),
+                    maxLabelWidth,
+                    Math.max(46, estimateLegendTextWidth(hoverLabel, hoverFontSize, 18)),
                   );
+                  const labelHeight = Math.max(18, hoverFontSize + 9);
                   const labelX = Math.min(
                     plotWidth - labelWidth - 8,
                     Math.max(8, hoveredComparisonSeries.x + 10),
                   );
                   const labelY = Math.min(
-                    mainHeight - 24,
-                    Math.max(8, hoveredComparisonSeries.y - 24),
+                    mainHeight - labelHeight - 6,
+                    Math.max(8, hoveredComparisonSeries.y - labelHeight - 6),
                   );
 
                   return (
-                    <g transform={`translate(${labelX}, ${labelY})`}>
+                    <g
+                      transform={`translate(${labelX}, ${labelY})`}
+                      onContextMenu={openLegendFontMenu}
+                      style={{ pointerEvents: 'all' }}
+                    >
                       <rect
                         width={labelWidth}
-                        height="18"
+                        height={labelHeight}
                         rx="4"
                         fill={hoveredComparisonSeries.color}
                         fillOpacity="0.96"
@@ -1580,14 +1737,15 @@ export function InteractiveCustomChart({
                       />
                       <text
                         x={labelWidth / 2}
-                        y="12"
+                        y={labelHeight / 2}
                         fill="#ffffff"
-                        fontSize="9"
+                        fontSize={hoverFontSize}
                         fontFamily={CHART_FONT_FAMILY}
                         fontWeight="700"
                         textAnchor="middle"
+                        dominantBaseline="middle"
                       >
-                        {hoveredComparisonSeries.symbol}
+                        {hoverLabel}
                       </text>
                     </g>
                   );

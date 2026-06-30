@@ -19,10 +19,12 @@ import {
   Menu,
   Pencil,
   RotateCcw,
-  Upload
+  Upload,
+  Download,
+  ArrowUpDown
 } from 'lucide-react';
 
-import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle } from './types';
+import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle, ComparisonLabelLayoutMode } from './types';
 import { DEFAULT_TICKERS, generateCandles, simulateTick } from './mockData';
 import { InteractiveCustomChart } from './components/InteractiveCustomChart';
 import { TradingViewWidget } from './components/TradingViewWidget';
@@ -35,6 +37,10 @@ import {
   formatSymbolExpression,
   parseSymbolExpression,
   SymbolExpression,
+  combineBasketCandles,
+  BasketComponent,
+  calculateBasketQuote,
+  BasketQuoteInput,
 } from './symbolExpression';
 import { getSeriesColor } from './chartSeriesColors';
 
@@ -51,6 +57,7 @@ type SidebarView = 'watchlist' | 'indicators' | 'settings';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
+type WatchlistTransferMenuLayer = 'root' | 'import' | 'export';
 type WatchlistQuoteFetchMode = 'manual' | 'auto';
 type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
@@ -64,6 +71,7 @@ const CANDLES_CACHE_INDEXED_DB_NAME = 'mooview_chart_candles_cache_v1';
 const CANDLES_CACHE_INDEXED_DB_STORE = 'values';
 const CANDLES_CACHE_INDEXED_DB_CACHE_KEY = 'candles';
 const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
+const QUOTE_CACHE_INDEXED_DB_CACHE_KEY = 'quotes';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const KLINE_FETCH_BATCH_LIMIT = 60;
@@ -71,6 +79,7 @@ const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_QUOTE_BATCH_LIMIT = 200;
 const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 10_000;
+const WATCHLIST_AUTO_QUOTE_REFRESH_INTERVAL_MS = 30_000;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
@@ -79,6 +88,7 @@ const VALUE_CHAIN_SYNC_EVENT = 'mooview:value-chain-map-updated';
 const VALUE_CHAIN_CHART_STATE_STORAGE_KEY = 'mooview_value_chain_chart_state_v1';
 const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v1';
 const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
+const COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY = 'mooview_comparison_label_layout_mode_v1';
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
 const DAY_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '5m';
 const WEEK_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '30m';
@@ -181,6 +191,7 @@ interface WatchlistCsvCandidate {
   code: string;
   name: string;
   market: string;
+  basket?: string;
 }
 
 interface WatchlistSyncStock {
@@ -444,6 +455,99 @@ function compactCandlesCache(cache: Record<string, Candle[]>): Record<string, Ca
   return next;
 }
 
+function normalizeStoredQuoteCache(raw: unknown): Record<string, MoomooTickerQuote | null> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const next: Record<string, MoomooTickerQuote | null> = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([rawSymbol, value]) => {
+    const symbol = normalizeStoredSymbolValue(rawSymbol);
+    if (!symbol) return;
+    if (value === null) {
+      next[symbol] = null;
+      return;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const quote = value as Partial<MoomooTickerQuote>;
+    const price = Number(quote.price);
+    if (!Number.isFinite(price) || price <= 0) return;
+    const changePct = Number(quote.changePct);
+    const marketCap = Number(quote.marketCap);
+    next[symbol] = {
+      name: typeof quote.name === 'string' && quote.name.trim() ? quote.name.trim() : symbol,
+      price,
+      changePct: Number.isFinite(changePct) ? changePct : 0,
+      marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined,
+    };
+  });
+  return next;
+}
+
+function areQuoteCachesEqualForStorage(
+  first: Record<string, MoomooTickerQuote | null>,
+  second: Record<string, MoomooTickerQuote | null>,
+): boolean {
+  const firstKeys = Object.keys(first).sort();
+  const secondKeys = Object.keys(second).sort();
+  if (firstKeys.length !== secondKeys.length) return false;
+  return firstKeys.every((key, index) => {
+    if (key !== secondKeys[index]) return false;
+    const firstQuote = first[key];
+    const secondQuote = second[key];
+    if (firstQuote === null || secondQuote === null) {
+      return firstQuote === secondQuote;
+    }
+    return firstQuote.name === secondQuote.name
+      && firstQuote.price === secondQuote.price
+      && firstQuote.changePct === secondQuote.changePct
+      && (firstQuote.marketCap ?? null) === (secondQuote.marketCap ?? null);
+  });
+}
+
+async function writeAndVerifyQuoteCacheIndexedDb(
+  cache: Record<string, MoomooTickerQuote | null>,
+): Promise<void> {
+  const normalizedCache = normalizeStoredQuoteCache(cache);
+  await writeCandlesCacheIndexedDb(QUOTE_CACHE_INDEXED_DB_CACHE_KEY, normalizedCache);
+  const storedCache = normalizeStoredQuoteCache(
+    await readCandlesCacheIndexedDb<unknown>(QUOTE_CACHE_INDEXED_DB_CACHE_KEY),
+  );
+  if (!areQuoteCachesEqualForStorage(normalizedCache, storedCache)) {
+    console.warn('価格キャッシュのIndexedDB保存後検証に失敗しました。');
+  }
+}
+
+async function writeAndVerifyCandlesCacheIndexedDb(
+  cache: Record<string, Candle[]>,
+  timestamps: Record<string, number>,
+): Promise<void> {
+  const compactedCache = compactCandlesCache(cache);
+  await Promise.all([
+    writeCandlesCacheIndexedDb(CANDLES_CACHE_INDEXED_DB_CACHE_KEY, compactedCache),
+    writeCandlesCacheIndexedDb(CANDLES_CACHE_INDEXED_DB_META_KEY, timestamps),
+  ]);
+
+  const [storedCacheRaw, storedMetaRaw] = await Promise.all([
+    readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_CACHE_KEY),
+    readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_META_KEY),
+  ]);
+  const storedCache = normalizeStoredCandlesCache(storedCacheRaw);
+  const storedMeta = normalizeTimestampMap(storedMetaRaw);
+  const mismatchedKeys = Object.entries(compactedCache)
+    .filter(([key, candles]) => (storedCache[key]?.length ?? 0) !== candles.length)
+    .map(([key]) => key)
+    .slice(0, 10);
+  const missingMetaKeys = Object.entries(timestamps)
+    .filter(([key, timestamp]) => timestamp > 0 && storedMeta[key] !== timestamp)
+    .map(([key]) => key)
+    .slice(0, 10);
+
+  if (mismatchedKeys.length > 0 || missingMetaKeys.length > 0) {
+    console.warn('ローソク足キャッシュのIndexedDB保存後検証に失敗しました。', {
+      mismatchedKeys,
+      missingMetaKeys,
+    });
+  }
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -467,7 +571,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isMoomooRateLimitMessage(message: string | null | undefined): boolean {
-  return /high frequency|too frequent|too many|rate|limit|quota|frequency|429/i.test(message || '');
+  return /high frequency|too frequent|too many|rate|limit|quota|frequency|429|制限|頻度|上限|過多|高頻度|リクエスト.*多/i.test(message || '');
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -502,10 +606,14 @@ function normalizePanel(panel: ChartPanel): ChartPanel {
   const displayTimeframe = getDisplayRangeSeedTimeframe(displayRange);
   return {
     ...panel,
+    name: typeof panel.name === 'string' && panel.name.trim() ? panel.name.trim().slice(0, 48) : undefined,
     symbol: normalizeStoredSymbolValue(panel.symbol),
     watchlistTabId,
     watchlistSectionId,
     comparisonSymbols: normalizedComparisonSymbols.length > 0 ? normalizedComparisonSymbols : panel.comparisonSymbols,
+    comparisonOnly: panel.comparisonOnly || undefined,
+    showPrimaryCandles: panel.showPrimaryCandles === false ? false : undefined,
+    comparisonLabelRankSpacingScale: clampStoredNumber(panel.comparisonLabelRankSpacingScale, 1, 0.5, 2),
     timeframe: displayTimeframe ?? ((panel.timeframe as string) === '15m' ? '10m' : panel.timeframe),
     displayRange,
     zoomFactor: getDisplayRangeZoomFactor(displayRange),
@@ -563,6 +671,10 @@ function clampStoredNumber(value: unknown, fallback: number, min: number, max: n
   return Number.isFinite(numericValue)
     ? Math.max(min, Math.min(max, numericValue))
     : fallback;
+}
+
+function normalizeComparisonLabelLayoutMode(value: unknown): ComparisonLabelLayoutMode {
+  return value === 'rank' || value === 'stack' ? value : 'changePct';
 }
 
 function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
@@ -747,6 +859,9 @@ function normalizeTickerSymbolForStorage(rawSymbol: unknown): string {
 }
 
 function normalizeStoredSymbolValue(rawSymbol: unknown): string {
+  const rawString = String(rawSymbol ?? '');
+  if (rawString.startsWith('BASKET:')) return rawString;
+
   const expression = normalizeSymbolExpressionForStorage(rawSymbol);
   if (expression) {
     return formatSymbolExpression(expression);
@@ -770,8 +885,10 @@ function normalizeSymbolExpressionForStorage(rawExpression: unknown): SymbolExpr
 }
 
 function getStoredSymbolOperands(symbol: string): string[] {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+  if (!normalizedSymbol) return [];
   const expression = normalizeSymbolExpressionForStorage(symbol);
-  return expression ? [expression.left, expression.right] : [normalizeStoredSymbolValue(symbol)];
+  return expression ? [expression.left, expression.right] : [normalizedSymbol];
 }
 
 function normalizeTickerInfo(rawTicker: unknown): TickerInfo | null {
@@ -840,6 +957,19 @@ function getQuoteOperandSymbolsForWatchlistTabs(tabs: WatchlistTab[]): string[] 
   );
 }
 
+function getAutoWatchlistQuoteRefreshSignature(
+  tabs: WatchlistTab[],
+  modes: Record<string, WatchlistQuoteFetchMode>,
+): string {
+  return tabs
+    .flatMap((tab) => {
+      if (getWatchlistQuoteFetchMode(modes, tab.id) !== 'auto') return [];
+      const symbols = getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab));
+      return symbols.length > 0 ? [`${tab.id}:${symbols.join(',')}`] : [];
+    })
+    .join('|');
+}
+
 function encodeWatchlistTargetValue(tabId: string | null | undefined, sectionId?: string | null): string {
   if (!tabId) return '';
   return sectionId ? `${tabId}${WATCHLIST_TARGET_SEPARATOR}${sectionId}` : tabId;
@@ -865,6 +995,19 @@ function syncPanelToWatchlistTarget(
   target: WatchlistPanelTarget,
   symbols: string[],
 ): ChartPanel {
+  if (panel.comparisonOnly) {
+    return {
+      ...panel,
+      symbol: '',
+      watchlistTabId: target.tabId,
+      watchlistSectionId: target.sectionId,
+      comparisonSymbols: symbols,
+      showRsi: false,
+      showMacd: false,
+      showVolume: false,
+    };
+  }
+
   if (symbols.length === 0) {
     return {
       ...panel,
@@ -895,11 +1038,54 @@ function hasWatchlistPanelTargetChanged(current: ChartPanel, next: ChartPanel): 
     || !areSymbolListsEqual(current.comparisonSymbols || [], next.comparisonSymbols || []);
 }
 
+function getPositiveBasketWeight(value: unknown): number | null {
+  const weight = Number(value);
+  return Number.isFinite(weight) && weight > 0 ? weight : null;
+}
+
+function assignBasketWeights<T extends { marketCapWeight: number | null }>(
+  candidates: T[],
+): Array<T & { weight: number }> {
+  if (candidates.length === 0) return [];
+  const useMarketCapWeights = candidates.every((candidate) => candidate.marketCapWeight !== null);
+  return candidates.map((candidate) => ({
+    ...candidate,
+    weight: useMarketCapWeights ? candidate.marketCapWeight! : 1,
+  }));
+}
+
 function resolveCandlesForSymbol(
   symbol: string,
   timeframe: Timeframe,
   cache: Record<string, Candle[]>,
+  options?: {
+    tickerStatsBySymbol?: Map<string, any>;
+    watchlistTabs?: any[]; // WatchlistTab is not imported at top level, use any or fetch from outer scope if needed. wait, it's defined inside App.tsx or types.ts? Let's check. Actually, WatchlistTab is defined in types? Let's use any for now to avoid import issues.
+  }
 ): Candle[] {
+  if (symbol.startsWith('BASKET:')) {
+    const sectionId = symbol.slice(7);
+    const section = options?.watchlistTabs?.flatMap((t: any) => t.sections).find((s: any) => s.id === sectionId);
+    if (!section || !section.symbols || section.symbols.length === 0) return [];
+
+    const candidates: Array<{ marketCapWeight: number | null; candles: Candle[] }> = [];
+    for (const rawSym of section.symbols) {
+      const componentCandles = resolveCandlesForSymbol(rawSym, timeframe, cache, options);
+      if (componentCandles.length > 0) {
+        const baseSym = parseSymbolExpression(rawSym)?.left || rawSym;
+        const normalizedBase = normalizeStoredSymbolValue(baseSym);
+        const ticker = options?.tickerStatsBySymbol?.get(normalizedBase);
+        candidates.push({
+          marketCapWeight: getPositiveBasketWeight(ticker?.marketCap),
+          candles: componentCandles,
+        });
+      }
+    }
+    const components: BasketComponent[] = assignBasketWeights(candidates)
+      .map(({ weight, candles }) => ({ weight, candles }));
+    return combineBasketCandles(components, timeframe);
+  }
+
   const expression = normalizeSymbolExpressionForStorage(symbol);
   if (!expression) {
     const canonicalSymbol = normalizeStoredSymbolValue(symbol);
@@ -907,8 +1093,8 @@ function resolveCandlesForSymbol(
   }
   return combineExpressionCandles(
     expression,
-    cache[`${expression.left}-${timeframe}`] || [],
-    cache[`${expression.right}-${timeframe}`] || [],
+    resolveCandlesForSymbol(expression.left, timeframe, cache, options),
+    resolveCandlesForSymbol(expression.right, timeframe, cache, options),
     timeframe,
   );
 }
@@ -1067,22 +1253,49 @@ function expandRelativeWatchlistCsvCandidates(
     });
 }
 
+function normalizeWatchlistCsvHeader(header: string): string {
+  return header
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s\u3000_./・･\-()（）]/g, '');
+}
+
+function findWatchlistCsvHeaderIndex(headers: string[], names: string[]): number {
+  const normalizedNames = names.map(normalizeWatchlistCsvHeader);
+  return headers.findIndex((header) => {
+    const normalizedHeader = normalizeWatchlistCsvHeader(header);
+    return normalizedNames.some((name) => (
+      normalizedHeader === name
+      || (name.length > 2 && normalizedHeader.includes(name))
+    ));
+  });
+}
+
 function extractWatchlistCsvCandidates(text: string): WatchlistCsvCandidate[] {
   const rows = parseCsvRows(text);
   if (rows.length < 2) return [];
-  const headers = rows[0].map((header) => header.replace(/^\uFEFF/, '').trim());
-  const codeIndex = headers.findIndex((header) => header === 'コード' || header.toLowerCase() === 'code');
-  const nameIndex = headers.findIndex((header) => header === '銘柄' || header.toLowerCase() === 'name');
-  const marketIndex = headers.findIndex((header) => header === '市場' || header.toLowerCase() === 'market');
+  const headers = rows[0].map((header) => header.replace(/^\uFEFF/, '').trim().normalize('NFC'));
+  const codeIndex = findWatchlistCsvHeaderIndex(headers, ['コード', '銘柄コード', '証券コード', 'code', 'symbol', 'ticker']);
+  const nameIndex = findWatchlistCsvHeaderIndex(headers, ['銘柄名', '銘柄', '名称', '会社名', 'name', 'companyname']);
+  const marketIndex = findWatchlistCsvHeaderIndex(headers, ['市場', 'market', 'exchange']);
+  const basketIndex = findWatchlistCsvHeaderIndex(headers, ['バスケット', 'basket', 'category', 'group']);
+  // [DEBUG] basket列の検出確認
+  console.log('[CSV-DEBUG] headers:', JSON.stringify(headers), '| basketIndex:', basketIndex);
   if (codeIndex === -1) return [];
 
-  return expandRelativeWatchlistCsvCandidates(rows.slice(1)
+  const result = expandRelativeWatchlistCsvCandidates(rows.slice(1)
     .map((row) => ({
       code: String(row[codeIndex] ?? '').trim(),
       name: String(nameIndex >= 0 ? row[nameIndex] ?? '' : '').trim(),
       market: String(marketIndex >= 0 ? row[marketIndex] ?? '' : '').trim(),
+      basket: String(basketIndex >= 0 ? row[basketIndex] ?? '' : '').trim().normalize('NFC') || undefined,
     }))
     .filter((candidate) => candidate.code));
+  // [DEBUG] 最初の3件のbasket値を確認
+  console.log('[CSV-DEBUG] 先頭3候補:', JSON.stringify(result.slice(0, 3).map((c) => ({ code: c.code, basket: c.basket }))));
+  return result;
 }
 
 function normalizeImportedSymbol(rawCode: string): string | null {
@@ -1108,6 +1321,74 @@ async function readWatchlistImportText(file: File): Promise<string> {
   }
 
   return utf8Text;
+}
+
+function escapeWatchlistCsvCell(value: string): string {
+  const normalizedValue = String(value ?? '');
+  return /[",\r\n]/.test(normalizedValue)
+    ? `"${normalizedValue.replace(/"/g, '""')}"`
+    : normalizedValue;
+}
+
+function inferWatchlistExportMarket(symbol: string): string {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+  if (!normalizedSymbol || parseSymbolExpression(normalizedSymbol) || normalizedSymbol.startsWith('BASKET:')) {
+    return '';
+  }
+  if (normalizedSymbol.startsWith('JP.')) return 'JP';
+  if (normalizedSymbol.startsWith('HK.')) return 'HK';
+  if (normalizedSymbol.endsWith('.FX')) return 'FX';
+  if (normalizedSymbol.endsWith('.BD')) return 'BD';
+  return 'US';
+}
+
+function createWatchlistExportCsv(
+  tab: WatchlistTab,
+  tickers: TickerInfo[],
+  nameOverrides: Record<string, string>,
+): string {
+  const tickerBySymbol = new Map(
+    tickers.map((ticker) => [normalizeStoredSymbolValue(ticker.symbol), ticker]),
+  );
+  const rows = tab.sections.flatMap((section) =>
+    section.symbols.map((rawSymbol) => {
+      const symbol = normalizeStoredSymbolValue(rawSymbol);
+      const ticker = tickerBySymbol.get(symbol);
+      const name = nameOverrides[symbol]
+        || ticker?.name
+        || formatWatchlistSymbol(symbol);
+      return [
+        symbol,
+        name,
+        inferWatchlistExportMarket(symbol),
+        section.name,
+      ].map(escapeWatchlistCsvCell).join(',');
+    }),
+  );
+  return `\uFEFFコード,銘柄名,市場,バスケット\r\n${rows.join('\r\n')}${rows.length > 0 ? '\r\n' : ''}`;
+}
+
+function sanitizeWatchlistExportFileName(name: string): string {
+  const sanitized = name
+    .normalize('NFC')
+    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_')
+    .replace(/[.\s]+$/g, '')
+    .trim()
+    .slice(0, 80);
+  return sanitized || 'ウォッチリスト';
+}
+
+function downloadWatchlistCsv(csv: string, fileName: string): void {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 function isLikelyTickerInput(value: string): boolean {
@@ -1491,15 +1772,15 @@ function createDefaultIndicatorSettings(symbol: string): SymbolIndicatorSettings
         styleMacd: 'solid',
         colorSignal: '#ff9900', 
         styleSignal: 'dashed',
-        colorHistUp: '#26a69a', 
-        colorHistDown: '#ef5350' 
+        colorHistUp: '#009b87',
+        colorHistDown: '#ff4057'
       },
       vrvp: {
         enabled: false,
         rows: 24,
         widthPct: 22,
-        colorUp: '#26a69a',
-        colorDown: '#ef5350',
+        colorUp: '#009b87',
+        colorDown: '#ff4057',
         colorPoc: '#f3a14b',
       }
     }
@@ -1645,6 +1926,7 @@ export default function App() {
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
   const candleFetchPendingRef = useRef(false);
+  const candleRetryTimerRef = useRef<number | null>(null);
   const forceCandleRefreshRef = useRef(false);
   const initialVisibleChartRefreshRef = useRef(true);
   const quoteFetchInFlightRef = useRef(false);
@@ -1652,9 +1934,12 @@ export default function App() {
   const quoteFetchManualTabQueueRef = useRef<string[]>([]);
   const quoteFetchAutoSweepRequestedRef = useRef(false);
   const quoteFetchAutoAttemptedTabIdsRef = useRef<Set<string>>(new Set());
+  const quoteFetchLastAutoSweepAtRef = useRef(0);
+  const watchlistAutoQuoteSignatureRef = useRef<string | null>(null);
   const watchlistTabSuppressClickRef = useRef(false);
   const moomooRealTimeActiveRef = useRef(true);
   const candlesCacheIndexedDbHydratedRef = useRef(false);
+  const quoteCacheIndexedDbHydratedRef = useRef(false);
   const watchlistSyncSignatureRef = useRef<string | null>(null);
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
@@ -1736,6 +2021,7 @@ export default function App() {
     sectionId: string;
     symbols: string[];
   } | null>(null);
+  const draggedBasketRef = useRef<{ sectionId: string; symbols: string[] } | null>(null);
   const [draggedSectionId, setDraggedSectionId] = useState<string | null>(null);
   const [draggedWatchlistTabId, setDraggedWatchlistTabId] = useState<string | null>(null);
   const [sectionMenu, setSectionMenu] = useState<{
@@ -1756,6 +2042,8 @@ export default function App() {
   const [watchlistImportMessage, setWatchlistImportMessage] = useState<string | null>(null);
   const [watchlistImportMenuOpen, setWatchlistImportMenuOpen] = useState(false);
   const [watchlistImportMode, setWatchlistImportMode] = useState<WatchlistImportMode>('new-tab');
+  const [watchlistTransferMenuLayer, setWatchlistTransferMenuLayer] = useState<WatchlistTransferMenuLayer>('root');
+  const [selectedWatchlistExportTabIds, setSelectedWatchlistExportTabIds] = useState<string[]>([]);
 
   // Watchlist multiple selection and right-click delete state
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
@@ -1773,6 +2061,12 @@ export default function App() {
   const [watchlistNameEditModal, setWatchlistNameEditModal] = useState<{
     symbol: string;
     sectionId: string;
+    draftName: string;
+    defaultName: string;
+  } | null>(null);
+  const [chartNameEditModal, setChartNameEditModal] = useState<{
+    mode: 'rename' | 'create-comparison';
+    panelId?: string;
     draftName: string;
     defaultName: string;
   } | null>(null);
@@ -1802,6 +2096,11 @@ export default function App() {
   const [tabsDropdownOpen, setTabsDropdownOpen] = useState<boolean>(false);
   const watchlistTabsViewportRef = useRef<HTMLDivElement | null>(null);
   const watchlistTabRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const draggedPanelIdRef = useRef<string | null>(null);
+  const chartMissingDataRefreshRef = useRef<{ signature: string; requestedAt: number }>({
+    signature: '',
+    requestedAt: 0,
+  });
 
   // Chart Panels state
   const [panels, setPanels] = useState<ChartPanel[]>(() => {
@@ -1874,8 +2173,14 @@ export default function App() {
   const [comparisonLabelFontSize, setComparisonLabelFontSize] = useState<number>(() =>
     Math.round(clampStoredNumber(readStoredValue<unknown>(COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY, 10), 10, 8, 18))
   );
+  const [comparisonLabelLayoutMode, setComparisonLabelLayoutMode] = useState<ComparisonLabelLayoutMode>(() =>
+    normalizeComparisonLabelLayoutMode(readStoredValue<unknown>(COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY, 'changePct'))
+  );
   const updateComparisonLabelFontSize = (fontSize: number) => {
     setComparisonLabelFontSize(Math.round(clampStoredNumber(fontSize, 10, 8, 18)));
+  };
+  const updateComparisonLabelLayoutMode = (mode: ComparisonLabelLayoutMode) => {
+    setComparisonLabelLayoutMode(normalizeComparisonLabelLayoutMode(mode));
   };
 
   // Symbol specific indicator settings
@@ -1961,6 +2266,24 @@ export default function App() {
   // Real-time ticker price update counter/trigger
   const [tickTrigger, setTickTrigger] = useState(0);
 
+  const scheduleCandleFetchRetry = (delayMs: number) => {
+    if (candleRetryTimerRef.current !== null) return;
+    candleRetryTimerRef.current = window.setTimeout(() => {
+      candleRetryTimerRef.current = null;
+      if (!moomooRealTimeActiveRef.current) return;
+      setTickTrigger((current) => current + 1);
+    }, Math.max(1_000, delayMs));
+  };
+
+  useEffect(() => {
+    return () => {
+      if (candleRetryTimerRef.current !== null) {
+        window.clearTimeout(candleRetryTimerRef.current);
+        candleRetryTimerRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (appView !== 'macro-flow') return;
     forceCandleRefreshRef.current = true;
@@ -2035,11 +2358,12 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
-    const hydrateCandlesCache = async () => {
+    const hydrateMarketCaches = async () => {
       try {
-        const [indexedDbCache, indexedDbMeta] = await Promise.all([
+        const [indexedDbCache, indexedDbMeta, indexedDbQuotes] = await Promise.all([
           readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_CACHE_KEY),
           readCandlesCacheIndexedDb<unknown>(CANDLES_CACHE_INDEXED_DB_META_KEY),
+          readCandlesCacheIndexedDb<unknown>(QUOTE_CACHE_INDEXED_DB_CACHE_KEY),
         ]);
         if (cancelled) return;
 
@@ -2057,6 +2381,14 @@ export default function App() {
             ...candleFetchTimestampsRef.current,
             ...normalizedIndexedDbMeta,
           };
+        }
+
+        const normalizedIndexedDbQuotes = normalizeStoredQuoteCache(indexedDbQuotes);
+        if (Object.keys(normalizedIndexedDbQuotes).length > 0) {
+          setQuoteCache((currentQuotes) => ({
+            ...normalizedIndexedDbQuotes,
+            ...currentQuotes,
+          }));
         }
 
         const legacyCache = normalizeStoredCandlesCache(
@@ -2084,14 +2416,15 @@ export default function App() {
           );
         }
       } catch (error) {
-        console.warn('ローソク足キャッシュのIndexedDB読み込みに失敗しました。', error);
+        console.warn('市場データキャッシュのIndexedDB読み込みに失敗しました。', error);
       } finally {
         clearVolatileStorageCache();
         candlesCacheIndexedDbHydratedRef.current = true;
+        quoteCacheIndexedDbHydratedRef.current = true;
       }
     };
 
-    void hydrateCandlesCache();
+    void hydrateMarketCaches();
     return () => {
       cancelled = true;
     };
@@ -2191,23 +2524,27 @@ export default function App() {
   }, [comparisonLabelFontSize]);
 
   useEffect(() => {
+    writeStoredJson(COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY, comparisonLabelLayoutMode);
+  }, [comparisonLabelLayoutMode]);
+
+  useEffect(() => {
     const saveTimer = window.setTimeout(() => {
       if (!candlesCacheIndexedDbHydratedRef.current) return;
-      void Promise.all([
-        writeCandlesCacheIndexedDb(
-          CANDLES_CACHE_INDEXED_DB_CACHE_KEY,
-          compactCandlesCache(candlesCache),
-        ),
-        writeCandlesCacheIndexedDb(
-          CANDLES_CACHE_INDEXED_DB_META_KEY,
-          candleFetchTimestampsRef.current,
-        ),
-      ])
+      void writeAndVerifyCandlesCacheIndexedDb(candlesCache, candleFetchTimestampsRef.current)
         .then(() => clearVolatileStorageCache())
         .catch((error) => console.warn('ローソク足キャッシュのIndexedDB保存に失敗しました。', error));
     }, 600);
     return () => window.clearTimeout(saveTimer);
   }, [candlesCache]);
+
+  useEffect(() => {
+    const saveTimer = window.setTimeout(() => {
+      if (!quoteCacheIndexedDbHydratedRef.current) return;
+      void writeAndVerifyQuoteCacheIndexedDb(quoteCache)
+        .catch((error) => console.warn('価格キャッシュのIndexedDB保存に失敗しました。', error));
+    }, 250);
+    return () => window.clearTimeout(saveTimer);
+  }, [quoteCache]);
 
   useEffect(() => {
     writeStoredJson('tv_dashboard_indicators', indicatorDatabase);
@@ -2353,6 +2690,15 @@ export default function App() {
   }, [watchlistNameEditModal]);
 
   useEffect(() => {
+    if (!chartNameEditModal) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setChartNameEditModal(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [chartNameEditModal]);
+
+  useEffect(() => {
     if (!displayRangeMenu && !gridPickerOpen && !tabsDropdownOpen && !watchlistImportMenuOpen && !watchlistTargetMenu) return;
     const handleOutsideClick = () => {
       setGridPickerOpen(false);
@@ -2397,6 +2743,26 @@ export default function App() {
     ));
   };
 
+  const requestAutoWatchlistQuoteRefresh = (force = false): boolean => {
+    const signature = getAutoWatchlistQuoteRefreshSignature(watchlistTabs, watchlistQuoteFetchModes);
+    if (!signature) return false;
+    const now = Date.now();
+    if (!force && now - quoteFetchLastAutoSweepAtRef.current < WATCHLIST_AUTO_QUOTE_REFRESH_INTERVAL_MS) {
+      return false;
+    }
+    quoteFetchLastAutoSweepAtRef.current = now;
+    quoteFetchAutoSweepRequestedRef.current = true;
+    quoteFetchAutoAttemptedTabIdsRef.current.clear();
+    if (quoteFetchInFlightRef.current) {
+      quoteFetchPendingRef.current = true;
+    }
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    setTickTrigger((current) => current + 1);
+    return true;
+  };
+
   const isQuoteOperandResolved = (symbol: string): boolean => {
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
     const quote = quoteCache[normalizedSymbol];
@@ -2407,13 +2773,23 @@ export default function App() {
       && Number.isFinite(changePct);
   };
 
-  const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
-    const refreshTab = tabId ? watchlistTabs.find((tab) => tab.id === tabId) : null;
-    if (!refreshTab) return;
-    const retrySymbols = getWatchlistTabQuoteOperands(refreshTab);
+  const queueWatchlistQuoteRefreshes = (tabIds: Array<string | null | undefined>) => {
+    const refreshTabs: WatchlistTab[] = [];
+    const seenTabIds = new Set<string>();
+    tabIds.forEach((tabId) => {
+      if (!tabId || seenTabIds.has(tabId)) return;
+      const tab = watchlistTabs.find((item) => item.id === tabId);
+      if (!tab) return;
+      seenTabIds.add(tab.id);
+      refreshTabs.push(tab);
+    });
+    if (refreshTabs.length === 0) return;
+    const retrySymbols = Array.from(new Set(
+      refreshTabs.flatMap((tab) => getWatchlistTabQuoteOperands(tab)),
+    ));
     quoteFetchManualTabQueueRef.current = [
-      refreshTab.id,
-      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => queuedTabId !== refreshTab.id),
+      ...refreshTabs.map((tab) => tab.id),
+      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => !seenTabIds.has(queuedTabId)),
     ];
     quoteFetchAutoSweepRequestedRef.current = true;
     quoteFetchAutoAttemptedTabIdsRef.current.clear();
@@ -2436,12 +2812,48 @@ export default function App() {
     setTickTrigger((current) => current + 1);
   };
 
+  const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
+    queueWatchlistQuoteRefreshes([tabId]);
+  };
+
+  const getWatchlistTabIdsForChartSymbols = (symbols: string[]): string[] => {
+    const tabIds: string[] = [];
+    const seenTabIds = new Set<string>();
+    symbols.forEach((symbol) => {
+      if (!symbol.startsWith('BASKET:')) return;
+      const sectionId = symbol.slice(7);
+      const ownerTab = watchlistTabs.find((tab) =>
+        tab.sections.some((section) => section.id === sectionId),
+      );
+      if (!ownerTab || seenTabIds.has(ownerTab.id)) return;
+      seenTabIds.add(ownerTab.id);
+      tabIds.push(ownerTab.id);
+    });
+    return tabIds;
+  };
+
+  const queuePriorityQuoteRefreshForChartSymbols = (symbols: string[]) => {
+    const activeTabId = watchlistTabs.some((tab) => tab.id === activeWatchlistTabId)
+      ? activeWatchlistTabId
+      : watchlistTabs[0]?.id;
+    const relatedTabIds = getWatchlistTabIdsForChartSymbols(symbols);
+    queueWatchlistQuoteRefreshes([activeTabId, ...relatedTabIds]);
+  };
+
   const handleRefreshWatchlistQuotes = () => {
     const refreshTabId = watchlistTabs.some((tab) => tab.id === activeWatchlistTabId)
       ? activeWatchlistTabId
       : watchlistTabs[0]?.id;
     queueWatchlistQuoteRefresh(refreshTabId);
   };
+
+  useEffect(() => {
+    const signature = getAutoWatchlistQuoteRefreshSignature(watchlistTabs, watchlistQuoteFetchModes);
+    if (watchlistAutoQuoteSignatureRef.current === signature) return;
+    watchlistAutoQuoteSignatureRef.current = signature;
+    if (!signature) return;
+    requestAutoWatchlistQuoteRefresh(true);
+  }, [watchlistTabs, watchlistQuoteFetchModes]);
 
   // OpenDへの接続状態はサーバー側ゲートウェイを通して確認する
   const checkMoomooStatus = async () => {
@@ -2482,10 +2894,34 @@ export default function App() {
       const now = Date.now();
       const forceRefresh = forceCandleRefreshRef.current || initialVisibleChartRefreshRef.current;
       const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }>();
+      const activeWatchlistSymbolSet = new Set(
+        getWatchlistTabSymbols(watchlistTabs.find((tab) => tab.id === activeWatchlistTabId)),
+      );
       const addCandleRequest = (rawSymbol: string, timeframe: Timeframe, requestPriority: number) => {
+        if (rawSymbol.startsWith('BASKET:')) {
+          const sectionId = rawSymbol.slice(7);
+          const ownerTab = watchlistTabs.find((tab) =>
+            tab.sections.some((section) => section.id === sectionId),
+          );
+          const section = ownerTab?.sections.find((item) => item.id === sectionId);
+          if (section) {
+            const basketPriority = ownerTab?.id === activeWatchlistTabId
+              ? requestPriority - 1_000
+              : requestPriority;
+            section.symbols.forEach(symbol => {
+              addCandleRequest(symbol, timeframe, basketPriority);
+            });
+          }
+          return;
+        }
+
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
           const key = `${symbol}-${timeframe}`;
           const existing = requests.get(key);
+          const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+          const activePriority = activeWatchlistSymbolSet.has(normalizedSymbol)
+            ? requestPriority - 1_000
+            : requestPriority;
           const lookupQueries = Array.from(new Set([
             ...(existing?.lookupQueries || []),
             rawSymbol,
@@ -2495,7 +2931,7 @@ export default function App() {
             symbol,
             timeframe,
             lookupQueries,
-            priority: Math.min(existing?.priority ?? requestPriority, requestPriority),
+            priority: Math.min(existing?.priority ?? activePriority, activePriority),
           });
         });
       };
@@ -2551,6 +2987,7 @@ export default function App() {
       const updatedCache: Record<string, Candle[]> = {};
       const successfulKeys = new Set<string>();
       const failedErrors: Record<string, string> = {};
+      const retryableFailedKeys = new Set<string>();
       let firstError: string | null = null;
       let klineRequestCount = 0;
       const waitForKlineSlot = async () => {
@@ -2621,6 +3058,7 @@ export default function App() {
               continue;
             }
 
+            let shouldRetryKey = directResult.retryable;
             const fallbackSymbol = await findFallbackSymbol(request);
             if (fallbackSymbol) {
               const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
@@ -2632,10 +3070,12 @@ export default function App() {
                 successfulKeys.add(fallbackKey);
                 continue;
               }
+              shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
             }
 
             const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
             failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
+            if (shouldRetryKey) retryableFailedKeys.add(key);
             firstError ||= failedErrors[key];
           } catch (error) {
             const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
@@ -2650,6 +3090,12 @@ export default function App() {
         Object.keys(failedErrors).forEach((key) => {
           candleFetchTimestampsRef.current[key] = attemptedAt;
         });
+        if (Object.keys(failedErrors).length > 0) {
+          const retryDelayMs = retryableFailedKeys.size > 0
+            ? KLINE_RATE_LIMIT_RETRY_MS + 500
+            : CANDLES_CACHE_TTL_MS + 500;
+          scheduleCandleFetchRetry(retryDelayMs);
+        }
 
         if (Object.keys(updatedCache).length > 0) {
           Object.keys(updatedCache).forEach((key) => {
@@ -2686,7 +3132,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [appView, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, appView, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) {
@@ -2727,10 +3173,14 @@ export default function App() {
       source: WatchlistQuoteFetchSource;
     } | null => {
       if (!quoteFetchAutoSweepRequestedRef.current) return null;
-      for (const tab of watchlistTabs) {
+      const orderedTabs = [
+        ...watchlistTabs.filter((tab) => tab.id === activeWatchlistTabId),
+        ...watchlistTabs.filter((tab) => tab.id !== activeWatchlistTabId),
+      ];
+      for (const tab of orderedTabs) {
         if (getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tab.id) !== 'auto') continue;
         if (quoteFetchAutoAttemptedTabIdsRef.current.has(tab.id)) continue;
-        const symbols = getWatchlistTabQuoteOperands(tab).filter((symbol) => !isQuoteOperandResolved(symbol));
+        const symbols = getWatchlistTabQuoteOperands(tab);
         if (symbols.length > 0) {
           return { tab, symbols, source: 'auto' };
         }
@@ -2900,7 +3350,7 @@ export default function App() {
     };
 
     fetchMoomooQuotes();
-  }, [watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
   // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
@@ -2911,7 +3361,7 @@ export default function App() {
       setLastApiSyncTime(formatClockTime());
       
       if (moomooRealTimeActive) {
-        // If we connect to Moomoo, we already fetch real data in the fetcher effect.
+        requestAutoWatchlistQuoteRefresh();
         return;
       }
 
@@ -2954,7 +3404,7 @@ export default function App() {
     }, 3500);
 
     return () => clearInterval(interval);
-  }, [panels, moomooRealTimeActive]);
+  }, [panels, moomooRealTimeActive, watchlistTabs, watchlistQuoteFetchModes]);
 
   // --- HISTORICAL CANDLE GENERATOR RESOLVER ---
   // デモモードでのみ疑似ローソク足を生成する
@@ -3457,9 +3907,12 @@ export default function App() {
   };
 
   const toggleWatchlistTabQuoteFetchMode = (tabId: string) => {
+    const nextMode = getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tabId) === 'auto'
+      ? 'manual'
+      : 'auto';
     setWatchlistQuoteFetchModes((currentModes) => ({
       ...currentModes,
-      [tabId]: getWatchlistQuoteFetchMode(currentModes, tabId) === 'auto' ? 'manual' : 'auto',
+      [tabId]: nextMode,
     }));
     setWatchlistTabMenu(null);
   };
@@ -3628,7 +4081,10 @@ export default function App() {
     setDraggedBasket(null);
   };
 
-  const addSymbolsToActiveWatchlist = (symbols: string[]) => {
+  const addSymbolsToActiveWatchlist = (
+    symbols: string[],
+    importedBaskets?: Array<{ symbol: string; basket?: string }>
+  ) => {
     const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
     if (uniqueSymbols.length === 0) return;
 
@@ -3638,6 +4094,41 @@ export default function App() {
       if (symbolsToAdd.length === 0) {
         return tab;
       }
+
+      if (importedBaskets && importedBaskets.some((b) => b.basket)) {
+        const nextSections = [...tab.sections];
+        const seen = new Set<string>();
+
+        importedBaskets.forEach((item) => {
+          if (!item.symbol || seen.has(item.symbol) || !symbolsToAdd.includes(item.symbol)) return;
+          seen.add(item.symbol);
+
+          const targetSectionName = item.basket || 'その他';
+          let targetSection = nextSections.find((s) => s.name === targetSectionName);
+
+          if (!targetSection) {
+            targetSection = {
+              id: createId('section-import'),
+              name: targetSectionName,
+              collapsed: false,
+              symbols: [],
+            };
+            nextSections.push(targetSection);
+          }
+
+          const idx = nextSections.findIndex((s) => s.id === targetSection!.id);
+          nextSections[idx] = {
+            ...nextSections[idx],
+            symbols: [...nextSections[idx].symbols, item.symbol],
+          };
+        });
+
+        return {
+          ...tab,
+          sections: nextSections,
+        };
+      }
+
       const firstOpenSection = tab.sections.find((section) => !section.collapsed) ?? tab.sections[0];
       return {
         ...tab,
@@ -3650,26 +4141,75 @@ export default function App() {
     });
   };
 
-  const addSymbolsToNewWatchlistTab = (symbols: string[], fileName: string) => {
+  const addSymbolsToNewWatchlistTab = (
+    symbols: string[],
+    fileName: string,
+    importedBaskets?: Array<{ symbol: string; basket?: string }>
+  ) => {
     const uniqueSymbols = Array.from(new Set(symbols.filter(Boolean)));
     if (uniqueSymbols.length === 0) return;
 
+    // [DEBUG] basket情報の確認
+    console.log('[TAB-DEBUG] importedBaskets先頭5件:', importedBaskets?.slice(0, 5));
+    console.log('[TAB-DEBUG] basket有り件数:', importedBaskets?.filter((b) => b.basket).length, '/ 全', importedBaskets?.length);
+
     const tabId = createId('watchlist-import');
-    const sectionId = createId('section-import');
     const baseName = fileName.replace(/\.[^.]+$/, '').trim();
     const tabName = (baseName || 'インポート').slice(0, 24);
+
+    let sections: WatchlistSection[] = [];
+    if (importedBaskets && importedBaskets.some((b) => b.basket)) {
+      const basketMap = new Map<string, string[]>();
+      const defaultSymbols: string[] = [];
+      const seen = new Set<string>();
+
+      importedBaskets.forEach((item) => {
+        if (!item.symbol || seen.has(item.symbol)) return;
+        seen.add(item.symbol);
+
+        if (item.basket) {
+          if (!basketMap.has(item.basket)) {
+            basketMap.set(item.basket, []);
+          }
+          basketMap.get(item.basket)!.push(item.symbol);
+        } else {
+          defaultSymbols.push(item.symbol);
+        }
+      });
+
+      basketMap.forEach((symbolsInBasket, basketName) => {
+        sections.push({
+          id: createId('section-import'),
+          name: basketName,
+          collapsed: false,
+          symbols: symbolsInBasket,
+        });
+      });
+
+      if (defaultSymbols.length > 0) {
+        sections.push({
+          id: createId('section-import'),
+          name: 'その他',
+          collapsed: false,
+          symbols: defaultSymbols,
+        });
+      }
+    } else {
+      const sectionId = createId('section-import');
+      sections = [{
+        id: sectionId,
+        name: 'インポート',
+        collapsed: false,
+        symbols: uniqueSymbols,
+      }];
+    }
 
     setWatchlistTabs((currentTabs) => [
       ...currentTabs,
       {
         id: tabId,
         name: tabName,
-        sections: [{
-          id: sectionId,
-          name: 'インポート',
-          collapsed: false,
-          symbols: uniqueSymbols,
-        }],
+        sections,
       },
     ]);
     setActiveWatchlistTabId(tabId);
@@ -3770,6 +4310,8 @@ export default function App() {
           ? {
               ...panel,
               symbol,
+              comparisonOnly: undefined,
+              showVolume: true,
               watchlistTabId: undefined,
               watchlistSectionId: undefined,
               comparisonSymbols: (panel.comparisonSymbols || []).filter(
@@ -4174,8 +4716,52 @@ export default function App() {
   const beginWatchlistImport = (mode: WatchlistImportMode) => {
     watchlistImportModeRef.current = mode;
     setWatchlistImportMode(mode);
+    setWatchlistTransferMenuLayer('root');
     setWatchlistImportMenuOpen(false);
     window.setTimeout(() => csvImportInputRef.current?.click(), 0);
+  };
+
+  const beginWatchlistExport = () => {
+    const initialTabId = watchlistTabs.some((tab) => tab.id === activeWatchlistTabId)
+      ? activeWatchlistTabId
+      : watchlistTabs[0]?.id;
+    setSelectedWatchlistExportTabIds(initialTabId ? [initialTabId] : []);
+    setWatchlistTransferMenuLayer('export');
+  };
+
+  const toggleWatchlistExportTab = (tabId: string) => {
+    setSelectedWatchlistExportTabIds((current) =>
+      current.includes(tabId)
+        ? current.filter((id) => id !== tabId)
+        : [...current, tabId]
+    );
+  };
+
+  const handleExportSelectedWatchlistTabs = () => {
+    const selectedTabIds = new Set(selectedWatchlistExportTabIds);
+    const tabsToExport = watchlistTabs.filter((tab) => selectedTabIds.has(tab.id));
+    if (tabsToExport.length === 0) {
+      setWatchlistImportMessage('エクスポートするタブを1つ以上選択してください。');
+      return;
+    }
+
+    const fileNameCounts = new Map<string, number>();
+    tabsToExport.forEach((tab) => {
+      const baseFileName = sanitizeWatchlistExportFileName(tab.name);
+      const duplicateIndex = fileNameCounts.get(baseFileName) || 0;
+      fileNameCounts.set(baseFileName, duplicateIndex + 1);
+      const uniqueFileName = duplicateIndex === 0
+        ? `${baseFileName}.csv`
+        : `${baseFileName}-${duplicateIndex + 1}.csv`;
+      const csv = createWatchlistExportCsv(tab, tickers, watchlistNameOverrides);
+      downloadWatchlistCsv(csv, uniqueFileName);
+    });
+
+    setWatchlistImportMessage(
+      `${tabsToExport.length}個のウォッチリストをタブ別CSVでエクスポートしました。`
+    );
+    setWatchlistTransferMenuLayer('root');
+    setWatchlistImportMenuOpen(false);
   };
 
   const handleImportWatchlistCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -4193,6 +4779,7 @@ export default function App() {
       const tickerBySymbol = new Map(tickers.map((ticker) => [ticker.symbol, ticker]));
       const allNewTickers: TickerInfo[] = [];
       const allNewQuotes: Record<string, MoomooTickerQuote> = {};
+      const allImportedNameOverrides: Record<string, string> = {};
       const importedFileResults: Array<{ symbols: string[] }> = [];
       let totalInvalidOrDuplicateCount = 0;
       let totalUnverifiedQuoteCount = 0;
@@ -4237,6 +4824,7 @@ export default function App() {
         return {
           kind: 'success' as const,
           ticker: importedTicker,
+          basket: candidate.basket,
           quotes: {} satisfies Record<string, MoomooTickerQuote>,
           quoteVerified: false,
         };
@@ -4279,10 +4867,11 @@ export default function App() {
             return {
               kind: 'success' as const,
               ticker: importedTicker,
+              basket: candidate.basket,
               quotes: {
                 [leftQuoteResult.symbol]: leftQuoteResult.quote,
-                  [rightQuoteResult.symbol]: rightQuoteResult.quote,
-                } satisfies Record<string, MoomooTickerQuote>,
+                [rightQuoteResult.symbol]: rightQuoteResult.quote,
+              } satisfies Record<string, MoomooTickerQuote>,
               quoteVerified: true,
             };
           }
@@ -4302,6 +4891,7 @@ export default function App() {
           return {
             kind: 'success' as const,
             ticker: importedTicker,
+            basket: candidate.basket,
             quotes: {
               [quoteResult.symbol]: quoteResult.quote,
             } satisfies Record<string, MoomooTickerQuote>,
@@ -4346,6 +4936,7 @@ export default function App() {
         }
 
         const importedSymbols: string[] = [];
+        const importedBaskets: Array<{ symbol: string; basket?: string }> = [];
         const quoteResults = await mapWithConcurrency(
           normalizedCandidates,
           WATCHLIST_IMPORT_CONCURRENCY,
@@ -4361,7 +4952,12 @@ export default function App() {
             allNewTickers.push(result.ticker);
           }
           Object.assign(allNewQuotes, result.quotes);
+          const displayName = result.ticker.name.trim();
+          if (displayName && displayName !== result.ticker.symbol) {
+            allImportedNameOverrides[result.ticker.symbol] = displayName;
+          }
           importedSymbols.push(result.ticker.symbol);
+          importedBaskets.push({ symbol: result.ticker.symbol, basket: result.basket });
         });
 
         totalUnverifiedQuoteCount += unverifiedQuoteCount;
@@ -4372,9 +4968,9 @@ export default function App() {
         }
 
         if (importMode === 'new-tab') {
-          addSymbolsToNewWatchlistTab(finalImportedSymbols, file.name);
+          addSymbolsToNewWatchlistTab(finalImportedSymbols, file.name, importedBaskets);
         } else {
-          addSymbolsToActiveWatchlist(finalImportedSymbols);
+          addSymbolsToActiveWatchlist(finalImportedSymbols, importedBaskets);
         }
 
         importedFileResults.push({
@@ -4412,6 +5008,12 @@ export default function App() {
         setQuoteCache((currentQuotes) => ({
           ...currentQuotes,
           ...allNewQuotes,
+        }));
+      }
+      if (Object.keys(allImportedNameOverrides).length > 0) {
+        setWatchlistNameOverrides((current) => ({
+          ...current,
+          ...allImportedNameOverrides,
         }));
       }
 
@@ -4481,6 +5083,7 @@ export default function App() {
       showRsi: !fallbackIsExpression,
       showMacd: false,
       showVolume: !fallbackIsExpression,
+      comparisonLabelRankSpacingScale: 1,
       priceScale: 1,
       priceOffsetPct: 0,
       rsiHeightPct: 25,
@@ -4492,6 +5095,78 @@ export default function App() {
 
     setPanels(prev => [...prev, newPanel]);
     setPanelEngineToggle(prev => ({ ...prev, [newId]: false }));
+  };
+
+  const handleCreateEmptyChartPanel = (comparisonOnly = false, panelName?: string) => {
+    if (panels.length >= 6) {
+      alert("表示できるチャートパネルは最大6つまでです。");
+      return;
+    }
+
+    const newId = comparisonOnly ? `panel-comparison-${Date.now()}` : `panel-empty-${Date.now()}`;
+    const emptyPanel: ChartPanel = {
+      id: newId,
+      name: panelName?.trim() || undefined,
+      symbol: '',
+      timeframe: DAY_RANGE_OVERVIEW_TIMEFRAME,
+      displayRange: DEFAULT_DISPLAY_RANGE,
+      zoomFactor: DAY_RANGE_ZOOM_FACTOR,
+      scrollOffsetPct: 100,
+      showRsi: false,
+      showMacd: false,
+      showVolume: !comparisonOnly,
+      comparisonSymbols: [],
+      comparisonOnly: comparisonOnly || undefined,
+      comparisonLabelRankSpacingScale: 1,
+      priceScale: 1,
+      priceOffsetPct: 0,
+      rsiHeightPct: 25,
+      macdHeightPct: 25,
+    };
+
+    setPanels((currentPanels) => [...currentPanels, emptyPanel]);
+    setPanelEngineToggle((current) => ({ ...current, [newId]: false }));
+    setWatchlistTargetMenu(null);
+  };
+
+  const getDefaultChartName = (comparisonOnly = false) => (
+    comparisonOnly ? '指数比較チャート' : '空チャート'
+  );
+
+  const openChartNameEditor = (panel: ChartPanel) => {
+    setWatchlistTargetMenu(null);
+    setChartNameEditModal({
+      mode: 'rename',
+      panelId: panel.id,
+      draftName: panel.name || getAutoWatchlistTargetLabelForPanel(panel),
+      defaultName: getAutoWatchlistTargetLabelForPanel(panel),
+    });
+  };
+
+  const openCreateComparisonChartNameEditor = () => {
+    setWatchlistTargetMenu(null);
+    setChartNameEditModal({
+      mode: 'create-comparison',
+      draftName: getDefaultChartName(true),
+      defaultName: getDefaultChartName(true),
+    });
+  };
+
+  const saveChartNameEditModal = () => {
+    if (!chartNameEditModal) return;
+    const nextName = (chartNameEditModal.draftName.trim() || chartNameEditModal.defaultName).slice(0, 48);
+    if (chartNameEditModal.mode === 'create-comparison') {
+      handleCreateEmptyChartPanel(true, nextName);
+    } else if (chartNameEditModal.panelId) {
+      handleUpdatePanel(chartNameEditModal.panelId, { name: nextName });
+    }
+    setChartNameEditModal(null);
+  };
+
+  const resetChartName = () => {
+    if (!chartNameEditModal?.panelId) return;
+    handleUpdatePanel(chartNameEditModal.panelId, { name: undefined });
+    setChartNameEditModal(null);
   };
 
   // Remove a specific chart segment panel (minus indicator button)
@@ -4506,6 +5181,44 @@ export default function App() {
   // Modify individual chart properties
   const handleUpdatePanel = (id: string, updates: Partial<ChartPanel>) => {
     setPanels(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+  };
+
+  const handlePanelOrderDragStart = (event: React.DragEvent, panelId: string) => {
+    if (layoutStyle !== 'grid') return;
+    draggedPanelIdRef.current = panelId;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-mooview-panel', panelId);
+  };
+
+  const handlePanelOrderDragOver = (event: React.DragEvent, targetPanelId: string) => {
+    const draggedPanelId = draggedPanelIdRef.current
+      || event.dataTransfer.getData('application/x-mooview-panel');
+    if (layoutStyle !== 'grid' || !draggedPanelId || draggedPanelId === targetPanelId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const handlePanelOrderDrop = (event: React.DragEvent, targetPanelId: string) => {
+    const draggedPanelId = draggedPanelIdRef.current
+      || event.dataTransfer.getData('application/x-mooview-panel');
+    if (layoutStyle !== 'grid' || !draggedPanelId || draggedPanelId === targetPanelId) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    setPanels((currentPanels) => {
+      const fromIndex = currentPanels.findIndex((panel) => panel.id === draggedPanelId);
+      const toIndex = currentPanels.findIndex((panel) => panel.id === targetPanelId);
+      if (fromIndex === -1 || toIndex === -1) return currentPanels;
+      const nextPanels = [...currentPanels];
+      const [movedPanel] = nextPanels.splice(fromIndex, 1);
+      nextPanels.splice(toIndex, 0, movedPanel);
+      return nextPanels;
+    });
+    draggedPanelIdRef.current = null;
+    return true;
+  };
+
+  const handlePanelOrderDragEnd = () => {
+    draggedPanelIdRef.current = null;
   };
 
   const handleUpdatePanelTimeframe = (id: string, timeframe: Timeframe) => {
@@ -4571,12 +5284,18 @@ export default function App() {
     setWatchlistTargetMenu(null);
   };
 
-  const getWatchlistTargetLabelForPanel = (panel: ChartPanel): string => {
+  const getAutoWatchlistTargetLabelForPanel = (panel: ChartPanel): string => {
+    if (panel.comparisonOnly && !panel.watchlistTabId) return '指数比較チャート';
+    if (!normalizeStoredSymbolValue(panel.symbol) && !panel.watchlistTabId) return '空チャート';
     const tab = watchlistTabs.find((item) => item.id === panel.watchlistTabId);
     if (!tab) return 'Sector / Basket';
     if (!panel.watchlistSectionId) return tab.name;
     const section = tab.sections.find((item) => item.id === panel.watchlistSectionId);
     return section ? `${tab.name} / ${section.name}` : tab.name;
+  };
+
+  const getWatchlistTargetLabelForPanel = (panel: ChartPanel): string => {
+    return panel.name?.trim() || getAutoWatchlistTargetLabelForPanel(panel);
   };
 
   // Write custom indicator updates specifically for matching target symbol
@@ -4637,7 +5356,7 @@ export default function App() {
         };
       }
 
-      const cached = resolveCandlesForSymbol(normalizedTicker.symbol, '5m', candlesCache);
+      const cached = resolveCandlesForSymbol(normalizedTicker.symbol, '5m', candlesCache, { watchlistTabs });
       const curPrice = cached && cached.length > 0 ? Number(cached[cached.length - 1].close) : normalizedTicker.basePrice;
       const initialPrice = cached && cached.length > 0 ? Number(cached[0].close) : normalizedTicker.basePrice;
       const changePct = cached.length > 1 && initialPrice !== 0
@@ -4663,6 +5382,11 @@ export default function App() {
   };
 
   const getWatchlistDisplayName = (symbol: string): string => {
+    if (symbol.startsWith('BASKET:')) {
+      const sectionId = symbol.slice(7);
+      const section = watchlistTabs.flatMap(t => t.sections).find(s => s.id === sectionId);
+      return section ? section.name : 'バスケット';
+    }
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
     return watchlistNameOverrides[normalizedSymbol]
       || tickerStatsBySymbol.get(normalizedSymbol)?.name
@@ -4719,6 +5443,32 @@ export default function App() {
   };
 
   const getQuoteSnapshotForChartSymbol = (rawSymbol: string): { price: number; changePct: number | null } | null => {
+    if (!normalizeStoredSymbolValue(rawSymbol)) return null;
+
+    if (rawSymbol.startsWith('BASKET:')) {
+      const sectionId = rawSymbol.slice(7);
+      const section = watchlistTabs.flatMap(t => t.sections).find(s => s.id === sectionId);
+      if (!section || !section.symbols || section.symbols.length === 0) return null;
+
+      const candidates: Array<{ marketCapWeight: number | null; price: number; changePct: number }> = [];
+      for (const sym of section.symbols) {
+        const baseSym = parseSymbolExpression(sym)?.left || sym;
+        const normalizedBase = normalizeStoredSymbolValue(baseSym);
+        const ticker = tickerStatsBySymbol.get(normalizedBase);
+        const snapshot = getQuoteSnapshotForChartSymbol(sym); // recursively get quote for component
+        if (snapshot && Number.isFinite(snapshot.price) && snapshot.price > 0) {
+          candidates.push({
+            marketCapWeight: getPositiveBasketWeight(ticker?.marketCap),
+            price: snapshot.price,
+            changePct: snapshot.changePct ?? 0,
+          });
+        }
+      }
+      const components: BasketQuoteInput[] = assignBasketWeights(candidates)
+        .map(({ weight, price, changePct }) => ({ weight, price, changePct }));
+      return calculateBasketQuote(components);
+    }
+
     const expression = normalizeSymbolExpressionForStorage(rawSymbol);
     if (expression) {
       const leftQuote = quoteCache[expression.left];
@@ -4791,10 +5541,20 @@ export default function App() {
       ? { start: '09:00', end: '15:30' }
       : { start: '09:30', end: '16:00' };
     const toTimestamp = (clock: string) => Math.floor(new Date(`${dateString}T${clock}:00`).getTime() / 1000);
+    const startTimestamp = toTimestamp(session.start);
+    const endTimestamp = toTimestamp(session.end);
+    const nowTimestamp = Math.floor(now.getTime() / 1000);
+    const latestTimestamp = Math.max(startTimestamp + 60, Math.min(nowTimestamp, endTimestamp));
+    const latestDate = new Date(latestTimestamp * 1000);
+    const latestTimeStr = [
+      latestDate.getFullYear(),
+      String(latestDate.getMonth() + 1).padStart(2, '0'),
+      String(latestDate.getDate()).padStart(2, '0'),
+    ].join('-') + ` ${String(latestDate.getHours()).padStart(2, '0')}:${String(latestDate.getMinutes()).padStart(2, '0')}`;
 
     return [
       {
-        time: toTimestamp(session.start),
+        time: startTimestamp,
         timeStr: `${dateString} ${session.start}`,
         open: previousClose,
         high,
@@ -4803,8 +5563,8 @@ export default function App() {
         volume: 0,
       },
       {
-        time: toTimestamp(session.end),
-        timeStr: `${dateString} ${session.end}`,
+        time: latestTimestamp,
+        timeStr: latestTimeStr,
         open: previousClose,
         high,
         low,
@@ -4820,27 +5580,89 @@ export default function App() {
     displayRange: ChartDisplayRange | undefined,
     useDemoFallback = false,
   ): Candle[] => {
+    const normalizedChartSymbol = normalizeStoredSymbolValue(rawSymbol);
+    if (!normalizedChartSymbol) return [];
+
     const seedTimeframes = Array.from(new Set([
       getDisplayRangeSeedTimeframe(displayRange),
       DAY_RANGE_OVERVIEW_TIMEFRAME,
     ].filter((seedTimeframe): seedTimeframe is Timeframe => Boolean(seedTimeframe))));
 
-    let chartCandles = resolveCandlesForSymbol(rawSymbol, timeframe, candlesCache);
+    const options = { tickerStatsBySymbol, watchlistTabs };
+    let chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, timeframe, candlesCache, options);
     for (const seedTimeframe of seedTimeframes) {
       if (chartCandles.length > 0 || seedTimeframe === timeframe) continue;
-      chartCandles = resolveCandlesForSymbol(rawSymbol, seedTimeframe, candlesCache);
+      chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, seedTimeframe, candlesCache, options);
     }
 
     if (chartCandles.length === 0) {
-      chartCandles = createQuoteFallbackCandlesForSymbol(rawSymbol);
+      chartCandles = createQuoteFallbackCandlesForSymbol(normalizedChartSymbol);
     }
 
     if (chartCandles.length === 0 && useDemoFallback) {
-      chartCandles = generateCandles(rawSymbol, timeframe, 220);
+      chartCandles = generateCandles(normalizedChartSymbol, timeframe, 220);
     }
 
-    return filterCandlesForDisplayRange(chartCandles, displayRange, rawSymbol);
+    return filterCandlesForDisplayRange(chartCandles, displayRange, normalizedChartSymbol);
   };
+
+  useEffect(() => {
+    if (!moomooRealTimeActive) return;
+
+    const missingRequests: string[] = [];
+    const missingSymbols = new Set<string>();
+    panels.forEach((panel) => {
+      const chartSymbols = Array.from(new Set([
+        ...(panel.comparisonOnly ? [] : [panel.symbol]),
+        ...(panel.comparisonSymbols || []),
+      ].map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean)));
+      chartSymbols.forEach((symbol) => {
+        const candles = resolveChartCandlesForSymbol(symbol, panel.timeframe, panel.displayRange, false);
+        if (candles.length > 0) return;
+        missingSymbols.add(symbol);
+        missingRequests.push(`${symbol}-${panel.timeframe}-${panel.displayRange || 'normal'}`);
+      });
+    });
+
+    valueChainChartSymbols.forEach((symbol) => {
+      const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+      if (!normalizedSymbol) return;
+      const candles = resolveChartCandlesForSymbol(
+        normalizedSymbol,
+        valueChainChartState.timeframe,
+        valueChainChartState.displayRange,
+        false,
+      );
+      if (candles.length > 0) return;
+      missingSymbols.add(normalizedSymbol);
+      missingRequests.push(`${normalizedSymbol}-${valueChainChartState.timeframe}-${valueChainChartState.displayRange || 'normal'}`);
+    });
+
+    if (missingRequests.length === 0) return;
+
+    const signature = Array.from(new Set(missingRequests)).sort().join('|');
+    const now = Date.now();
+    if (
+      chartMissingDataRefreshRef.current.signature === signature
+      && now - chartMissingDataRefreshRef.current.requestedAt < KLINE_RATE_LIMIT_RETRY_MS
+    ) {
+      return;
+    }
+
+    chartMissingDataRefreshRef.current = { signature, requestedAt: now };
+    queuePriorityQuoteRefreshForChartSymbols(Array.from(missingSymbols));
+    requestChartDropDataRefresh();
+  }, [
+    panels,
+    valueChainChartSymbols,
+    valueChainChartState.timeframe,
+    valueChainChartState.displayRange,
+    candlesCache,
+    quoteCache,
+    moomooRealTimeActive,
+    watchlistTabs,
+    activeWatchlistTabId,
+  ]);
 
   const headerTickerStats = useMemo(() => (
     headerTickerSymbols
@@ -5037,17 +5859,9 @@ export default function App() {
           && tab.sections.some((section) => section.id === panel.watchlistSectionId)
           ? panel.watchlistSectionId
           : undefined;
-        const symbols = validSectionId
-          ? getWatchlistSectionSymbols(tab, validSectionId)
-          : getWatchlistTabSymbols(tab);
-        const syncedPanel = syncPanelToWatchlistTarget(
-          panel,
-          { tabId: panel.watchlistTabId, sectionId: validSectionId },
-          symbols,
-        );
-        if (!hasWatchlistPanelTargetChanged(panel, syncedPanel)) return panel;
+        if (validSectionId === panel.watchlistSectionId) return panel;
         changed = true;
-        return syncedPanel;
+        return { ...panel, watchlistSectionId: validSectionId };
       });
       return changed ? nextPanels : currentPanels;
     });
@@ -5114,10 +5928,14 @@ export default function App() {
   const getComparableSymbolsForPanel = (
     panel: ChartPanel,
     symbols: string[],
+    options: { allowMissingData?: boolean } = {},
   ): string[] => {
     const currentComparisons = new Set(panel.comparisonSymbols || []);
     return Array.from(new Set(symbols)).filter((symbol) => {
       if (!symbol || symbol === panel.symbol || currentComparisons.has(symbol)) return false;
+      // BASKET:xxxx シンボルは特別扱い（tickerStats不要）
+      if (symbol.startsWith('BASKET:')) return true;
+      if (options.allowMissingData) return true;
       const ticker = tickerStatsBySymbol.get(symbol);
       const currentPrice = Number(ticker?.currentPrice);
       return !moomooRealTimeActive
@@ -5125,8 +5943,20 @@ export default function App() {
     });
   };
 
-  const addComparisonSymbolsToPanel = (panel: ChartPanel, symbols: string[]) => {
-    const symbolsToAdd = getComparableSymbolsForPanel(panel, symbols);
+  const requestChartDropDataRefresh = () => {
+    forceCandleRefreshRef.current = true;
+    if (candleFetchInFlightRef.current) {
+      candleFetchPendingRef.current = true;
+    }
+    setTickTrigger((current) => current + 1);
+  };
+
+  const addComparisonSymbolsToPanel = (
+    panel: ChartPanel,
+    symbols: string[],
+    options: { allowMissingData?: boolean } = {},
+  ) => {
+    const symbolsToAdd = getComparableSymbolsForPanel(panel, symbols, options);
     if (symbolsToAdd.length === 0) {
       return false;
     }
@@ -5140,8 +5970,50 @@ export default function App() {
     return true;
   };
 
+  const addSymbolsToPanelFromDrop = (panel: ChartPanel, symbols: string[]) => {
+    const normalizedSymbols = Array.from(new Set(
+      symbols.map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean),
+    ));
+    if (normalizedSymbols.length === 0) return false;
+
+    if (panel.comparisonOnly) {
+      const added = addComparisonSymbolsToPanel(panel, normalizedSymbols, { allowMissingData: true });
+      if (added) {
+        queuePriorityQuoteRefreshForChartSymbols(normalizedSymbols);
+        requestChartDropDataRefresh();
+      }
+      return added;
+    }
+
+    if (!panel.symbol) {
+      const [primarySymbol, ...comparisonSymbols] = normalizedSymbols;
+      const primaryIsExpression = Boolean(parseSymbolExpression(primarySymbol));
+      requestChartDropDataRefresh();
+      handleUpdatePanel(panel.id, {
+        symbol: primarySymbol,
+        watchlistTabId: undefined,
+        watchlistSectionId: undefined,
+        comparisonSymbols: comparisonSymbols.filter((symbol) => symbol !== primarySymbol),
+        showRsi: !primaryIsExpression,
+        showMacd: false,
+        showVolume: !primaryIsExpression,
+        scrollOffsetPct: 100,
+      });
+      queuePriorityQuoteRefreshForChartSymbols(normalizedSymbols);
+      setActiveComparisonPopoverPanelId(null);
+      return true;
+    }
+
+    const added = addComparisonSymbolsToPanel(panel, normalizedSymbols, { allowMissingData: true });
+    if (added) {
+      queuePriorityQuoteRefreshForChartSymbols(normalizedSymbols);
+      requestChartDropDataRefresh();
+    }
+    return added;
+  };
+
   const getDraggedTickerSymbols = () => {
-    if (draggedBasket?.symbols.length) return draggedBasket.symbols;
+    if (draggedBasket?.symbols.length) return [`BASKET:${draggedBasket.sectionId}`];
     if (!draggedTicker) return [];
     return draggedTicker.symbols.length > 0 ? draggedTicker.symbols : [draggedTicker.symbol];
   };
@@ -5212,6 +6084,12 @@ export default function App() {
         comparisonSymbols={comparableSymbols}
         comparisonLabelFontSize={comparisonLabelFontSize}
         onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
+        comparisonLabelLayoutMode={comparisonLabelLayoutMode}
+        onComparisonLabelLayoutModeChange={updateComparisonLabelLayoutMode}
+        comparisonLabelRankSpacingScale={valueChainChartState.comparisonLabelRankSpacingScale ?? 1}
+        onComparisonLabelRankSpacingScaleChange={(comparisonLabelRankSpacingScale) =>
+          setValueChainChartState((current) => ({ ...current, comparisonLabelRankSpacingScale }))
+        }
         symbolDisplayNames={createChartSymbolDisplayNames([symbol, ...comparableSymbols])}
         changePctOverrides={createChartChangePctOverrides(
           [symbol, ...comparableSymbols],
@@ -5364,7 +6242,7 @@ export default function App() {
                     <div className="flex items-center space-x-1.5">
                       <span className="font-bold text-gray-200 text-xs">{ticker.symbol}</span>
                       <span className={`text-[10px] font-mono font-bold ${
-                        !hasRealQuote ? 'text-gray-500' : pos ? 'text-[#26a69a]' : 'text-[#ef5350]'
+                        !hasRealQuote ? 'text-gray-500' : pos ? 'text-[#009b87]' : 'text-[#ff4057]'
                       }`}>
                         {hasRealQuote
                           ? `${pos ? '▲' : '▼'} ${Math.abs(ticker.computedChange).toFixed(2)}%`
@@ -5530,19 +6408,56 @@ export default function App() {
                   className="flex flex-col min-h-0 min-w-[120px]"
                 >
                   {col.map((panel, pIdx) => {
-                    const panelExpression = normalizeSymbolExpressionForStorage(panel.symbol);
-                    const pCandles = resolveChartCandlesForSymbol(
-                      panel.symbol,
-                      panel.timeframe,
-                      panel.displayRange,
-                      !moomooRealTimeActive,
-                    );
-                    const pCandleError = getCandleFetchError(panel.symbol, panel.timeframe);
-                    const pSettings = panelExpression
-                      ? createDefaultIndicatorSettings(panel.symbol)
-                      : indicatorDatabase[panel.symbol.toUpperCase()] || createDefaultIndicatorSettings(panel.symbol);
-                    const isTvEmbed = Boolean(panelEngineToggle[panel.id]) && !panelExpression;
+                    const panelSymbol = normalizeStoredSymbolValue(panel.symbol);
+                    const panelComparisonSymbols = panel.comparisonSymbols || [];
+                    const panelComparisonOnly = Boolean(panel.comparisonOnly);
+                    const panelShowPrimaryCandles = panel.showPrimaryCandles !== false;
+                    const panelComparisonCandles = panelComparisonSymbols.reduce((acc, compSym) => {
+                      const candles = resolveChartCandlesForSymbol(
+                        compSym,
+                        panel.timeframe,
+                        panel.displayRange,
+                        !moomooRealTimeActive,
+                      );
+                      if (candles.length > 0) {
+                        acc[compSym] = candles;
+                      }
+                      return acc;
+                    }, {} as Record<string, Candle[]>);
+                    const comparisonAnchorSymbol = panelComparisonOnly
+                      ? panelComparisonSymbols.find((symbol) => (panelComparisonCandles[symbol]?.length ?? 0) > 0)
+                        || panelComparisonSymbols[0]
+                        || ''
+                      : '';
+                    const chartAnchorSymbol = panelComparisonOnly ? comparisonAnchorSymbol : panelSymbol;
+                    const panelIsEmpty = panelComparisonOnly ? panelComparisonSymbols.length === 0 : !panelSymbol;
+                    const panelExpression = panelComparisonOnly || !panelSymbol ? null : normalizeSymbolExpressionForStorage(panelSymbol);
+                    const pCandles = panelComparisonOnly
+                      ? comparisonAnchorSymbol
+                        ? panelComparisonCandles[comparisonAnchorSymbol] || []
+                        : []
+                      : chartAnchorSymbol
+                        ? resolveChartCandlesForSymbol(
+                          chartAnchorSymbol,
+                          panel.timeframe,
+                          panel.displayRange,
+                          !moomooRealTimeActive,
+                        )
+                        : [];
+                    const pCandleError = chartAnchorSymbol ? getCandleFetchError(chartAnchorSymbol, panel.timeframe) : null;
+                    const pSettings = !chartAnchorSymbol || panelComparisonOnly
+                      ? createDefaultIndicatorSettings('EMPTY')
+                      : panelExpression
+                        ? createDefaultIndicatorSettings(panelSymbol)
+                        : indicatorDatabase[panelSymbol.toUpperCase()] || createDefaultIndicatorSettings(panelSymbol);
+                    const isTvEmbed = Boolean(panelEngineToggle[panel.id]) && !panelExpression && !panelIsEmpty && !panelComparisonOnly;
                     const selectedComparisonCandidates = getComparableSymbolsForPanel(panel, selectedSymbols);
+                    const chartDisplaySymbols = Array.from(new Set(
+                      [
+                        ...(panelComparisonOnly ? [] : [chartAnchorSymbol]),
+                        ...panelComparisonSymbols,
+                      ].filter(Boolean),
+                    ));
 
                     return (
                       <React.Fragment key={panel.id}>
@@ -5552,17 +6467,37 @@ export default function App() {
                             height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
                           onDragOver={(event) => {
-                            if ((draggedTicker || draggedBasket) && !isTvEmbed) {
+                            if (event.dataTransfer.types.includes('application/x-mooview-panel')) {
+                              handlePanelOrderDragOver(event, panel.id);
+                              return;
+                            }
+                            const isBasketDrag = event.dataTransfer.types.includes('application/x-mooview-basket');
+                            if ((draggedTicker || draggedBasketRef.current || isBasketDrag) && !isTvEmbed) {
                               event.preventDefault();
                               event.dataTransfer.dropEffect = 'copy';
                             }
                           }}
                           onDrop={(event) => {
-                            if ((!draggedTicker && !draggedBasket) || isTvEmbed) return;
+                            if (handlePanelOrderDrop(event, panel.id)) {
+                              return;
+                            }
+                            const isBasketDrag = event.dataTransfer.types.includes('application/x-mooview-basket');
+                            const currentBasket = draggedBasketRef.current;
+                            if ((!draggedTicker && !currentBasket && !isBasketDrag) || isTvEmbed) return;
                             event.preventDefault();
                             event.stopPropagation();
-                            addComparisonSymbolsToPanel(panel, getDraggedTickerSymbols());
+
+                            if (currentBasket || isBasketDrag) {
+                              const sectionId = currentBasket?.sectionId
+                                ?? event.dataTransfer.getData('application/x-mooview-basket');
+                              if (sectionId) {
+                                addSymbolsToPanelFromDrop(panel, [`BASKET:${sectionId}`]);
+                              }
+                            } else {
+                              addSymbolsToPanelFromDrop(panel, getDraggedTickerSymbols());
+                            }
                             setDraggedTicker(null);
+                            draggedBasketRef.current = null;
                             setDraggedBasket(null);
                             setDraggedSectionId(null);
                           }}
@@ -5604,6 +6539,10 @@ export default function App() {
                                               checked={isAdded}
                                               disabled={!canCompare}
                                               onChange={() => {
+                                                if (!panel.symbol && !isAdded) {
+                                                  addSymbolsToPanelFromDrop(panel, [t.symbol]);
+                                                  return;
+                                                }
                                                 const prevList = panel.comparisonSymbols || [];
                                                 const updatedList = isAdded
                                                   ? prevList.filter(s => s !== t.symbol)
@@ -5637,6 +6576,14 @@ export default function App() {
                                   <button
                                     id={`select-watchlist-tab-${panel.id}`}
                                     type="button"
+                                    draggable={layoutStyle === 'grid'}
+                                    onDragStart={(event) => handlePanelOrderDragStart(event, panel.id)}
+                                    onDragEnd={handlePanelOrderDragEnd}
+                                    onContextMenu={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      openChartNameEditor(panel);
+                                    }}
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       const rect = event.currentTarget.getBoundingClientRect();
@@ -5660,9 +6607,9 @@ export default function App() {
                                               maxHeight: Math.max(180, window.innerHeight - y - 12),
                                             }
                                       ));
-                                    }}
+                                      }}
                                     className="h-7 w-[150px] bg-[#171717] border border-[#2a2a2a] text-white rounded text-xs px-2 font-bold outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 cursor-pointer flex items-center justify-between gap-2"
-                                    title="比較表示するSectorまたはBasketを選択"
+                                    title="クリックで選択、右クリックで名称変更、ドラッグでチャート順序変更"
                                   >
                                     <span className="min-w-0 truncate">{getWatchlistTargetLabelForPanel(panel)}</span>
                                     <ChevronDown className="w-3.5 h-3.5 shrink-0 text-gray-400" />
@@ -5678,6 +6625,36 @@ export default function App() {
                                       }}
                                       onClick={(event) => event.stopPropagation()}
                                     >
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCreateEmptyChartPanel(false)}
+                                        disabled={panels.length >= 6}
+                                        className="group flex w-full items-center gap-2 px-2 py-2 text-left hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                        title="空のチャートを追加"
+                                      >
+                                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-emerald-700 bg-emerald-950/80 text-emerald-200">
+                                          <Plus className="h-3 w-3" />
+                                        </span>
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block truncate text-[11px] font-bold text-emerald-100">新規作成チャート</span>
+                                          <span className="block truncate text-[9px] text-emerald-300/70">空のチャートへ銘柄・バスケットを投げ込む</span>
+                                        </span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={openCreateComparisonChartNameEditor}
+                                        disabled={panels.length >= 6}
+                                        className="group flex w-full items-center gap-2 border-b border-[#242424] px-2 py-2 text-left hover:bg-cyan-950/45 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                        title="ローソク足を出さず、指数比較線だけの空チャートを追加"
+                                      >
+                                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-cyan-700 bg-cyan-950/80 text-cyan-200">
+                                          <Plus className="h-3 w-3" />
+                                        </span>
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block truncate text-[11px] font-bold text-cyan-100">新規作成チャート（指数比較）</span>
+                                          <span className="block truncate text-[9px] text-cyan-300/70">初回ドロップから比較線として描画</span>
+                                        </span>
+                                      </button>
                                       {watchlistTabs.map((tab) => {
                                         const tabSymbols = watchlistTabSymbolsById.get(tab.id) ?? [];
                                         const tabSelected = panel.watchlistTabId === tab.id && !panel.watchlistSectionId;
@@ -5889,21 +6866,23 @@ export default function App() {
                                 {/* ENGINE SELECT SWITCH */}
                                 <button
                                   onClick={() => {
-                                    if (!panelExpression) togglePanelEngine(panel.id);
+                                    if (!panelExpression && !panelComparisonOnly) togglePanelEngine(panel.id);
                                   }}
-                                  disabled={Boolean(panelExpression)}
+                                  disabled={Boolean(panelExpression) || panelComparisonOnly}
                                   className={`text-[9px] px-2 py-0.5 rounded font-bold uppercase transition-colors ${
-                                    panelExpression
+                                    panelExpression || panelComparisonOnly
                                       ? 'bg-[#171717] text-gray-500 border border-[#2a2a2a] cursor-not-allowed'
                                     : isTvEmbed
                                       ? 'bg-purple-950/80 text-purple-300 border border-purple-800' 
                                       : 'bg-emerald-950/80 text-emerald-300 border border-emerald-900'
                                   }`}
-                                  title={panelExpression
+                                  title={panelComparisonOnly
+                                    ? '指数比較チャートはカスタム線チャートで描画します'
+                                    : panelExpression
                                     ? '演算式はカスタムチャートで描画します'
                                     : 'TradingView公式ライブウィジェットとカスタムチャートを切り替えます'}
                                 >
-                                  {panelExpression ? '演算式' : isTvEmbed ? 'TradingView公式' : 'カスタム' }
+                                  {panelComparisonOnly ? '指数比較' : panelExpression ? '演算式' : isTvEmbed ? 'TradingView公式' : 'カスタム' }
                                 </button>
 
                               </div>
@@ -5919,7 +6898,7 @@ export default function App() {
                                         if (!panelExpression) handleUpdatePanel(panel.id, { showVolume: !panel.showVolume });
                                       }}
                                       disabled={Boolean(panelExpression)}
-                                      className={`px-1 rounded ${!panelExpression && panel.showVolume ? 'text-[#26a69a] font-bold bg-[#142d2a]' : 'text-gray-500'} ${panelExpression ? 'cursor-not-allowed opacity-50' : ''}`}
+                                      className={`px-1 rounded ${!panelExpression && panel.showVolume ? 'text-[#009b87] font-bold bg-[#142d2a]' : 'text-gray-500'} ${panelExpression ? 'cursor-not-allowed opacity-50' : ''}`}
                                       title="出来高を表示"
                                     >
                                       出来高
@@ -5952,7 +6931,7 @@ export default function App() {
                                   <button
                                     onClick={() => {
                                       if (selectedComparisonCandidates.length > 0) {
-                                        addComparisonSymbolsToPanel(panel, selectedSymbols);
+                                        addSymbolsToPanelFromDrop(panel, selectedSymbols);
                                         return;
                                       }
                                       setActiveComparisonPopoverPanelId(activeComparisonPopoverPanelId === panel.id ? null : panel.id);
@@ -5984,14 +6963,14 @@ export default function App() {
                             <div className="flex-1 flex flex-col min-h-0 bg-[#090909]">
                               {isTvEmbed ? (
                                 <TradingViewWidget 
-                                  symbol={panel.symbol} 
+                                  symbol={panelSymbol}
                                   timeframe={panel.timeframe} 
                                   containerId={panel.id} 
                                   height={panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}
                                 />
                               ) : (
                                 <InteractiveCustomChart 
-                                  symbol={panel.symbol}
+                                  symbol={chartAnchorSymbol}
                                   candles={pCandles}
                                   timeframe={panel.timeframe}
                                   indicatorSettings={pSettings}
@@ -5999,32 +6978,33 @@ export default function App() {
                                   setZoomFactor={(zf) => handleUpdatePanel(panel.id, { zoomFactor: zf })}
                                   scrollOffsetPct={panel.scrollOffsetPct}
                                   setScrollOffsetPct={(offset) => handleUpdatePanel(panel.id, { scrollOffsetPct: offset })}
-                                  showVolume={!panelExpression && panel.showVolume}
-                                  showRsi={!panelExpression && panel.showRsi}
-                                  showMacd={!panelExpression && panel.showMacd}
-                                  comparisonSymbols={panel.comparisonSymbols || []}
+                                  showVolume={!panelExpression && !panelComparisonOnly && panel.showVolume}
+                                  showRsi={!panelExpression && !panelComparisonOnly && panel.showRsi}
+                                  showMacd={!panelExpression && !panelComparisonOnly && panel.showMacd}
+                                  showPrimaryCandles={panelShowPrimaryCandles}
+                                  comparisonSymbols={panelComparisonSymbols}
+                                  comparisonOnly={panelComparisonOnly}
                                   comparisonLabelFontSize={comparisonLabelFontSize}
                                   onComparisonLabelFontSizeChange={updateComparisonLabelFontSize}
-                                  symbolDisplayNames={createChartSymbolDisplayNames([panel.symbol, ...(panel.comparisonSymbols || [])])}
+                                  comparisonLabelLayoutMode={comparisonLabelLayoutMode}
+                                  onComparisonLabelLayoutModeChange={updateComparisonLabelLayoutMode}
+                                  comparisonLabelRankSpacingScale={panel.comparisonLabelRankSpacingScale ?? 1}
+                                  onComparisonLabelRankSpacingScaleChange={(comparisonLabelRankSpacingScale) =>
+                                    handleUpdatePanel(panel.id, { comparisonLabelRankSpacingScale })
+                                  }
+                                  symbolDisplayNames={createChartSymbolDisplayNames(chartDisplaySymbols)}
                                   changePctOverrides={createChartChangePctOverrides(
-                                    [panel.symbol, ...(panel.comparisonSymbols || [])],
+                                    chartDisplaySymbols,
                                     panel.displayRange,
                                   )}
-                                  comparisonCandles={
-                                    (panel.comparisonSymbols || []).reduce((acc, compSym) => {
-                                      const candles = resolveChartCandlesForSymbol(
-                                        compSym,
-                                        panel.timeframe,
-                                        panel.displayRange,
-                                        !moomooRealTimeActive,
-                                      );
-                                      if (candles.length > 0) {
-                                        acc[compSym] = candles;
-                                      }
-                                      return acc;
-                                    }, {} as Record<string, Candle[]>)
-                                  }
-                                  emptyMessage={pCandleError ?? (moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...')}
+                                  comparisonCandles={panelComparisonCandles}
+                                  emptyMessage={panelIsEmpty
+                                    ? panelComparisonOnly
+                                      ? '指数・バスケットをここへドロップ'
+                                      : '銘柄・バスケットをここへドロップ'
+                                    : panelComparisonOnly
+                                      ? pCandleError ?? '比較用データを取得中...'
+                                      : pCandleError ?? (moomooRealTimeActive ? 'Moomoo実データを取得中...' : 'デモデータを生成中...')}
                                   priceScale={panel.priceScale ?? 1}
                                   setPriceScale={(scale) => handleUpdatePanel(panel.id, { priceScale: scale })}
                                   priceOffsetPct={panel.priceOffsetPct ?? 0}
@@ -6033,15 +7013,16 @@ export default function App() {
                                   setRsiHeightPct={(pct) => handleUpdatePanel(panel.id, { rsiHeightPct: pct })}
                                   macdHeightPct={panel.macdHeightPct ?? 25}
                                   setMacdHeightPct={(pct) => handleUpdatePanel(panel.id, { macdHeightPct: pct })}
-                                  onOpenIndicatorSettings={() => openIndicatorSettingsForSymbol(panel.symbol)}
+                                  onOpenIndicatorSettings={panelIsEmpty || panelComparisonOnly ? undefined : () => openIndicatorSettingsForSymbol(panelSymbol)}
                                   onRemoveComparisonSymbol={(symbol) => {
                                     handleUpdatePanel(panel.id, {
-                                      comparisonSymbols: (panel.comparisonSymbols || []).filter((item) => item !== symbol),
+                                      comparisonSymbols: panelComparisonSymbols.filter((item) => item !== symbol),
                                     });
                                   }}
-                                  onToggleVolume={!panelExpression ? () => handleUpdatePanel(panel.id, { showVolume: !panel.showVolume }) : undefined}
-                                  onToggleRsi={!panelExpression ? () => handleUpdatePanel(panel.id, { showRsi: !panel.showRsi }) : undefined}
-                                  onToggleMacd={!panelExpression ? () => handleUpdatePanel(panel.id, { showMacd: !panel.showMacd }) : undefined}
+                                  onToggleVolume={!panelExpression && !panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showVolume: !panel.showVolume }) : undefined}
+                                  onToggleRsi={!panelExpression && !panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showRsi: !panel.showRsi }) : undefined}
+                                  onToggleMacd={!panelExpression && !panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showMacd: !panel.showMacd }) : undefined}
+                                  onTogglePrimaryCandles={!panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showPrimaryCandles: panelShowPrimaryCandles ? false : undefined }) : undefined}
                                   allowNegativeValues={Boolean(panelExpression)}
                                   valuePrecision={panelExpression ? 4 : 2}
                                 />
@@ -6419,40 +7400,148 @@ export default function App() {
                       event.stopPropagation();
                       watchlistImportModeRef.current = 'new-tab';
                       setWatchlistImportMode('new-tab');
+                      setWatchlistTransferMenuLayer('root');
                       setWatchlistImportMenuOpen((open) => !open);
                     }}
                     disabled={watchlistImporting}
                     className="w-7 h-7 border border-b-0 border-[#202020] text-gray-400 hover:text-white hover:bg-[#171717] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
-                    aria-label="CSVをインポート"
-                    title={watchlistImporting ? 'CSVをインポート中' : 'CSVをインポート'}
+                    aria-label="ウォッチリストのインポートとエクスポート"
+                    title={watchlistImporting ? 'CSVをインポート中' : 'インポート／エクスポート'}
                   >
-                    <Upload className={`w-3.5 h-3.5 ${watchlistImporting ? 'animate-spin text-emerald-300' : ''}`} />
+                    <ArrowUpDown className={`w-3.5 h-3.5 ${watchlistImporting ? 'animate-spin text-emerald-300' : ''}`} />
                   </button>
                   {watchlistImportMenuOpen && !watchlistImporting && (
                     <div
-                      className="absolute right-0 top-full z-50 w-56 bg-[#080808] border border-[#343434] py-1 shadow-2xl text-[10px] text-gray-200"
+                      className="absolute right-0 top-full z-50 w-64 bg-[#080808] border border-[#343434] py-1 shadow-2xl text-[10px] text-gray-200"
                       onClick={(event) => event.stopPropagation()}
                     >
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          beginWatchlistImport('new-tab');
-                        }}
-                        className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'new-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
-                      >
-                        新規タブへ追加
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          beginWatchlistImport('active-tab');
-                        }}
-                        className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'active-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
-                      >
-                        アクティブなウォッチリストへ追加
-                      </button>
+                      {watchlistTransferMenuLayer === 'root' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setWatchlistTransferMenuLayer('import')}
+                            className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717]"
+                          >
+                            <Upload className="w-3.5 h-3.5 text-emerald-300" />
+                            <span className="flex-1 text-left">インポート</span>
+                            <ChevronRight className="w-3 h-3 text-gray-500" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={beginWatchlistExport}
+                            className="w-full px-2.5 py-2 flex items-center gap-2 hover:bg-[#171717]"
+                          >
+                            <Download className="w-3.5 h-3.5 text-cyan-300" />
+                            <span className="flex-1 text-left">エクスポート</span>
+                            <ChevronRight className="w-3 h-3 text-gray-500" />
+                          </button>
+                        </>
+                      )}
+
+                      {watchlistTransferMenuLayer === 'import' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setWatchlistTransferMenuLayer('root')}
+                            className="w-full px-2.5 py-1.5 flex items-center gap-1.5 text-gray-400 hover:text-white hover:bg-[#171717] border-b border-[#242424]"
+                          >
+                            <ChevronRight className="w-3 h-3 rotate-180" />
+                            <span>インポート方法</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              beginWatchlistImport('new-tab');
+                            }}
+                            className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'new-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
+                          >
+                            新規タブへ追加
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              beginWatchlistImport('active-tab');
+                            }}
+                            className={`w-full px-2.5 py-1.5 text-left hover:bg-[#171717] ${watchlistImportMode === 'active-tab' ? 'text-emerald-300 bg-[#10251f]' : ''}`}
+                          >
+                            アクティブなウォッチリストへ追加
+                          </button>
+                        </>
+                      )}
+
+                      {watchlistTransferMenuLayer === 'export' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setWatchlistTransferMenuLayer('root')}
+                            className="w-full px-2.5 py-1.5 flex items-center gap-1.5 text-gray-400 hover:text-white hover:bg-[#171717] border-b border-[#242424]"
+                          >
+                            <ChevronRight className="w-3 h-3 rotate-180" />
+                            <span className="flex-1 text-left">エクスポートするタブ</span>
+                            <span className="text-[9px] text-cyan-300">
+                              {selectedWatchlistExportTabIds.length}件
+                            </span>
+                          </button>
+                          <div className="flex items-center gap-1 px-2 py-1 border-b border-[#242424]">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedWatchlistExportTabIds(watchlistTabs.map((tab) => tab.id))}
+                              className="px-1.5 py-0.5 text-[9px] text-gray-300 border border-[#303030] hover:bg-[#171717]"
+                            >
+                              すべて選択
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedWatchlistExportTabIds([])}
+                              className="px-1.5 py-0.5 text-[9px] text-gray-500 border border-[#303030] hover:text-gray-200 hover:bg-[#171717]"
+                            >
+                              選択解除
+                            </button>
+                          </div>
+                          <div className="max-h-52 overflow-y-auto py-1">
+                            {watchlistTabs.map((tab) => {
+                              const selected = selectedWatchlistExportTabIds.includes(tab.id);
+                              const symbolCount = getWatchlistTabSymbols(tab).length;
+                              return (
+                                <button
+                                  key={tab.id}
+                                  type="button"
+                                  onClick={() => toggleWatchlistExportTab(tab.id)}
+                                  className={`w-full px-2.5 py-1.5 flex items-center gap-2 text-left hover:bg-[#171717] ${
+                                    selected ? 'text-cyan-200 bg-cyan-950/25' : 'text-gray-300'
+                                  }`}
+                                >
+                                  <span
+                                    className={`w-3.5 h-3.5 shrink-0 border flex items-center justify-center text-[9px] ${
+                                      selected
+                                        ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
+                                        : 'border-[#4a4a4a] text-transparent'
+                                    }`}
+                                    aria-hidden="true"
+                                  >
+                                    ✓
+                                  </span>
+                                  <span className="flex-1 truncate">{tab.name}</span>
+                                  <span className="text-[9px] text-gray-500">{symbolCount}銘柄</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div className="px-2 pt-1.5 pb-1 border-t border-[#242424]">
+                            <button
+                              type="button"
+                              onClick={handleExportSelectedWatchlistTabs}
+                              disabled={selectedWatchlistExportTabIds.length === 0}
+                              className="w-full px-2 py-1.5 flex items-center justify-center gap-1.5 bg-cyan-900/40 text-cyan-100 border border-cyan-800/60 hover:bg-cyan-800/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              選択したタブをCSV出力
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -6687,19 +7776,23 @@ export default function App() {
                       draggable={editingSectionId !== section.id}
                       onDragStart={(event) => {
                         const basketSymbols = section.symbols.map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean);
-                        event.dataTransfer.effectAllowed = 'move';
-                        event.dataTransfer.setData('text/plain', basketSymbols.join(','));
-                        event.dataTransfer.setData('application/x-mooview-symbols', JSON.stringify(basketSymbols));
+                        const basket = { sectionId: section.id, symbols: basketSymbols };
+                        event.dataTransfer.effectAllowed = 'copy';
+                        event.dataTransfer.setData('text/plain', `BASKET:${section.id}`);
+                        event.dataTransfer.setData('application/x-mooview-basket', section.id);
                         setDraggedTicker(null);
-                        setDraggedSectionId(section.id);
-                        setDraggedBasket({ sectionId: section.id, symbols: basketSymbols });
+                        // draggedSectionIdはセットしない（ウォッチリスト内の並び替えDnDと区別）
+                        draggedBasketRef.current = basket;
+                        setDraggedBasket(basket);
                       }}
                       onDragEnd={() => {
                         setDraggedSectionId(null);
+                        draggedBasketRef.current = null;
                         setDraggedBasket(null);
                       }}
                       onDragOver={(event) => {
-                        if (draggedSectionId) {
+                        // バスケットドラッグ中はチャートへのドロップを許可（preventDefault不要=バブリング継続）
+                        if (draggedSectionId && !draggedBasketRef.current) {
                           event.preventDefault();
                           event.stopPropagation();
                         }
@@ -7106,6 +8199,83 @@ export default function App() {
               </div>
             )}
 
+            {chartNameEditModal && (
+              <div
+                className="fixed inset-0 z-[82] bg-black/55 flex items-center justify-center px-4"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) setChartNameEditModal(null);
+                }}
+              >
+                <div
+                  className="w-full max-w-sm border border-[#343434] bg-[#080808] shadow-2xl p-4 text-xs text-gray-200"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3 border-b border-[#242424] pb-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white">
+                        {chartNameEditModal.mode === 'create-comparison' ? '指数比較チャート名' : 'チャート名を変更'}
+                      </div>
+                      <div className="mt-1 text-[10px] text-gray-500 truncate">
+                        {chartNameEditModal.defaultName}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setChartNameEditModal(null)}
+                      className="h-7 w-7 flex items-center justify-center text-gray-500 hover:text-white hover:bg-[#171717]"
+                      aria-label="閉じる"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <label className="mt-3 block text-[10px] text-gray-500">
+                    表示名
+                    <input
+                      value={chartNameEditModal.draftName}
+                      onChange={(event) => setChartNameEditModal((current) => (
+                        current ? { ...current, draftName: event.target.value } : current
+                      ))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') saveChartNameEditModal();
+                      }}
+                      className="mt-1 h-9 w-full bg-[#121212] border border-[#303030] text-white text-xs px-2 outline-none focus:border-emerald-500"
+                      autoFocus
+                    />
+                  </label>
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    {chartNameEditModal.mode === 'rename' ? (
+                      <button
+                        type="button"
+                        onClick={resetChartName}
+                        className="h-8 px-2.5 border border-[#303030] text-gray-300 hover:text-white hover:bg-[#171717] flex items-center gap-1.5"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        自動名に戻す
+                      </button>
+                    ) : (
+                      <span />
+                    )}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setChartNameEditModal(null)}
+                        className="h-8 px-3 border border-[#303030] text-gray-400 hover:text-white hover:bg-[#171717]"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="button"
+                        onClick={saveChartNameEditModal}
+                        className="h-8 px-3 bg-emerald-600 text-white font-bold hover:bg-emerald-500"
+                      >
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
           )}
 
@@ -7135,12 +8305,12 @@ export default function App() {
           <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">接続ステータス</span>
-              <span className="inline-flex w-2 h-2 rounded-full bg-[#26a69a] animate-pulse" />
+              <span className="inline-flex w-2 h-2 rounded-full bg-[#009b87] animate-pulse" />
             </div>
             <div className="h-px bg-gray-800/60" />
             <div className="flex items-center justify-between text-[11px] font-mono">
               <span className="flex items-center space-x-1.5 text-gray-400">
-                <Database className="w-3.5 h-3.5 text-[#26a69a]" />
+                <Database className="w-3.5 h-3.5 text-[#009b87]" />
                 <span>Moomoo OpenAPI:</span>
               </span>
               <span className="text-gray-200 font-bold">
@@ -7149,7 +8319,7 @@ export default function App() {
             </div>
             <div className="flex items-center justify-between text-[11px] font-mono">
               <span className="text-gray-400">応答速度:</span>
-              <span className="text-[#26a69a] font-bold">{networkLatency}ms</span>
+              <span className="text-[#009b87] font-bold">{networkLatency}ms</span>
             </div>
           </div>
 
@@ -7257,7 +8427,7 @@ export default function App() {
       <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">
         <div className="flex items-center space-x-3">
           <span className="flex items-center space-x-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#26a69a]"></span>
+            <span className="w-1.5 h-1.5 rounded-full bg-[#009b87]"></span>
             <span>WebSocket Quotations Client: Online</span>
           </span>
           <span className="text-gray-800">|</span>

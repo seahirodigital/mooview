@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Candle, IndicatorLineStyle, SymbolIndicatorSettings, Timeframe } from '../types';
+import { Candle, ComparisonLabelLayoutMode, IndicatorLineStyle, SymbolIndicatorSettings, Timeframe } from '../types';
 import { 
   calculateMA, 
   calculateEMA, 
@@ -7,7 +7,7 @@ import {
   calculateRSI, 
   calculateMACD 
 } from '../indicators';
-import { List, Minus, Plus, RotateCcw, X } from 'lucide-react';
+import { ChevronDown, List, Minus, Plus, RotateCcw, X } from 'lucide-react';
 import { getSeriesColor } from '../chartSeriesColors';
 
 interface InteractiveCustomChartProps {
@@ -22,10 +22,16 @@ interface InteractiveCustomChartProps {
   showVolume: boolean;
   showRsi: boolean;
   showMacd: boolean;
+  showPrimaryCandles?: boolean;
   comparisonSymbols?: string[];
   comparisonCandles?: Record<string, Candle[]>;
+  comparisonOnly?: boolean;
   comparisonLabelFontSize?: number;
   onComparisonLabelFontSizeChange?: (fontSize: number) => void;
+  comparisonLabelLayoutMode?: ComparisonLabelLayoutMode;
+  onComparisonLabelLayoutModeChange?: (mode: ComparisonLabelLayoutMode) => void;
+  comparisonLabelRankSpacingScale?: number;
+  onComparisonLabelRankSpacingScaleChange?: (scale: number) => void;
   symbolDisplayNames?: Record<string, string>;
   changePctOverrides?: Record<string, number>;
   emptyMessage?: string;
@@ -42,6 +48,7 @@ interface InteractiveCustomChartProps {
   onToggleVolume?: () => void;
   onToggleRsi?: () => void;
   onToggleMacd?: () => void;
+  onTogglePrimaryCandles?: () => void;
   focusDate?: string;
   focusDateActive?: boolean;
   allowNegativeValues?: boolean;
@@ -49,6 +56,67 @@ interface InteractiveCustomChartProps {
 }
 
 const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
+const CHART_BULL_COLOR = '#009b87';
+const CHART_BEAR_COLOR = '#ff4057';
+
+function findAlignedOrNearestCandle(
+  candles: Candle[],
+  candleMap: Map<string, Candle> | undefined,
+  mainCandle: Candle,
+  timeframe: Timeframe,
+): Candle | null {
+  const alignedCandle = candleMap?.get(getCandleAlignmentKey(mainCandle, timeframe));
+  if (alignedCandle) return alignedCandle;
+  if (candles.length === 0) return null;
+
+  let low = 0;
+  let high = candles.length - 1;
+  let previousIndex = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (candles[mid].time <= mainCandle.time) {
+      previousIndex = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const previous = previousIndex >= 0 ? candles[previousIndex] : null;
+  const next = previousIndex + 1 < candles.length ? candles[previousIndex + 1] : null;
+  if (!previous) return next;
+  if (!next) return previous;
+
+  return Math.abs(next.time - mainCandle.time) <= Math.abs(mainCandle.time - previous.time)
+    ? next
+    : previous;
+}
+
+function findAlignedOrPreviousCandle(
+  candles: Candle[],
+  candleMap: Map<string, Candle> | undefined,
+  mainCandle: Candle,
+  timeframe: Timeframe,
+): Candle | null {
+  const alignedCandle = candleMap?.get(getCandleAlignmentKey(mainCandle, timeframe));
+  if (alignedCandle) return alignedCandle;
+  if (candles.length === 0) return null;
+
+  let low = 0;
+  let high = candles.length - 1;
+  let previousIndex = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (candles[mid].time <= mainCandle.time) {
+      previousIndex = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return previousIndex >= 0 ? candles[previousIndex] : candles[0];
+}
 
 function getLineDasharray(style: IndicatorLineStyle): string | undefined {
   switch (style) {
@@ -94,7 +162,8 @@ function formatSignedPercent(value: number): string {
 }
 
 function compactAxisSymbol(symbol: string): string {
-  return symbol.length > 8 ? `${symbol.slice(0, 7)}..` : symbol;
+  const normalized = symbol.trim().replace(/\s+/g, ' ');
+  return Array.from(normalized).slice(0, 5).join('');
 }
 
 function estimateLegendTextWidth(text: string, fontSize: number, horizontalPadding = 14): number {
@@ -163,10 +232,16 @@ export function InteractiveCustomChart({
   showVolume,
   showRsi,
   showMacd,
+  showPrimaryCandles = true,
   comparisonSymbols = [],
   comparisonCandles = {},
+  comparisonOnly = false,
   comparisonLabelFontSize: controlledComparisonLabelFontSize,
   onComparisonLabelFontSizeChange,
+  comparisonLabelLayoutMode: controlledComparisonLabelLayoutMode,
+  onComparisonLabelLayoutModeChange,
+  comparisonLabelRankSpacingScale: controlledComparisonLabelRankSpacingScale,
+  onComparisonLabelRankSpacingScaleChange,
   symbolDisplayNames = {},
   changePctOverrides = {},
   emptyMessage = 'データを取得中...',
@@ -183,6 +258,7 @@ export function InteractiveCustomChart({
   onToggleVolume,
   onToggleRsi,
   onToggleMacd,
+  onTogglePrimaryCandles,
   focusDate,
   focusDateActive = false,
   allowNegativeValues = false,
@@ -200,8 +276,11 @@ export function InteractiveCustomChart({
     rsi: false,
     macd: false,
   });
+  const [candleInfoOpen, setCandleInfoOpen] = useState(false);
   const [comparisonLegendOpen, setComparisonLegendOpen] = useState(false);
   const [localComparisonLabelFontSize, setLocalComparisonLabelFontSize] = useState(10);
+  const [localComparisonLabelLayoutMode, setLocalComparisonLabelLayoutMode] = useState<ComparisonLabelLayoutMode>('changePct');
+  const [localComparisonLabelRankSpacingScale, setLocalComparisonLabelRankSpacingScale] = useState(1);
   const [legendFontMenu, setLegendFontMenu] = useState<{
     x: number;
     y: number;
@@ -211,6 +290,8 @@ export function InteractiveCustomChart({
     y: number;
   } | null>(null);
   const comparisonLabelFontSize = controlledComparisonLabelFontSize ?? localComparisonLabelFontSize;
+  const comparisonLabelLayoutMode = controlledComparisonLabelLayoutMode ?? localComparisonLabelLayoutMode;
+  const comparisonLabelRankSpacingScale = controlledComparisonLabelRankSpacingScale ?? localComparisonLabelRankSpacingScale;
   const setComparisonLabelFontSize = (nextValue: React.SetStateAction<number>) => {
     const resolvedValue = typeof nextValue === 'function'
       ? nextValue(comparisonLabelFontSize)
@@ -220,6 +301,24 @@ export function InteractiveCustomChart({
       onComparisonLabelFontSizeChange(clampedValue);
     } else {
       setLocalComparisonLabelFontSize(clampedValue);
+    }
+  };
+  const setComparisonLabelLayoutMode = (mode: ComparisonLabelLayoutMode) => {
+    if (onComparisonLabelLayoutModeChange) {
+      onComparisonLabelLayoutModeChange(mode);
+    } else {
+      setLocalComparisonLabelLayoutMode(mode);
+    }
+  };
+  const setComparisonLabelRankSpacingScale = (nextValue: React.SetStateAction<number>) => {
+    const resolvedValue = typeof nextValue === 'function'
+      ? nextValue(comparisonLabelRankSpacingScale)
+      : nextValue;
+    const clampedValue = Math.max(0.5, Math.min(2, Number(resolvedValue)));
+    if (onComparisonLabelRankSpacingScaleChange) {
+      onComparisonLabelRankSpacingScaleChange(clampedValue);
+    } else {
+      setLocalComparisonLabelRankSpacingScale(clampedValue);
     }
   };
 
@@ -300,7 +399,7 @@ export function InteractiveCustomChart({
 
   // Amount of candles to fit in chart width
   // The right-side axis column also hosts the comparison ranking tabs.
-  const priceAxisWidth = comparisonSymbols.length > 0 ? 108 : 60;
+  const priceAxisWidth = comparisonSymbols.length > 0 ? 132 : 60;
   const plotWidth = Math.max(80, width - priceAxisWidth);
   const rightAxisWidth = width - plotWidth;
   const maxVisibleCount = Math.floor(plotWidth / zoomFactor);
@@ -376,9 +475,10 @@ export function InteractiveCustomChart({
   const rsi = useMemo(() => calculateRSI(candles, indicators.rsi.period), [candles, indicators.rsi.period]);
   const macd = useMemo(() => calculateMACD(candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal), [candles, indicators.macd.fast, indicators.macd.slow, indicators.macd.signal]);
 
-  // Height of sections inside the canvas (percentages of total height)
-  const activeRsi = showRsi && indicators.rsi.enabled;
-  const activeMacd = showMacd && indicators.macd.enabled;
+  // 比較専用チャートでは主ローソク足と主指標を描かない
+  const renderPrimarySeries = !comparisonOnly && showPrimaryCandles;
+  const activeRsi = renderPrimarySeries && showRsi && indicators.rsi.enabled;
+  const activeMacd = renderPrimarySeries && showMacd && indicators.macd.enabled;
   const rsiMinimized = activeRsi && minimizedIndicators.rsi;
   const macdMinimized = activeMacd && minimizedIndicators.macd;
   const rsiPlotActive = activeRsi && !rsiMinimized;
@@ -453,18 +553,32 @@ export function InteractiveCustomChart({
     return result;
   }, [comparisonSymbols, comparisonCandles, timeframe]);
 
+  const comparisonCandleSeries = useMemo(() => {
+    const result: Record<string, Candle[]> = {};
+    comparisonSymbols.forEach((symbol) => {
+      result[symbol] = [...(comparisonCandles[symbol] || [])]
+        .sort((first, second) => first.time - second.time);
+    });
+    return result;
+  }, [comparisonSymbols, comparisonCandles]);
+
   // 表示範囲の主銘柄と同じ時刻にある比較銘柄の最初の価格を基準にする
   const compStartPrice = useMemo(() => {
     const result: Record<string, number> = {};
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
       const firstAlignedCandle = visibleCandles
-        .map((mainCandle) => candleMap?.get(getCandleAlignmentKey(mainCandle, timeframe)))
+        .map((mainCandle) => findAlignedOrPreviousCandle(
+          comparisonCandleSeries[symbol] || [],
+          candleMap,
+          mainCandle,
+          timeframe,
+        ))
         .find((candle): candle is Candle => Boolean(candle));
       result[symbol] = firstAlignedCandle?.close || 1;
     });
     return result;
-  }, [comparisonSymbols, comparisonCandleMaps, timeframe, visibleCandles]);
+  }, [comparisonSymbols, comparisonCandleMaps, comparisonCandleSeries, timeframe, visibleCandles]);
 
   // Calculate high and low price ranges for scale bounds of visible candles
   const priceMinMax = useMemo(() => {
@@ -475,10 +589,12 @@ export function InteractiveCustomChart({
 
     visibleCandles.forEach((c, idx) => {
       const realIdx = startIndex + idx;
-      highest = Math.max(highest, c.high);
-      lowest = Math.min(lowest, c.low);
+      if (renderPrimarySeries) {
+        highest = Math.max(highest, c.high);
+        lowest = Math.min(lowest, c.low);
+      }
 
-      if (indicators.ma.enabled) {
+      if (renderPrimarySeries && indicators.ma.enabled) {
         if (ma1[realIdx] !== null) highest = Math.max(highest, ma1[realIdx]!);
         if (ma1[realIdx] !== null) lowest = Math.min(lowest, ma1[realIdx]!);
         if (ma2[realIdx] !== null) highest = Math.max(highest, ma2[realIdx]!);
@@ -487,14 +603,14 @@ export function InteractiveCustomChart({
         if (ma3[realIdx] !== null) lowest = Math.min(lowest, ma3[realIdx]!);
       }
 
-      if (indicators.ema.enabled) {
+      if (renderPrimarySeries && indicators.ema.enabled) {
         if (ema1[realIdx] !== null) highest = Math.max(highest, ema1[realIdx]!);
         if (ema1[realIdx] !== null) lowest = Math.min(lowest, ema1[realIdx]!);
         if (ema2[realIdx] !== null) highest = Math.max(highest, ema2[realIdx]!);
         if (ema2[realIdx] !== null) lowest = Math.min(lowest, ema2[realIdx]!);
       }
 
-      if (indicators.boll.enabled) {
+      if (renderPrimarySeries && indicators.boll.enabled) {
         bollResults.forEach(({ result }) => {
           if (result.upper[realIdx] !== null) highest = Math.max(highest, result.upper[realIdx]!);
           if (result.lower[realIdx] !== null) lowest = Math.min(lowest, result.lower[realIdx]!);
@@ -505,10 +621,10 @@ export function InteractiveCustomChart({
     // Include overlay comparison symbols in pricing range determination
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
+      const candleSeries = comparisonCandleSeries[symbol] || [];
       const startPrice = compStartPrice[symbol] || 1;
       visibleCandles.forEach((mainCandle) => {
-        const alignmentKey = getCandleAlignmentKey(mainCandle, timeframe);
-        const compCandle = candleMap?.get(alignmentKey);
+        const compCandle = findAlignedOrNearestCandle(candleSeries, candleMap, mainCandle, timeframe);
         if (compCandle) {
           const ratio = compCandle.close / startPrice;
           const scaledPrice = ratio * mainStartPrice;
@@ -517,6 +633,10 @@ export function InteractiveCustomChart({
         }
       });
     });
+
+    if (!Number.isFinite(highest) || !Number.isFinite(lowest)) {
+      return { min: 90, max: 110 };
+    }
 
     const delta = highest - lowest;
     const pad = delta * 0.05 || 2.0;
@@ -532,7 +652,7 @@ export function InteractiveCustomChart({
       min: allowNegativeValues ? center - halfRange : Math.max(0.01, center - halfRange),
       max: center + halfRange
     };
-  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, compStartPrice, mainStartPrice, priceScale, priceOffsetPct, timeframe, allowNegativeValues, focusCandleIndex, focusDateActive, candles]);
+  }, [visibleCandles, startIndex, indicators, ma1, ma2, ma3, ema1, ema2, bollResults, comparisonSymbols, comparisonCandleMaps, comparisonCandleSeries, compStartPrice, mainStartPrice, priceScale, priceOffsetPct, timeframe, allowNegativeValues, focusCandleIndex, focusDateActive, candles, renderPrimarySeries]);
 
   // Mapping coordinate formulas
   const getX = (sliceIdx: number) => {
@@ -553,15 +673,16 @@ export function InteractiveCustomChart({
 
     comparisonSymbols.forEach((compSym) => {
       const candleMap = comparisonCandleMaps[compSym];
+      const candleSeries = comparisonCandleSeries[compSym] || [];
       const startPrice = compStartPrice[compSym] || 1;
-      if (!candleMap || !Number.isFinite(startPrice)) {
+      if ((!candleMap || candleSeries.length === 0) || !Number.isFinite(startPrice)) {
         result[compSym] = [];
         return;
       }
 
       const points: ComparisonSeriesPoint[] = [];
       visibleCandles.forEach((mainCandle, sliceIndex) => {
-        const compCandle = candleMap.get(getCandleAlignmentKey(mainCandle, timeframe));
+        const compCandle = findAlignedOrNearestCandle(candleSeries, candleMap, mainCandle, timeframe);
         if (!compCandle) return;
 
         const ratio = compCandle.close / startPrice;
@@ -586,6 +707,7 @@ export function InteractiveCustomChart({
   }, [
     comparisonSymbols,
     comparisonCandleMaps,
+    comparisonCandleSeries,
     compStartPrice,
     visibleCandles,
     timeframe,
@@ -604,13 +726,13 @@ export function InteractiveCustomChart({
     const firstMainCandle = visibleCandles[0];
     const lastMainCandle = visibleCandles[visibleCandles.length - 1];
     const rawLabels = [
-      {
+      ...(renderPrimarySeries ? [{
         key: symbol,
         symbol,
         color: '#475569',
         y: getY(lastMainCandle.close),
         changePct: getChangePctOverride(symbol) ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
-      },
+      }] : []),
       ...comparisonSymbols.flatMap((compSym, index) => {
         const points = comparisonSeriesData[compSym] || [];
         const lastPoint = points[points.length - 1];
@@ -623,45 +745,137 @@ export function InteractiveCustomChart({
           changePct: lastPoint.changePct,
         }];
       }),
-    ].sort((first, second) => first.y - second.y);
+    ].sort((first, second) => {
+      const changeDiff = second.changePct - first.changePct;
+      return changeDiff !== 0 ? changeDiff : first.y - second.y;
+    });
+    if (rawLabels.length === 0) return [];
 
     const minCenterY = 12;
     const maxCenterY = Math.max(minCenterY, mainHeight - 36);
+    const zeroCenterY = minCenterY + (maxCenterY - minCenterY) / 2;
     const minGap = Math.max(15, comparisonLabelFontSize + 8);
-    const adjusted = rawLabels.map((label) => ({
-      ...label,
-      adjustedY: Math.max(minCenterY, Math.min(maxCenterY, label.y)),
-    }));
+    const zeroSideGap = Math.min(minGap / 2, Math.max(2, (maxCenterY - minCenterY) / 6));
+    const positiveMaxY = Math.max(minCenterY, zeroCenterY - zeroSideGap);
+    const negativeMinY = Math.min(maxCenterY, zeroCenterY + zeroSideGap);
+    const positiveLabels = rawLabels.filter((label) => label.changePct >= 0);
+    const negativeLabels = rawLabels.filter((label) => label.changePct < 0);
 
-    for (let index = 1; index < adjusted.length; index += 1) {
-      adjusted[index].adjustedY = Math.max(
-        adjusted[index].adjustedY,
-        adjusted[index - 1].adjustedY + minGap,
-      );
-    }
+    const fitGroup = (
+      labels: typeof rawLabels,
+      groupMinY: number,
+      groupMaxY: number,
+      getTargetY: (changePct: number) => number,
+    ) => {
+      if (labels.length === 0) return [];
+      const normalizedMaxY = Math.max(groupMinY, groupMaxY);
+      const adjusted = labels.map((label) => ({
+        ...label,
+        adjustedY: Math.max(groupMinY, Math.min(normalizedMaxY, getTargetY(label.changePct))),
+      }));
+      if (adjusted.length === 1) return adjusted;
 
-    if (adjusted.length > 0 && adjusted[adjusted.length - 1].adjustedY > maxCenterY) {
-      adjusted[adjusted.length - 1].adjustedY = maxCenterY;
-      for (let index = adjusted.length - 2; index >= 0; index -= 1) {
-        adjusted[index].adjustedY = Math.min(
+      const availableHeight = Math.max(1, normalizedMaxY - groupMinY);
+      const effectiveGap = Math.min(minGap, availableHeight / (adjusted.length - 1));
+      for (let index = 1; index < adjusted.length; index += 1) {
+        adjusted[index].adjustedY = Math.max(
           adjusted[index].adjustedY,
-          adjusted[index + 1].adjustedY - minGap,
+          adjusted[index - 1].adjustedY + effectiveGap,
         );
       }
-    }
 
-    if (adjusted.length > 0 && adjusted[0].adjustedY < minCenterY) {
+      if (adjusted[adjusted.length - 1].adjustedY > normalizedMaxY) {
+        adjusted[adjusted.length - 1].adjustedY = normalizedMaxY;
+        for (let index = adjusted.length - 2; index >= 0; index -= 1) {
+          adjusted[index].adjustedY = Math.min(
+            adjusted[index].adjustedY,
+            adjusted[index + 1].adjustedY - effectiveGap,
+          );
+        }
+      }
+
+      if (adjusted[0].adjustedY < groupMinY) {
+        adjusted[0].adjustedY = groupMinY;
+        for (let index = 1; index < adjusted.length; index += 1) {
+          adjusted[index].adjustedY = Math.max(
+            adjusted[index].adjustedY,
+            adjusted[index - 1].adjustedY + effectiveGap,
+          );
+        }
+      }
+
+      return adjusted;
+    };
+
+    if (comparisonLabelLayoutMode === 'stack') {
       const availableHeight = Math.max(1, maxCenterY - minCenterY);
-      const compressedGap = adjusted.length > 1
-        ? Math.min(minGap, availableHeight / (adjusted.length - 1))
-        : 0;
-      return adjusted.map((label, index) => ({
+      const slotHeight = availableHeight / Math.max(1, rawLabels.length);
+      const labelHeight = Math.max(2, Math.min(
+        Math.max(17, comparisonLabelFontSize + 8),
+        slotHeight * 0.88,
+      ));
+      const fontSize = Math.max(3, Math.min(comparisonLabelFontSize, labelHeight - 1));
+      return rawLabels.map((label, index) => ({
         ...label,
-        adjustedY: minCenterY + compressedGap * index,
+        adjustedY: minCenterY + slotHeight * (index + 0.5),
+        labelHeight,
+        fontSize,
       }));
     }
 
-    return adjusted;
+    if (comparisonLabelLayoutMode === 'rank') {
+      const rankSpacingScale = Math.max(0.5, Math.min(2, comparisonLabelRankSpacingScale));
+      const maxRankGap = Math.max(18, Math.min(30, comparisonLabelFontSize + 20)) * rankSpacingScale;
+      const fitRankGroup = (
+        labels: typeof rawLabels,
+        groupMinY: number,
+        groupMaxY: number,
+        direction: 'up' | 'down',
+      ) => {
+        if (labels.length === 0) return [];
+        const availableHeight = Math.max(1, groupMaxY - groupMinY);
+        const rankGap = labels.length > 1
+          ? Math.min(maxRankGap, availableHeight / (labels.length - 1))
+          : 0;
+        return labels.map((label, index) => ({
+          ...label,
+          adjustedY: direction === 'up'
+            ? Math.max(groupMinY, groupMaxY - (labels.length - 1 - index) * rankGap)
+            : Math.min(groupMaxY, groupMinY + index * rankGap),
+        }));
+      };
+
+      return [
+        ...fitRankGroup(positiveLabels, minCenterY, positiveMaxY, 'up'),
+        ...fitRankGroup(negativeLabels, negativeMinY, maxCenterY, 'down'),
+      ].sort((first, second) => first.adjustedY - second.adjustedY);
+    }
+
+    const maxPositivePct = Math.max(0, ...positiveLabels.map((label) => label.changePct));
+    const minNegativePct = Math.min(0, ...negativeLabels.map((label) => label.changePct));
+    const positiveAdjusted = fitGroup(
+      positiveLabels,
+      minCenterY,
+      positiveMaxY,
+      (changePct) => {
+        if (maxPositivePct <= 0.000001) return positiveMaxY;
+        const ratio = Math.max(0, Math.min(1, changePct / maxPositivePct));
+        return positiveMaxY - ratio * Math.max(1, positiveMaxY - minCenterY);
+      },
+    );
+    const negativeAdjusted = fitGroup(
+      negativeLabels,
+      negativeMinY,
+      maxCenterY,
+      (changePct) => {
+        if (minNegativePct >= -0.000001) return negativeMinY;
+        const ratio = Math.max(0, Math.min(1, Math.abs(changePct) / Math.abs(minNegativePct)));
+        return negativeMinY + ratio * Math.max(1, maxCenterY - negativeMinY);
+      },
+    );
+
+    return [...positiveAdjusted, ...negativeAdjusted]
+      .sort((first, second) => first.adjustedY - second.adjustedY);
   }, [
     comparisonSymbols,
     comparisonSeriesData,
@@ -672,6 +886,9 @@ export function InteractiveCustomChart({
     priceMinMax.max,
     comparisonLabelFontSize,
     changePctOverrides,
+    renderPrimarySeries,
+    comparisonLabelLayoutMode,
+    comparisonLabelRankSpacingScale,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {
@@ -750,7 +967,7 @@ export function InteractiveCustomChart({
   );
 
   const volumeProfile = useMemo(() => {
-    if (!indicators.vrvp.enabled || visibleCandles.length === 0) {
+    if (!renderPrimarySeries || !indicators.vrvp.enabled || visibleCandles.length === 0) {
       return null;
     }
 
@@ -790,7 +1007,7 @@ export function InteractiveCustomChart({
     );
 
     return { bins, maxTotal, pocIndex };
-  }, [indicators.vrvp.enabled, indicators.vrvp.rows, visibleCandles]);
+  }, [indicators.vrvp.enabled, indicators.vrvp.rows, visibleCandles, renderPrimarySeries]);
 
   // Dynamic zoom actions
   const adjustZoom = (zoomIn: boolean) => {
@@ -945,16 +1162,38 @@ export function InteractiveCustomChart({
       onContextMenu={openChartContextMenu}
     >
       
-      {/* 1. FLOATING CROSSHAIR INFO BANNER */}
-      {currentCandle && (
-        <div className="absolute top-2 left-3 right-12 bg-[#050505]/95 border border-[#2a2a2a] px-2.5 py-1 rounded text-[10px] text-gray-400 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 pr-6 pointer-events-none shadow max-w-[95%]">
-          <span className="text-white font-bold">{symbol}</span>
-          <span>日付: <b className="text-gray-100">{currentCandle.timeStr}</b></span>
-          <span>始: <b className="text-white">{currentCandle.open.toFixed(valuePrecision)}</b></span>
-          <span>高: <b className="text-[#26a69a]">{currentCandle.high.toFixed(valuePrecision)}</b></span>
-          <span>安: <b className="text-[#ef5350]">{currentCandle.low.toFixed(valuePrecision)}</b></span>
-          <span>終: <b className="text-white">{currentCandle.close.toFixed(valuePrecision)}</b></span>
-          <span className="hidden sm:inline">出来高: <b className="text-gray-300">{currentCandle.volume.toLocaleString()}</b></span>
+      {/* 1. ローソク足情報バナー */}
+      {renderPrimarySeries && currentCandle && (
+        <div
+          className="absolute top-2 left-3 z-10 min-w-0 overflow-hidden rounded border border-[#2a2a2a] bg-[#050505]/95 text-[10px] text-gray-400 shadow"
+          style={{ right: priceAxisWidth + 12 }}
+        >
+          <button
+            type="button"
+            onClick={() => setCandleInfoOpen((open) => !open)}
+            className="flex h-7 w-full min-w-0 items-center gap-2 overflow-hidden px-2 text-left font-bold transition hover:bg-[#111111]"
+            title="ローソク足情報を開閉"
+            aria-label="ローソク足情報を開閉"
+            aria-expanded={candleInfoOpen}
+          >
+            <ChevronDown
+              size={13}
+              strokeWidth={2.4}
+              className={`shrink-0 text-gray-400 transition-transform ${candleInfoOpen ? 'rotate-180' : ''}`}
+            />
+            <span className="min-w-0 flex-1 truncate text-white" title={symbol}>{symbol}</span>
+            <span className="hidden shrink-0 text-gray-400 sm:inline">日付: <b className="text-gray-100">{currentCandle.timeStr}</b></span>
+            <span className="shrink-0 text-gray-400">終: <b className="text-white">{currentCandle.close.toFixed(valuePrecision)}</b></span>
+          </button>
+          {candleInfoOpen && (
+            <div className="flex max-h-20 flex-wrap items-center gap-x-3 gap-y-1 overflow-y-auto border-t border-[#242424] px-2.5 py-1.5 leading-snug">
+              <span className="sm:hidden">日付: <b className="text-gray-100">{currentCandle.timeStr}</b></span>
+              <span>始: <b className="text-white">{currentCandle.open.toFixed(valuePrecision)}</b></span>
+              <span>高: <b className="text-[#009b87]">{currentCandle.high.toFixed(valuePrecision)}</b></span>
+              <span>安: <b className="text-[#ff4057]">{currentCandle.low.toFixed(valuePrecision)}</b></span>
+              <span>出来高: <b className="text-gray-300">{currentCandle.volume.toLocaleString()}</b></span>
+            </div>
+          )}
         </div>
       )}
 
@@ -966,11 +1205,12 @@ export function InteractiveCustomChart({
             openLegendFontMenu(event);
             setComparisonLegendOpen(true);
           }}
-          className={`absolute top-2 right-3 z-20 h-7 w-7 flex items-center justify-center rounded border transition ${
+          className={`absolute top-2 z-20 h-7 w-7 flex items-center justify-center rounded border transition ${
             comparisonLegendOpen
               ? 'border-emerald-500/60 bg-emerald-950/60 text-emerald-200'
               : 'border-[#2a2a2a] bg-[#050505]/95 text-gray-400 hover:text-white hover:border-[#454545]'
           }`}
+          style={{ left: plotWidth + 4 }}
           title="比較凡例"
           aria-label="比較凡例"
           aria-pressed={comparisonLegendOpen}
@@ -989,7 +1229,12 @@ export function InteractiveCustomChart({
               const color = getSeriesColor(compSym, index);
               const activeCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
               const compCandle = activeCandle
-                ? comparisonCandleMaps[compSym]?.get(getCandleAlignmentKey(activeCandle, timeframe))
+                ? findAlignedOrNearestCandle(
+                  comparisonCandleSeries[compSym] || [],
+                  comparisonCandleMaps[compSym],
+                  activeCandle,
+                  timeframe,
+                )
                 : null;
               const startPrice = compStartPrice[compSym] || 1;
               const overrideChangePct = getChangePctOverride(compSym);
@@ -1028,10 +1273,80 @@ export function InteractiveCustomChart({
 
       {legendFontMenu && (
         <div
-          className="fixed z-[90] w-44 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
+          className="fixed z-[90] w-52 border border-[#343434] bg-[#080808] py-1 text-[10px] text-gray-200 shadow-2xl"
           style={{ left: legendFontMenu.x, top: legendFontMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
+          <div className="border-b border-[#242424] px-2.5 py-1.5 text-[9px] text-gray-500">
+            凡例の並び: {comparisonLabelLayoutMode === 'stack' ? '上から整列' : comparisonLabelLayoutMode === 'rank' ? '順位で等間隔' : '変動率比例'}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonLabelLayoutMode('changePct');
+              setLegendFontMenu(null);
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-2 text-left hover:bg-[#171717]"
+            aria-pressed={comparisonLabelLayoutMode === 'changePct'}
+          >
+            <span>変動率比例</span>
+            <span className={comparisonLabelLayoutMode === 'changePct' ? 'text-emerald-300' : 'text-gray-600'}>ON</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonLabelLayoutMode('rank');
+              setLegendFontMenu(null);
+            }}
+            className="flex w-full items-center justify-between border-b border-[#242424] px-2.5 py-2 text-left hover:bg-[#171717]"
+            aria-pressed={comparisonLabelLayoutMode === 'rank'}
+          >
+            <span>順位で等間隔</span>
+            <span className={comparisonLabelLayoutMode === 'rank' ? 'text-emerald-300' : 'text-gray-600'}>ON</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonLabelLayoutMode('stack');
+              setLegendFontMenu(null);
+            }}
+            className="flex w-full items-center justify-between border-b border-[#242424] px-2.5 py-2 text-left hover:bg-[#171717]"
+            aria-pressed={comparisonLabelLayoutMode === 'stack'}
+          >
+            <span>上から整列</span>
+            <span className={comparisonLabelLayoutMode === 'stack' ? 'text-emerald-300' : 'text-gray-600'}>ON</span>
+          </button>
+          <div className="border-b border-[#242424] px-2.5 py-1.5 text-[9px] text-gray-500">
+            等間隔率: {comparisonLabelRankSpacingScale.toFixed(1)}x
+          </div>
+          <div className="flex border-b border-[#242424]">
+            <button
+              type="button"
+              onClick={() => setComparisonLabelRankSpacingScale((scale) => scale - 0.1)}
+              className="flex h-8 flex-1 items-center justify-center gap-1 hover:bg-[#171717]"
+              title="等間隔率を縮小"
+            >
+              <Minus className="h-3.5 w-3.5" />
+              縮小
+            </button>
+            <button
+              type="button"
+              onClick={() => setComparisonLabelRankSpacingScale(1)}
+              className="flex h-8 flex-1 items-center justify-center gap-1 border-x border-[#242424] hover:bg-[#171717]"
+              title="等間隔率を初期値に戻す"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setComparisonLabelRankSpacingScale((scale) => scale + 0.1)}
+              className="flex h-8 flex-1 items-center justify-center gap-1 hover:bg-[#171717]"
+              title="等間隔率を拡大"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              拡大
+            </button>
+          </div>
           <div className="border-b border-[#242424] px-2.5 py-1.5 text-[9px] text-gray-500">
             比較ラベル文字サイズ: {comparisonLabelFontSize}px
           </div>
@@ -1069,6 +1384,18 @@ export function InteractiveCustomChart({
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
+          <button
+            type="button"
+            onClick={() => {
+              onTogglePrimaryCandles?.();
+              setChartContextMenu(null);
+            }}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-[#171717] disabled:opacity-40"
+            disabled={!onTogglePrimaryCandles}
+          >
+            <span>ローソク足</span>
+            <span className={showPrimaryCandles ? 'text-emerald-300' : 'text-gray-500'}>{showPrimaryCandles ? 'ON' : 'OFF'}</span>
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -1124,6 +1451,7 @@ export function InteractiveCustomChart({
             onMouseUp={handleMouseUpOrLeave}
             onMouseLeave={handleMouseUpOrLeave}
             onDoubleClick={(event) => {
+              if (!renderPrimarySeries) return;
               const rect = event.currentTarget.getBoundingClientRect();
               const mouseX = event.clientX - rect.left;
               if (mouseX < plotWidth) {
@@ -1145,12 +1473,12 @@ export function InteractiveCustomChart({
                 <stop offset="100%" stopColor={indicators.boll.color} stopOpacity="0.01" />
               </linearGradient>
               <linearGradient id="bullVolGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#26a69a" stopOpacity="0.25" />
-                <stop offset="100%" stopColor="#26a69a" stopOpacity="0.02" />
+                <stop offset="0%" stopColor={CHART_BULL_COLOR} stopOpacity="0.25" />
+                <stop offset="100%" stopColor={CHART_BULL_COLOR} stopOpacity="0.02" />
               </linearGradient>
               <linearGradient id="bearVolGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#ef5350" stopOpacity="0.25" />
-                <stop offset="100%" stopColor="#ef5350" stopOpacity="0.02" />
+                <stop offset="0%" stopColor={CHART_BEAR_COLOR} stopOpacity="0.25" />
+                <stop offset="100%" stopColor={CHART_BEAR_COLOR} stopOpacity="0.02" />
               </linearGradient>
             </defs>
 
@@ -1163,6 +1491,7 @@ export function InteractiveCustomChart({
                 height={mainHeight}
                 fill={priceAxisFocused ? 'rgba(16, 185, 129, 0.08)' : 'transparent'}
                 className="cursor-ns-resize"
+                onContextMenu={openLegendFontMenu}
               />
               {/* Grid rules */}
               {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
@@ -1187,6 +1516,7 @@ export function InteractiveCustomChart({
                       fill="#9ca3af"
                       fontSize="9" 
                       fontFamily={CHART_FONT_FAMILY}
+                      onContextMenu={openLegendFontMenu}
                     >
                       {val.toFixed(valuePrecision)}
                     </text>
@@ -1230,7 +1560,7 @@ export function InteractiveCustomChart({
               )}
 
               {/* Bollinger Corridor */}
-              {indicators.boll.enabled && bollResults.length > 0 && (
+              {renderPrimarySeries && indicators.boll.enabled && bollResults.length > 0 && (
                 <g>
                   {(() => {
                     const outerResult = bollResults[bollResults.length - 1].result;
@@ -1321,7 +1651,7 @@ export function InteractiveCustomChart({
               )}
 
               {/* SMAs */}
-              {indicators.ma.enabled && (
+              {renderPrimarySeries && indicators.ma.enabled && (
                 <g>
                   <polyline points={getPolylinePoints(ma1)} fill="none" stroke={indicators.ma.color1} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ma.style1)} />
                   <polyline points={getPolylinePoints(ma2)} fill="none" stroke={indicators.ma.color2} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ma.style2)} />
@@ -1330,7 +1660,7 @@ export function InteractiveCustomChart({
               )}
 
               {/* EMAs */}
-              {indicators.ema.enabled && (
+              {renderPrimarySeries && indicators.ema.enabled && (
                 <g>
                   <polyline points={getPolylinePoints(ema1)} fill="none" stroke={indicators.ema.color1} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ema.style1)} />
                   <polyline points={getPolylinePoints(ema2)} fill="none" stroke={indicators.ema.color2} strokeWidth="1.2" strokeDasharray={getLineDasharray(indicators.ema.style2)} />
@@ -1357,7 +1687,7 @@ export function InteractiveCustomChart({
               })}
 
               {/* Render Candlesticks */}
-              {visibleCandles.map((c, i) => {
+              {renderPrimarySeries && visibleCandles.map((c, i) => {
                 const xVal = getX(i);
                 const w = Math.max(1.5, zoomFactor * 0.75);
                 const candleX = xVal - w / 2;
@@ -1368,7 +1698,7 @@ export function InteractiveCustomChart({
                 const lowY = getY(c.low);
 
                 const isBull = c.close >= c.open;
-                const color = isBull ? '#26a69a' : '#ef5350';
+                const color = isBull ? CHART_BULL_COLOR : CHART_BEAR_COLOR;
 
                 return (
                   <g key={i}>
@@ -1419,7 +1749,7 @@ export function InteractiveCustomChart({
               })}
 
               {/* Subtle Volume Overlay at bottom */}
-              {showVolume && (
+              {renderPrimarySeries && showVolume && (
                 <g opacity="0.35">
                   {visibleCandles.map((c, i) => {
                     const xVal = getX(i);
@@ -1440,9 +1770,9 @@ export function InteractiveCustomChart({
                         y={barY}
                         width={w}
                         height={barH}
-                        fill={isBull ? '#26a69a' : '#ef5350'}
+                        fill={isBull ? CHART_BULL_COLOR : CHART_BEAR_COLOR}
                         fillOpacity="0.12"
-                        stroke={isBull ? '#26a69a' : '#ef5350'}
+                        stroke={isBull ? CHART_BULL_COLOR : CHART_BEAR_COLOR}
                         strokeWidth="0.5"
                         strokeOpacity="0.25"
                       />
@@ -1456,18 +1786,26 @@ export function InteractiveCustomChart({
                   {rightAxisLabels.map((axisLabel) => {
                     const symbolText = compactAxisSymbol(getDisplayName(axisLabel.symbol));
                     const percentText = formatSignedPercent(axisLabel.changePct);
-                    const labelText = `${symbolText} ${percentText}`;
-                    const tabWidth = Math.min(
-                      rightAxisWidth + 2,
-                      Math.max(
-                        44,
-                        estimateLegendTextWidth(labelText, comparisonLabelFontSize, 9),
-                      ),
-                    );
-                    const tabHeight = Math.max(17, comparisonLabelFontSize + 8);
-                    const tabX = plotWidth - 2;
+                    const labelFontSize = 'fontSize' in axisLabel && typeof axisLabel.fontSize === 'number'
+                      ? axisLabel.fontSize
+                      : comparisonLabelFontSize;
+                    const tabHeight = 'labelHeight' in axisLabel && typeof axisLabel.labelHeight === 'number'
+                      ? axisLabel.labelHeight
+                      : Math.max(17, labelFontSize + 8);
+                    const legendControlWidth = comparisonSymbols.length > 0 ? 32 : 0;
+                    const tabWidth = Math.max(62, rightAxisWidth - legendControlWidth - 6);
+                    const tabX = plotWidth + legendControlWidth + 3;
                     const tabY = axisLabel.adjustedY - tabHeight / 2;
                     const moved = Math.abs(axisLabel.adjustedY - axisLabel.y) > 2;
+                    const percentColumnWidth = Math.max(
+                      34,
+                      estimateLegendTextWidth('-00.00%', labelFontSize, 0),
+                    );
+                    const symbolMaxWidth = Math.max(10, tabWidth - percentColumnWidth - 10);
+                    const symbolWidth = estimateLegendTextWidth(symbolText, labelFontSize, 0);
+                    const symbolFitProps = symbolWidth > symbolMaxWidth
+                      ? { textLength: symbolMaxWidth, lengthAdjust: 'spacingAndGlyphs' as const }
+                      : {};
 
                     return (
                       <g
@@ -1476,12 +1814,12 @@ export function InteractiveCustomChart({
                         style={{ pointerEvents: 'all' }}
                       >
                         {moved && (
-                            <line
-                          x1={plotWidth - 3}
-                          y1={axisLabel.y}
-                          x2={tabX}
-                              y2={axisLabel.adjustedY}
-                              stroke={axisLabel.color}
+                          <line
+                            x1={plotWidth - 3}
+                            y1={axisLabel.y}
+                            x2={tabX}
+                            y2={axisLabel.adjustedY}
+                            stroke={axisLabel.color}
                             strokeWidth="0.8"
                             strokeOpacity="0.55"
                           />
@@ -1499,14 +1837,26 @@ export function InteractiveCustomChart({
                         />
                         <text
                           x={tabX + 4}
-                          y={axisLabel.adjustedY + comparisonLabelFontSize * 0.35}
+                          y={axisLabel.adjustedY + labelFontSize * 0.35}
                           textAnchor="start"
                           fill="#ffffff"
-                          fontSize={comparisonLabelFontSize}
+                          fontSize={labelFontSize}
+                          fontFamily={CHART_FONT_FAMILY}
+                          fontWeight="700"
+                          {...symbolFitProps}
+                        >
+                          {symbolText}
+                        </text>
+                        <text
+                          x={tabX + tabWidth - 4}
+                          y={axisLabel.adjustedY + labelFontSize * 0.35}
+                          textAnchor="end"
+                          fill="#ffffff"
+                          fontSize={labelFontSize}
                           fontFamily={CHART_FONT_FAMILY}
                           fontWeight="700"
                         >
-                          {labelText}
+                          {percentText}
                         </text>
                         <title>{getDisplayName(axisLabel.symbol)} {formatSignedPercent(axisLabel.changePct)}</title>
                       </g>
@@ -1841,7 +2191,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={() => adjustZoom(true)}
-            className="w-6 h-6 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#111111] rounded transition"
+            className="w-6 h-6 text-gray-300 hover:text-[#009b87] flex items-center justify-center hover:bg-[#111111] rounded transition"
             title="拡大"
           >
             <Plus size={11} className="stroke-[2.5]" />
@@ -1850,7 +2200,7 @@ export function InteractiveCustomChart({
           <button 
             type="button"
             onClick={() => adjustZoom(false)}
-            className="w-6 h-6 text-gray-300 hover:text-[#26a69a] flex items-center justify-center hover:bg-[#111111] rounded transition"
+            className="w-6 h-6 text-gray-300 hover:text-[#009b87] flex items-center justify-center hover:bg-[#111111] rounded transition"
             title="縮小"
           >
             <Minus size={11} className="stroke-[2.5]" />

@@ -151,3 +151,134 @@ export function calculateExpressionQuote(
     changePct: Number.isFinite(changePct) ? changePct : null,
   };
 }
+
+export interface BasketComponent {
+  weight: number;
+  candles: Candle[];
+}
+
+export function combineBasketCandles(
+  components: BasketComponent[],
+  timeframe: Timeframe,
+): Candle[] {
+  if (components.length === 0) return [];
+  const validComponents = components.filter((c) => c.weight > 0 && c.candles.length > 0);
+  if (validComponents.length === 0) return [];
+
+  const componentsWithShares = validComponents.map((c) => {
+    const currentPrice = c.candles[c.candles.length - 1].close;
+    const shares = currentPrice > 0 ? c.weight / currentPrice : 0;
+    return { ...c, shares };
+  }).filter((c) => c.shares > 0);
+
+  if (componentsWithShares.length === 0) return [];
+
+  const timeMap = new Map<string, { time: number; timeStr: string }>();
+  componentsWithShares.forEach((c) => {
+    c.candles.forEach((candle) => {
+      const key = getCandleAlignmentKey(candle, timeframe);
+      if (!timeMap.has(key)) {
+        timeMap.set(key, { time: candle.time, timeStr: candle.timeStr });
+      }
+    });
+  });
+
+  const sortedKeys = Array.from(timeMap.keys()).sort();
+  const lastKnownCandles = new Array(componentsWithShares.length).fill(null);
+  const componentIndexPointers = new Array(componentsWithShares.length).fill(0);
+  
+  const resultCandles: Candle[] = [];
+  const totalWeight = componentsWithShares.reduce((sum, c) => sum + c.weight, 0);
+  const divisor = totalWeight / 100;
+
+  for (const key of sortedKeys) {
+    let sumWeightedOpen = 0;
+    let sumWeightedHigh = 0;
+    let sumWeightedLow = 0;
+    let sumWeightedClose = 0;
+    let sumVolume = 0;
+    let activeWeight = 0;
+
+    componentsWithShares.forEach((c, idx) => {
+      let ptr = componentIndexPointers[idx];
+      while (ptr < c.candles.length) {
+        const cKey = getCandleAlignmentKey(c.candles[ptr], timeframe);
+        if (cKey === key) {
+          lastKnownCandles[idx] = c.candles[ptr];
+          ptr += 1;
+          break;
+        } else if (cKey < key) {
+          lastKnownCandles[idx] = c.candles[ptr];
+          ptr += 1;
+        } else {
+          break;
+        }
+      }
+      componentIndexPointers[idx] = ptr;
+
+      const activeCandle = lastKnownCandles[idx];
+      if (activeCandle) {
+        sumWeightedOpen += activeCandle.open * c.shares;
+        sumWeightedHigh += activeCandle.high * c.shares;
+        sumWeightedLow += activeCandle.low * c.shares;
+        sumWeightedClose += activeCandle.close * c.shares;
+        sumVolume += activeCandle.volume;
+        activeWeight += c.weight;
+      }
+    });
+
+    if (activeWeight > 0) {
+      const timeInfo = timeMap.get(key)!;
+      resultCandles.push({
+        time: timeInfo.time,
+        timeStr: timeInfo.timeStr,
+        open: sumWeightedOpen / divisor,
+        high: sumWeightedHigh / divisor,
+        low: sumWeightedLow / divisor,
+        close: sumWeightedClose / divisor,
+        volume: sumVolume,
+      });
+    }
+  }
+
+  return resultCandles;
+}
+
+export interface BasketQuoteInput {
+  weight: number;
+  price: number;
+  changePct: number;
+}
+
+export function calculateBasketQuote(
+  components: BasketQuoteInput[],
+): ExpressionQuote | null {
+  const validComponents = components.filter((c) => c.weight > 0 && Number.isFinite(c.price));
+  if (validComponents.length === 0) return null;
+
+  let totalWeight = 0;
+  let sumCurrentPriceWeighted = 0;
+  let sumPreviousPriceWeighted = 0;
+
+  validComponents.forEach((c) => {
+    const shares = c.price > 0 ? c.weight / c.price : 0;
+    if (shares > 0) {
+      totalWeight += c.weight;
+      const prevPrice = c.price / (1 + c.changePct / 100);
+      sumCurrentPriceWeighted += c.price * shares;
+      sumPreviousPriceWeighted += prevPrice * shares;
+    }
+  });
+
+  if (totalWeight === 0 || sumPreviousPriceWeighted === 0) return null;
+
+  const divisor = totalWeight / 100;
+  const indexPrice = sumCurrentPriceWeighted / divisor;
+  const prevIndexPrice = sumPreviousPriceWeighted / divisor;
+  const changePct = ((indexPrice - prevIndexPrice) / Math.abs(prevIndexPrice)) * 100;
+
+  return {
+    price: indexPrice,
+    changePct: Number.isFinite(changePct) ? changePct : null,
+  };
+}

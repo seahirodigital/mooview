@@ -1,6 +1,7 @@
 export type Timeframe = '1m' | '3m' | '5m' | '10m' | '30m' | '1h' | '4h' | '1d' | '1w' | '1mo';
 export type ChartDisplayRange = 'd' | 'w' | null;
 export type IndicatorLineStyle = 'solid' | 'dashed' | 'dotted' | 'dashdot';
+export type ComparisonLabelLayoutMode = 'changePct' | 'rank' | 'stack';
 
 export interface IndicatorConfig {
   id: string;
@@ -42,6 +43,7 @@ export interface Candle {
 
 export interface ChartPanel {
   id: string;
+  name?: string;
   symbol: string;
   watchlistTabId?: string;
   watchlistSectionId?: string;
@@ -53,6 +55,9 @@ export interface ChartPanel {
   showMacd: boolean;
   showVolume: boolean;
   comparisonSymbols?: string[];
+  comparisonOnly?: boolean;
+  showPrimaryCandles?: boolean;
+  comparisonLabelRankSpacingScale?: number;
   priceScale?: number;
   priceOffsetPct?: number;
   rsiHeightPct?: number;

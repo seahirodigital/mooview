@@ -5,4 +5,5 @@ mooview.env
 *.pem
 *.tar.gz
 *.7z
-
+__pycache__/
+*.pyc

@@ -43,6 +43,11 @@ import {
   BasketQuoteInput,
 } from './symbolExpression';
 import { getSeriesColor } from './chartSeriesColors';
+import type {
+  SharedWorkspaceEnvelope,
+  SharedWorkspaceProfile,
+  SharedWorkspaceSettings,
+} from './workspaceSettings';
 
 const DEFAULT_PANEL_HEIGHT = 840;
 const DEFAULT_SIDEBAR_WIDTH = 420;
@@ -62,6 +67,7 @@ type WatchlistQuoteFetchMode = 'manual' | 'auto';
 type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
 type AppView = 'charts' | 'value-chain' | 'macro-flow';
+type WorkspacePersistenceMode = 'checking' | 'local' | 'shared';
 
 const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
@@ -90,6 +96,42 @@ const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v
 const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
 const COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY = 'mooview_comparison_label_layout_mode_v1';
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
+const SHARED_WORKSPACE_SETTINGS_ENDPOINT = '/api/workspace-settings';
+const DEFAULT_OCI_SHARED_WORKSPACE_URL = 'https://mooview-oci.taild87712.ts.net';
+const SHARED_WORKSPACE_SAVE_DELAY_MS = 800;
+const SHARED_BROWSER_SETTING_KEYS = [
+  'mooview_active_view',
+  'mooview_header_ticker_symbols_v1',
+  'mooview_value_chain_map_v1',
+  'mooview_value_chain_history_v1',
+  'mooview_value_chain_active_history_id',
+  'mooview_value_chain_chart_state_v1',
+  'mooview_value_chain_chart_panel_width',
+  'mooview_value_chain_stock_font_size',
+  'mooview_watchlist_name_overrides_v1',
+  'mooview_comparison_label_font_size_v1',
+  'mooview_comparison_label_layout_mode_v1',
+  'mooview_watchlist_quote_fetch_modes_v1',
+  'moomoo_active',
+  'tv_dashboard_tickers',
+  'tv_dashboard_watchlist_tabs',
+  'tv_dashboard_active_watchlist_tab',
+  'tv_dashboard_panels',
+  'tv_dashboard_indicators',
+  'tv_dashboard_focused_symbol',
+  'tv_dashboard_panel_engines',
+  'tv_dashboard_layout_style',
+  'tv_dashboard_grid_rows',
+  'tv_dashboard_grid_cols',
+  'tv_dashboard_sidebar_open',
+  'tv_dashboard_sidebar_view',
+  'tv_dashboard_sidebar_width',
+  'tv_dashboard_column_widths',
+  'tv_dashboard_panel_heights',
+  'tv_dashboard_watchlist_column_widths',
+  'tv_dashboard_watchlist_show_name_column',
+  'tv_dashboard_watchlist_sort',
+] as const;
 const DAY_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '5m';
 const WEEK_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '30m';
 const DEFAULT_DISPLAY_RANGE: Exclude<ChartDisplayRange, null> = 'd';
@@ -673,8 +715,106 @@ function clampStoredNumber(value: unknown, fallback: number, min: number, max: n
     : fallback;
 }
 
+function normalizeNumberRecord(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([key, value]) => Boolean(key) && Number.isFinite(Number(value)))
+      .map(([key, value]) => [key, Number(value)]),
+  );
+}
+
+function normalizeBooleanRecord(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([key, value]) => Boolean(key) && typeof value === 'boolean'),
+  ) as Record<string, boolean>;
+}
+
 function normalizeComparisonLabelLayoutMode(value: unknown): ComparisonLabelLayoutMode {
   return value === 'rank' || value === 'stack' ? value : 'changePct';
+}
+
+function isSharedWorkspaceEnvelope(value: unknown): value is SharedWorkspaceEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const source = value as Partial<SharedWorkspaceEnvelope>;
+  return typeof source.enabled === 'boolean'
+    && (source.profile === 'desktop' || source.profile === 'mobile')
+    && typeof source.revision === 'number'
+    && (source.updatedAt === null || typeof source.updatedAt === 'string')
+    && (source.settings === null || typeof source.settings === 'object');
+}
+
+async function readWorkspaceEnvelope(response: Response): Promise<SharedWorkspaceEnvelope> {
+  const payload = await response.json() as unknown;
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && 'error' in payload
+      ? String((payload as { error?: unknown }).error)
+      : `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  if (!isSharedWorkspaceEnvelope(payload)) {
+    throw new Error('共有設定APIの応答形式が正しくありません。');
+  }
+  return payload;
+}
+
+function detectSharedWorkspaceProfile(): SharedWorkspaceProfile {
+  const navigatorWithHints = navigator as Navigator & {
+    userAgentData?: { mobile?: boolean };
+  };
+  if (navigatorWithHints.userAgentData?.mobile) {
+    return 'mobile';
+  }
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    ? 'mobile'
+    : 'desktop';
+}
+
+function getSharedWorkspaceEndpoint(
+  profile: SharedWorkspaceProfile,
+  baseUrl = '',
+): string {
+  const endpoint = `${SHARED_WORKSPACE_SETTINGS_ENDPOINT}?profile=${profile}`;
+  return baseUrl ? `${baseUrl.replace(/\/+$/, '')}${endpoint}` : endpoint;
+}
+
+function readSharedBrowserSettings(): Record<string, string> {
+  return Object.fromEntries(
+    SHARED_BROWSER_SETTING_KEYS.flatMap((key) => {
+      const value = localStorage.getItem(key);
+      return value === null ? [] : [[key, value] as const];
+    }),
+  );
+}
+
+function areStringRecordsEqual(
+  first: Record<string, string>,
+  second: Record<string, string>,
+): boolean {
+  const firstKeys = Object.keys(first);
+  const secondKeys = Object.keys(second);
+  return firstKeys.length === secondKeys.length
+    && firstKeys.every((key) => first[key] === second[key]);
+}
+
+function applySharedBrowserSettings(settings: Record<string, string>): boolean {
+  let changed = false;
+  SHARED_BROWSER_SETTING_KEYS.forEach((key) => {
+    const nextValue = settings[key];
+    const currentValue = localStorage.getItem(key);
+    if (typeof nextValue === 'string') {
+      if (currentValue !== nextValue) {
+        localStorage.setItem(key, nextValue);
+        changed = true;
+      }
+    } else if (currentValue !== null) {
+      localStorage.removeItem(key);
+      changed = true;
+    }
+  });
+  return changed;
 }
 
 function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
@@ -1941,10 +2081,24 @@ export default function App() {
   const candlesCacheIndexedDbHydratedRef = useRef(false);
   const quoteCacheIndexedDbHydratedRef = useRef(false);
   const watchlistSyncSignatureRef = useRef<string | null>(null);
+  const sharedWorkspaceHydratedRef = useRef(false);
+  const sharedWorkspaceRevisionRef = useRef(0);
+  const sharedWorkspaceSkipNextSaveRef = useRef(false);
+  const sharedWorkspaceSaveInFlightRef = useRef(false);
+  const sharedWorkspaceAutoMigrationAttemptedRef = useRef(false);
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [workspacePersistenceMode, setWorkspacePersistenceMode] =
+    useState<WorkspacePersistenceMode>('checking');
+  const sharedWorkspaceProfile = useMemo(detectSharedWorkspaceProfile, []);
+  const [sharedBrowserSettings, setSharedBrowserSettings] =
+    useState<Record<string, string>>(() => readSharedBrowserSettings());
+  const [sharedWorkspaceUpdatedAt, setSharedWorkspaceUpdatedAt] = useState<string | null>(null);
+  const [sharedWorkspaceError, setSharedWorkspaceError] = useState<string | null>(null);
+  const [workspaceMigrationMessage, setWorkspaceMigrationMessage] = useState<string | null>(null);
+  const [workspaceSeededFromLocal, setWorkspaceSeededFromLocal] = useState(false);
   const candleFetchTimestampsRef = useRef<Record<string, number>>(
     normalizeTimestampMap(readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}))
   );
@@ -2263,6 +2417,201 @@ export default function App() {
     readStoredValue('tv_dashboard_panel_heights', {})
   );
 
+  const sharedWorkspaceSettings = useMemo<SharedWorkspaceSettings>(() => ({
+    schemaVersion: 1,
+    seededFromLocal: workspaceSeededFromLocal,
+    panels,
+    tickers: compactTickersForStorage(tickers),
+    watchlistTabs,
+    activeWatchlistTabId,
+    watchlistQuoteFetchModes,
+    watchlistNameOverrides,
+    indicatorDatabase,
+    focusedSymbolIndex,
+    panelEngineToggle,
+    layoutStyle,
+    gridRows,
+    gridCols,
+    colWeights,
+    panelHeights,
+    comparisonLabelFontSize,
+    comparisonLabelLayoutMode,
+    browserSettings: sharedBrowserSettings,
+  }), [
+    activeWatchlistTabId,
+    colWeights,
+    comparisonLabelFontSize,
+    comparisonLabelLayoutMode,
+    focusedSymbolIndex,
+    gridCols,
+    gridRows,
+    indicatorDatabase,
+    layoutStyle,
+    panelEngineToggle,
+    panelHeights,
+    panels,
+    sharedBrowserSettings,
+    tickers,
+    watchlistNameOverrides,
+    watchlistQuoteFetchModes,
+    watchlistTabs,
+    workspaceSeededFromLocal,
+  ]);
+
+  const applySharedWorkspaceSettings = (settings: SharedWorkspaceSettings): boolean => {
+    const normalizedTickers = compactTickersForStorage(
+      Array.isArray(settings.tickers)
+        ? settings.tickers
+          .map(normalizeTickerInfo)
+          .filter((ticker): ticker is TickerInfo => Boolean(ticker))
+        : [],
+    );
+    const effectiveTickers = normalizedTickers.length > 0 ? normalizedTickers : DEFAULT_TICKERS;
+    const normalizedPanels = Array.isArray(settings.panels)
+      ? settings.panels.slice(0, 12).map(normalizePanel)
+      : [];
+    if (normalizedPanels.length === 0) {
+      throw new Error('共有設定に有効なチャートがありません。');
+    }
+    const normalizedWatchlistTabs = normalizeWatchlistTabs(settings.watchlistTabs, effectiveTickers);
+    const normalizedIndicatorDatabase = Object.fromEntries(
+      Object.entries(
+        settings.indicatorDatabase && typeof settings.indicatorDatabase === 'object'
+          ? settings.indicatorDatabase
+          : {},
+      ).map(([symbol, indicatorSettings]) => [
+        symbol.toUpperCase(),
+        normalizeIndicatorSettings(symbol, indicatorSettings),
+      ]),
+    );
+    const normalizedBrowserSettings = Object.fromEntries(
+      Object.entries(
+        settings.browserSettings && typeof settings.browserSettings === 'object'
+          ? settings.browserSettings
+          : {},
+      ).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+    const browserSettingsChanged = applySharedBrowserSettings(normalizedBrowserSettings);
+
+    sharedWorkspaceSkipNextSaveRef.current = true;
+    setTickers(effectiveTickers);
+    setPanels(normalizedPanels);
+    setWatchlistTabs(normalizedWatchlistTabs);
+    setActiveWatchlistTabId(
+      normalizedWatchlistTabs.some((tab) => tab.id === settings.activeWatchlistTabId)
+        ? settings.activeWatchlistTabId
+        : normalizedWatchlistTabs[0]?.id ?? DEFAULT_WATCHLIST_TAB_ID,
+    );
+    setWatchlistQuoteFetchModes(normalizeWatchlistQuoteFetchModes(settings.watchlistQuoteFetchModes));
+    setWatchlistNameOverrides(normalizeWatchlistNameOverrides(settings.watchlistNameOverrides));
+    setIndicatorDatabase(normalizedIndicatorDatabase);
+    setFocusedSymbolIndex(
+      typeof settings.focusedSymbolIndex === 'string' && settings.focusedSymbolIndex
+        ? settings.focusedSymbolIndex
+        : normalizedPanels[0]?.symbol || 'VOO',
+    );
+    setPanelEngineToggle(normalizeBooleanRecord(settings.panelEngineToggle));
+    setLayoutStyle(
+      settings.layoutStyle === 'columns' || settings.layoutStyle === 'rows'
+        ? settings.layoutStyle
+        : 'grid',
+    );
+    setGridRows(Math.round(clampStoredNumber(settings.gridRows, 2, 1, 9)));
+    setGridCols(Math.round(clampStoredNumber(settings.gridCols, 2, 1, 9)));
+    setColWeights(normalizeNumberRecord(settings.colWeights));
+    setPanelHeights(normalizeNumberRecord(settings.panelHeights));
+    setComparisonLabelFontSize(
+      Math.round(clampStoredNumber(settings.comparisonLabelFontSize, 10, 8, 18)),
+    );
+    setComparisonLabelLayoutMode(
+      normalizeComparisonLabelLayoutMode(settings.comparisonLabelLayoutMode),
+    );
+    setSharedBrowserSettings(normalizedBrowserSettings);
+    setWorkspaceSeededFromLocal(settings.seededFromLocal === true);
+    return browserSettingsChanged;
+  };
+
+  const fetchSharedWorkspaceSettings = async (
+    endpoint = getSharedWorkspaceEndpoint(sharedWorkspaceProfile),
+  ): Promise<SharedWorkspaceEnvelope> => {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    return readWorkspaceEnvelope(response);
+  };
+
+  const reloadForSharedBrowserSettings = (revision: number): boolean => {
+    const markerKey = `mooview_shared_workspace_applied_${sharedWorkspaceProfile}`;
+    const revisionValue = String(revision);
+    if (sessionStorage.getItem(markerKey) === revisionValue) {
+      return false;
+    }
+    sessionStorage.setItem(markerKey, revisionValue);
+    window.location.reload();
+    return true;
+  };
+
+  const refreshSharedWorkspaceSettings = async () => {
+    if (workspacePersistenceMode !== 'shared' || sharedWorkspaceSaveInFlightRef.current) {
+      return;
+    }
+    try {
+      const envelope = await fetchSharedWorkspaceSettings();
+      if (
+        envelope.enabled
+        && envelope.settings
+        && envelope.revision > sharedWorkspaceRevisionRef.current
+      ) {
+        const browserSettingsChanged = applySharedWorkspaceSettings(envelope.settings);
+        sharedWorkspaceRevisionRef.current = envelope.revision;
+        setSharedWorkspaceUpdatedAt(envelope.updatedAt);
+        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+          return;
+        }
+      }
+      setSharedWorkspaceError(null);
+    } catch (error) {
+      setSharedWorkspaceError(error instanceof Error ? error.message : '共有設定を再取得できませんでした。');
+    }
+  };
+
+  const handleCopyWorkspaceToOci = async () => {
+    if (!window.confirm(
+      '現在のローカルチャート・ウォッチリスト・インジケーター設定で、OCIの共有設定を上書きします。続行しますか？',
+    )) {
+      return;
+    }
+    setWorkspaceMigrationMessage('OCIへ設定をコピーしています…');
+    setSharedWorkspaceError(null);
+    try {
+      const response = await fetch(
+        getSharedWorkspaceEndpoint('desktop', DEFAULT_OCI_SHARED_WORKSPACE_URL),
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            settings: {
+              ...sharedWorkspaceSettings,
+              seededFromLocal: true,
+            },
+            force: true,
+          }),
+        },
+      );
+      const saved = await readWorkspaceEnvelope(response);
+      setWorkspaceMigrationMessage(
+        `OCIへ保存しました（チャート${saved.settings?.panels.length ?? panels.length}件）。`,
+      );
+    } catch (error) {
+      setWorkspaceMigrationMessage(null);
+      setSharedWorkspaceError(
+        error instanceof Error ? error.message : 'OCIへの設定コピーに失敗しました。',
+      );
+    }
+  };
+
   // Real-time ticker price update counter/trigger
   const [tickTrigger, setTickTrigger] = useState(0);
 
@@ -2355,6 +2704,161 @@ export default function App() {
   }, []);
 
   // --- PERSISTENCE EFFECT WRITERS ---
+  useEffect(() => {
+    const captureBrowserSettings = () => {
+      const nextSettings = readSharedBrowserSettings();
+      setSharedBrowserSettings((current) => (
+        areStringRecordsEqual(current, nextSettings) ? current : nextSettings
+      ));
+    };
+    captureBrowserSettings();
+    const interval = window.setInterval(captureBrowserSettings, 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSharedWorkspace = async () => {
+      try {
+        const envelope = await fetchSharedWorkspaceSettings();
+        if (cancelled) return;
+        if (!envelope.enabled) {
+          setWorkspacePersistenceMode('local');
+          sharedWorkspaceHydratedRef.current = true;
+          return;
+        }
+
+        const browserSettingsChanged = envelope.settings
+          ? applySharedWorkspaceSettings(envelope.settings)
+          : false;
+        sharedWorkspaceRevisionRef.current = envelope.revision;
+        sharedWorkspaceHydratedRef.current = true;
+        setSharedWorkspaceUpdatedAt(envelope.updatedAt);
+        setSharedWorkspaceError(null);
+        setWorkspacePersistenceMode('shared');
+        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+          return;
+        }
+      } catch (error) {
+        if (cancelled) return;
+        sharedWorkspaceHydratedRef.current = true;
+        setWorkspacePersistenceMode('local');
+        setSharedWorkspaceError(
+          error instanceof Error ? error.message : '共有設定の確認に失敗しました。',
+        );
+      }
+    };
+
+    void hydrateSharedWorkspace();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      workspacePersistenceMode !== 'shared'
+      || !sharedWorkspaceHydratedRef.current
+    ) {
+      return;
+    }
+    if (sharedWorkspaceSkipNextSaveRef.current) {
+      sharedWorkspaceSkipNextSaveRef.current = false;
+      return;
+    }
+
+    const saveTimer = window.setTimeout(() => {
+      const saveSharedWorkspace = async () => {
+        sharedWorkspaceSaveInFlightRef.current = true;
+        try {
+          const response = await fetch(getSharedWorkspaceEndpoint(sharedWorkspaceProfile), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              settings: sharedWorkspaceSettings,
+              expectedRevision: sharedWorkspaceRevisionRef.current,
+            }),
+          });
+          if (response.status === 409) {
+            sharedWorkspaceSaveInFlightRef.current = false;
+            await refreshSharedWorkspaceSettings();
+            return;
+          }
+          const saved = await readWorkspaceEnvelope(response);
+          sharedWorkspaceRevisionRef.current = saved.revision;
+          sessionStorage.setItem(
+            `mooview_shared_workspace_applied_${sharedWorkspaceProfile}`,
+            String(saved.revision),
+          );
+          setSharedWorkspaceUpdatedAt(saved.updatedAt);
+          setSharedWorkspaceError(null);
+        } catch (error) {
+          setSharedWorkspaceError(
+            error instanceof Error ? error.message : '共有設定を保存できませんでした。',
+          );
+        } finally {
+          sharedWorkspaceSaveInFlightRef.current = false;
+        }
+      };
+      void saveSharedWorkspace();
+    }, SHARED_WORKSPACE_SAVE_DELAY_MS);
+
+    return () => window.clearTimeout(saveTimer);
+  }, [sharedWorkspaceSettings, workspacePersistenceMode]);
+
+  useEffect(() => {
+    if (workspacePersistenceMode !== 'shared') return;
+    const handleWindowFocus = () => {
+      void refreshSharedWorkspaceSettings();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [workspacePersistenceMode]);
+
+  useEffect(() => {
+    if (
+      workspacePersistenceMode !== 'local'
+      || sharedWorkspaceProfile !== 'desktop'
+      || sharedWorkspaceAutoMigrationAttemptedRef.current
+    ) {
+      return;
+    }
+    sharedWorkspaceAutoMigrationAttemptedRef.current = true;
+
+    const migrateIfOciIsEmpty = async () => {
+      try {
+        const endpoint = getSharedWorkspaceEndpoint('desktop', DEFAULT_OCI_SHARED_WORKSPACE_URL);
+        const existing = await fetchSharedWorkspaceSettings(endpoint);
+        if (existing.settings?.seededFromLocal === true) {
+          return;
+        }
+        setWorkspaceMigrationMessage('OCIの初期設定を作成しています…');
+        const response = await fetch(endpoint, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            settings: {
+              ...sharedWorkspaceSettings,
+              seededFromLocal: true,
+            },
+            force: true,
+          }),
+        });
+        const saved = await readWorkspaceEnvelope(response);
+        setWorkspaceMigrationMessage(
+          `現在の設定をOCIへ自動保存しました（チャート${saved.settings?.panels.length ?? panels.length}件）。`,
+        );
+      } catch (error) {
+        setSharedWorkspaceError(
+          error instanceof Error ? error.message : 'OCIへの初期設定コピーに失敗しました。',
+        );
+      }
+    };
+
+    void migrateIfOciIsEmpty();
+  }, [workspacePersistenceMode]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -8302,6 +8806,57 @@ export default function App() {
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
           {sidebarView === 'settings' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+          <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                ワークスペース保存先
+              </span>
+              <span className={`px-1.5 py-0.5 border text-[9px] font-bold ${
+                workspacePersistenceMode === 'shared'
+                  ? 'border-emerald-800 bg-emerald-950/70 text-emerald-300'
+                  : workspacePersistenceMode === 'local'
+                    ? 'border-amber-800 bg-amber-950/60 text-amber-300'
+                    : 'border-gray-700 bg-gray-900 text-gray-400'
+              }`}>
+                {workspacePersistenceMode === 'shared'
+                  ? `OCI共有保存・${sharedWorkspaceProfile === 'mobile' ? 'スマホ' : 'PC'}`
+                  : workspacePersistenceMode === 'local'
+                    ? 'このブラウザ'
+                    : '確認中'}
+              </span>
+            </div>
+            <div className="text-[10px] text-gray-400">
+              {workspacePersistenceMode === 'shared'
+                ? sharedWorkspaceProfile === 'mobile'
+                  ? '変更はOCIのスマホ専用設定へ保存されます。'
+                  : '変更はOCIへ保存され、WindowsとMacで共通表示されます。'
+                : '現在の設定はこのブラウザに保存されています。'}
+            </div>
+            {workspacePersistenceMode === 'shared' && sharedWorkspaceUpdatedAt && (
+              <div className="text-[9px] font-mono text-gray-500">
+                最終保存: {new Date(sharedWorkspaceUpdatedAt).toLocaleString('ja-JP')}
+              </div>
+            )}
+            {workspacePersistenceMode === 'local' && (
+              <button
+                type="button"
+                onClick={() => void handleCopyWorkspaceToOci()}
+                className="bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-2 font-bold text-[11px] transition"
+              >
+                現在の設定をOCIへコピー
+              </button>
+            )}
+            {workspaceMigrationMessage && (
+              <div className="border border-emerald-900/70 bg-emerald-950/35 p-2 text-[10px] text-emerald-300">
+                {workspaceMigrationMessage}
+              </div>
+            )}
+            {sharedWorkspaceError && (
+              <div className="border border-red-900/70 bg-red-950/35 p-2 text-[10px] text-red-300">
+                {sharedWorkspaceError}
+              </div>
+            )}
+          </div>
           <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">接続ステータス</span>

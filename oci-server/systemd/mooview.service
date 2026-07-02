@@ -11,6 +11,8 @@ User=mooview
 Group=mooview
 WorkingDirectory=/opt/mooview/app
 EnvironmentFile=/etc/mooview/mooview.env
+Environment=MOOVIEW_SHARED_SETTINGS=true
+Environment=MOOVIEW_DATA_DIR=/var/lib/mooview
 ExecStart=/usr/bin/node /opt/mooview/app/dist/server.cjs
 Restart=on-failure
 RestartSec=5
@@ -27,8 +29,8 @@ LockPersonality=true
 RestrictSUIDSGID=true
 IPAddressDeny=any
 IPAddressAllow=localhost
+ReadWritePaths=/var/lib/mooview
 UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-

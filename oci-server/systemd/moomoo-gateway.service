@@ -1,0 +1,34 @@
+[Unit]
+Description=MooView用 Moomoo Pythonゲートウェイ
+Requires=moomoo-opend.service
+After=moomoo-opend.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mooview
+Group=mooview
+WorkingDirectory=/opt/mooview/app
+EnvironmentFile=/etc/mooview/mooview.env
+ExecStart=/opt/mooview/venv/bin/python /opt/mooview/app/moomoo_gateway.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+

@@ -157,6 +157,17 @@ function calculateChangePct(latest: number, base: number): number {
   return ((latest - base) / denominator) * 100;
 }
 
+function calculatePreviousCloseFromChangePct(latest: number, changePct: number): number | null {
+  const changeFactor = 1 + changePct / 100;
+  if (!Number.isFinite(latest) || !Number.isFinite(changeFactor) || Math.abs(changeFactor) <= 0.0000001) {
+    return null;
+  }
+  const previousClose = latest / changeFactor;
+  return Number.isFinite(previousClose) && Math.abs(previousClose) > 0.0000001
+    ? previousClose
+    : null;
+}
+
 function formatSignedPercent(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
@@ -562,23 +573,40 @@ export function InteractiveCustomChart({
     return result;
   }, [comparisonSymbols, comparisonCandles]);
 
-  // 表示範囲の主銘柄と同じ時刻にある比較銘柄の最初の価格を基準にする
+  // 日次表示では前日終値、それ以外では表示範囲の最初の価格を比較基準にする
   const compStartPrice = useMemo(() => {
     const result: Record<string, number> = {};
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
+      const candleSeries = comparisonCandleSeries[symbol] || [];
       const firstAlignedCandle = visibleCandles
         .map((mainCandle) => findAlignedOrPreviousCandle(
-          comparisonCandleSeries[symbol] || [],
+          candleSeries,
           candleMap,
           mainCandle,
           timeframe,
         ))
         .find((candle): candle is Candle => Boolean(candle));
-      result[symbol] = firstAlignedCandle?.close || 1;
+      const fallbackStartPrice = firstAlignedCandle?.close || 1;
+      const lastMainCandle = visibleCandles[visibleCandles.length - 1];
+      const lastAlignedCandle = lastMainCandle
+        ? findAlignedOrNearestCandle(candleSeries, candleMap, lastMainCandle, timeframe)
+        : null;
+      const overrideChangePct = getChangePctOverride(symbol);
+      const previousClose = lastAlignedCandle && overrideChangePct !== null
+        ? calculatePreviousCloseFromChangePct(lastAlignedCandle.close, overrideChangePct)
+        : null;
+      result[symbol] = previousClose ?? fallbackStartPrice;
     });
     return result;
-  }, [comparisonSymbols, comparisonCandleMaps, comparisonCandleSeries, timeframe, visibleCandles]);
+  }, [
+    comparisonSymbols,
+    comparisonCandleMaps,
+    comparisonCandleSeries,
+    timeframe,
+    visibleCandles,
+    changePctOverrides,
+  ]);
 
   // Calculate high and low price ranges for scale bounds of visible candles
   const priceMinMax = useMemo(() => {
@@ -694,7 +722,7 @@ export function InteractiveCustomChart({
           y: getY(scaledPrice),
           close: compCandle.close,
           scaledPrice,
-          changePct: getChangePctOverride(compSym) ?? calculateChangePct(compCandle.close, startPrice),
+          changePct: calculateChangePct(compCandle.close, startPrice),
           sliceIndex,
           globalIndex: startIndex + sliceIndex,
         });
@@ -1237,9 +1265,8 @@ export function InteractiveCustomChart({
                 )
                 : null;
               const startPrice = compStartPrice[compSym] || 1;
-              const overrideChangePct = getChangePctOverride(compSym);
               const changeText = compCandle
-                ? formatSignedPercent(overrideChangePct ?? calculateChangePct(compCandle.close, startPrice))
+                ? formatSignedPercent(calculateChangePct(compCandle.close, startPrice))
                 : 'N/A';
               return (
                 <div

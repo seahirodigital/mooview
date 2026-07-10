@@ -68,6 +68,11 @@ type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
 type AppView = 'charts' | 'value-chain' | 'macro-flow';
 type WorkspacePersistenceMode = 'checking' | 'local' | 'shared';
+type DisplayTickerStat = TickerInfo & {
+  currentPrice: number | null;
+  computedChange: number | null;
+  marketCap?: number;
+};
 
 const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
@@ -80,12 +85,14 @@ const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
 const QUOTE_CACHE_INDEXED_DB_CACHE_KEY = 'quotes';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
-const KLINE_FETCH_BATCH_LIMIT = 60;
+const KLINE_FETCH_BATCH_LIMIT = 20;
 const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
-const WATCHLIST_QUOTE_BATCH_LIMIT = 200;
-const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 10_000;
+const WATCHLIST_QUOTE_BATCH_LIMIT = 80;
+const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_AUTO_QUOTE_REFRESH_INTERVAL_MS = 30_000;
+const JAPAN_US_FETCH_PAUSE_START_MINUTES = 9 * 60;
+const JAPAN_US_FETCH_PAUSE_END_MINUTES = 22 * 60 + 30;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
@@ -134,6 +141,12 @@ const SHARED_BROWSER_SETTING_KEYS = [
 ] as const;
 const DAY_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '5m';
 const WEEK_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '30m';
+const CHART_TIMEFRAME_OPTIONS: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
+const JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS: Partial<Record<Timeframe, string>> = {
+  '3m': '2m',
+  '10m': '15m',
+  '4h': '60m',
+};
 const DEFAULT_DISPLAY_RANGE: Exclude<ChartDisplayRange, null> = 'd';
 const DAY_RANGE_ZOOM_FACTOR = 6.5;
 const WEEK_RANGE_ZOOM_FACTOR = 6.5;
@@ -1097,6 +1110,92 @@ function getQuoteOperandSymbolsForWatchlistTabs(tabs: WatchlistTab[]): string[] 
   );
 }
 
+function getJapanMinutesOfDay(date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
+  return (hour % 24) * 60 + minute;
+}
+
+function shouldPauseUsFetchForJapanSession(date = new Date()): boolean {
+  const minutes = getJapanMinutesOfDay(date);
+  return minutes >= JAPAN_US_FETCH_PAUSE_START_MINUTES
+    && minutes < JAPAN_US_FETCH_PAUSE_END_MINUTES;
+}
+
+function isUsMarketSymbol(symbol: string): boolean {
+  const normalized = normalizeStoredSymbolValue(symbol);
+  return normalized.startsWith('US.');
+}
+
+function isJapaneseMarketSymbol(symbol: string): boolean {
+  return normalizeStoredSymbolValue(symbol).startsWith('JP.');
+}
+
+function isJapaneseMarketSymbolInput(symbol: string): boolean {
+  return getStoredSymbolOperands(symbol).some(isJapaneseMarketSymbol);
+}
+
+function formatTimeframeLabel(timeframe: Timeframe): string {
+  if (timeframe === '1mo') return '1M';
+  if (timeframe === '1d') return 'day';
+  if (timeframe === '1w') return 'Week';
+  return timeframe;
+}
+
+function formatChartTimeframeLabel(timeframe: Timeframe, usesJapanYahooFallback: boolean): string {
+  return usesJapanYahooFallback && JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    ? JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    : formatTimeframeLabel(timeframe);
+}
+
+function getChartTimeframeButtonTitle(
+  timeframe: Timeframe,
+  usesJapanYahooFallback: boolean,
+  displayRangeLocked: boolean,
+): string | undefined {
+  if (displayRangeLocked) return 'D/W表示中は時間足を固定しています';
+  const effectiveLabel = JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe];
+  if (!usesJapanYahooFallback || !effectiveLabel) return undefined;
+  return `JP銘柄はYahooの実効足種で取得します: ${formatTimeframeLabel(timeframe)} → ${effectiveLabel}`;
+}
+
+function getMarketFetchRank(symbol: string): number {
+  if (isJapaneseMarketSymbol(symbol)) return 0;
+  if (isUsMarketSymbol(symbol)) return 2;
+  return 1;
+}
+
+function orderMarketFetchSymbols(symbols: string[]): string[] {
+  const pauseUsFetch = shouldPauseUsFetchForJapanSession();
+  const uniqueSymbols = Array.from(new Set(symbols.map(normalizeStoredSymbolValue).filter(Boolean)));
+  return uniqueSymbols
+    .filter((symbol) => !(pauseUsFetch && isUsMarketSymbol(symbol)))
+    .sort((first, second) => {
+      const firstRank = getMarketFetchRank(first);
+      const secondRank = getMarketFetchRank(second);
+      return firstRank - secondRank || first.localeCompare(second);
+    });
+}
+
+function isPriorityJapaneseWatchlistTab(tab: WatchlistTab | null | undefined): boolean {
+  const name = (tab?.name || '').toUpperCase();
+  return name.includes('JPセクター') || name.includes('TPX') || name.includes('TOPIX');
+}
+
+function orderWatchlistTabsForQuoteFetch(tabs: WatchlistTab[], activeTabId: string): WatchlistTab[] {
+  return [...tabs].sort((first, second) => {
+    const firstRank = isPriorityJapaneseWatchlistTab(first) ? 0 : first.id === activeTabId ? 1 : 2;
+    const secondRank = isPriorityJapaneseWatchlistTab(second) ? 0 : second.id === activeTabId ? 1 : 2;
+    return firstRank - secondRank;
+  });
+}
+
 function getAutoWatchlistQuoteRefreshSignature(
   tabs: WatchlistTab[],
   modes: Record<string, WatchlistQuoteFetchMode>,
@@ -1104,7 +1203,9 @@ function getAutoWatchlistQuoteRefreshSignature(
   return tabs
     .flatMap((tab) => {
       if (getWatchlistQuoteFetchMode(modes, tab.id) !== 'auto') return [];
-      const symbols = getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab));
+      const symbols = orderMarketFetchSymbols(
+        getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab)),
+      );
       return symbols.length > 0 ? [`${tab.id}:${symbols.join(',')}`] : [];
     })
     .join('|');
@@ -1320,6 +1421,36 @@ function filterCandlesForDisplayRange(
   }
 
   return candles;
+}
+
+function canUseQuoteFallbackCandles(symbol: string): boolean {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+  return Boolean(normalizedSymbol)
+    && !normalizedSymbol.startsWith('BASKET:')
+    && !normalizeSymbolExpressionForStorage(normalizedSymbol);
+}
+
+function selectLongestCandleSeriesSymbol(
+  symbols: string[],
+  candlesBySymbol: Record<string, Candle[]>,
+): string {
+  return symbols.reduce((bestSymbol, symbol) => {
+    const bestLength = bestSymbol ? candlesBySymbol[bestSymbol]?.length ?? 0 : 0;
+    const symbolLength = candlesBySymbol[symbol]?.length ?? 0;
+    return symbolLength > bestLength ? symbol : bestSymbol;
+  }, '');
+}
+
+function isIntradayTimeframe(timeframe: Timeframe): boolean {
+  return timeframe !== '1d' && timeframe !== '1w' && timeframe !== '1mo';
+}
+
+function hasUsableChartCandles(candles: Candle[], timeframe: Timeframe): boolean {
+  return candles.length >= (isIntradayTimeframe(timeframe) ? 3 : 1);
+}
+
+function getUsableChartCandles(candles: Candle[], timeframe: Timeframe): Candle[] {
+  return hasUsableChartCandles(candles, timeframe) ? candles : [];
 }
 
 function splitTickerInputList(rawInput: string): string[] {
@@ -3240,11 +3371,11 @@ export default function App() {
   };
 
   const getWatchlistTabQuoteOperands = (tab: WatchlistTab | null | undefined): string[] => {
-    return Array.from(new Set(
+    return orderMarketFetchSymbols(Array.from(new Set(
       getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab))
         .map((symbol) => normalizeStoredSymbolValue(symbol))
         .filter(Boolean),
-    ));
+    )));
   };
 
   const requestAutoWatchlistQuoteRefresh = (force = false): boolean => {
@@ -3420,9 +3551,10 @@ export default function App() {
         }
 
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
-          const key = `${symbol}-${timeframe}`;
-          const existing = requests.get(key);
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+          if (shouldPauseUsFetchForJapanSession() && isUsMarketSymbol(normalizedSymbol)) return;
+          const key = `${normalizedSymbol}-${timeframe}`;
+          const existing = requests.get(key);
           const activePriority = activeWatchlistSymbolSet.has(normalizedSymbol)
             ? requestPriority - 1_000
             : requestPriority;
@@ -3432,7 +3564,7 @@ export default function App() {
             symbol,
           ].map((query) => query.trim()).filter(Boolean)));
           requests.set(key, {
-            symbol,
+            symbol: normalizedSymbol,
             timeframe,
             lookupQueries,
             priority: Math.min(existing?.priority ?? activePriority, activePriority),
@@ -3477,7 +3609,11 @@ export default function App() {
           return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
         }
         return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
-      }).sort((first, second) => first[1].priority - second[1].priority);
+      }).sort((first, second) =>
+        first[1].priority - second[1].priority
+        || getMarketFetchRank(first[1].symbol) - getMarketFetchRank(second[1].symbol)
+        || first[1].symbol.localeCompare(second[1].symbol),
+      );
 
       if (requestsToFetch.length === 0) {
         forceCandleRefreshRef.current = false;
@@ -3513,11 +3649,21 @@ export default function App() {
               timeframe,
               reqNum: 150
             })
-          }, 25_000);
+          }, 90_000);
           const candles = Array.isArray(data.candles) ? data.candles as Candle[] : [];
-          const errorMessage = data.error ? String(data.error) : response.ok ? null : `HTTP ${response.status}`;
+          const source = typeof data.source === 'string' ? data.source : '';
+          const fallbackSourceError = source === 'quote-fallback'
+            ? 'quote fallbackはチャート用KLineとして保存しません'
+            : null;
+          const usableCandles = getUsableChartCandles(candles, timeframe);
+          const errorMessage = data.error
+            ? String(data.error)
+            : fallbackSourceError
+            ?? (response.ok
+              ? usableCandles.length > 0 ? null : '有効なKLineが不足しています'
+              : `HTTP ${response.status}`);
           return {
-            candles: response.ok && data.success && candles.length > 0 ? candles : [],
+            candles: response.ok && data.success && !fallbackSourceError && usableCandles.length > 0 ? usableCandles : [],
             error: errorMessage,
             retryable: response.status === 429 || isMoomooRateLimitMessage(errorMessage),
           };
@@ -3677,10 +3823,7 @@ export default function App() {
       source: WatchlistQuoteFetchSource;
     } | null => {
       if (!quoteFetchAutoSweepRequestedRef.current) return null;
-      const orderedTabs = [
-        ...watchlistTabs.filter((tab) => tab.id === activeWatchlistTabId),
-        ...watchlistTabs.filter((tab) => tab.id !== activeWatchlistTabId),
-      ];
+      const orderedTabs = orderWatchlistTabsForQuoteFetch(watchlistTabs, activeWatchlistTabId);
       for (const tab of orderedTabs) {
         if (getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tab.id) !== 'auto') continue;
         if (quoteFetchAutoAttemptedTabIdsRef.current.has(tab.id)) continue;
@@ -3728,7 +3871,7 @@ export default function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ symbols }),
-            }, 35_000);
+            }, 90_000);
             const errorMessage = data.error ? String(data.error) : response.ok ? '' : `HTTP ${response.status}`;
             if (!response.ok || !data.success || !data.quotes) {
               if (retryAllowed && (response.status === 429 || isMoomooRateLimitMessage(errorMessage))) {
@@ -3808,7 +3951,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbols: quoteSymbols }),
-        }, 35_000);
+        }, 90_000);
         if (!response.ok || !data.success || !data.quotes) {
           throw new Error(data.error || 'Moomoo価格一覧を取得できません。');
         }
@@ -4807,24 +4950,32 @@ export default function App() {
   };
 
   const selectTickerForPrimaryChart = (symbol: string) => {
-    setFocusedSymbolIndex(symbol);
+    const chartSymbol = normalizeStoredSymbolValue(symbol) || symbol;
+    setFocusedSymbolIndex(chartSymbol);
+    chartMissingDataRefreshRef.current = { signature: '', requestedAt: 0 };
+    forceCandleRefreshRef.current = true;
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    queuePriorityQuoteRefreshForChartSymbols([chartSymbol]);
     setPanels((currentPanels) =>
       currentPanels.map((panel, index) =>
         index === 0
           ? {
               ...panel,
-              symbol,
+              symbol: chartSymbol,
               comparisonOnly: undefined,
               showVolume: true,
               watchlistTabId: undefined,
               watchlistSectionId: undefined,
               comparisonSymbols: (panel.comparisonSymbols || []).filter(
-                (comparisonSymbol) => comparisonSymbol !== symbol
+                (comparisonSymbol) => comparisonSymbol !== chartSymbol
               ),
             }
           : panel
       )
     );
+    setTickTrigger((current) => current + 1);
   };
 
   const registerTickerExpression = async (
@@ -5821,7 +5972,7 @@ export default function App() {
 
   // --- VOLATILITY METRIC CALCULATION DISPLAY ---
   // Evaluates live visual statistics of active cached charts
-  const liveTickerStats = useMemo(() => {
+  const liveTickerStats = useMemo<DisplayTickerStat[]>(() => {
     return tickers.map(t => {
       const normalizedTicker = normalizeTickerInfo(t) || {
         symbol: normalizeStoredSymbolValue(t.symbol || ''),
@@ -5874,9 +6025,54 @@ export default function App() {
     });
   }, [tickers, candlesCache, quoteCache, moomooRealTimeActive, watchlistNameOverrides]);
 
-  const tickerStatsBySymbol = useMemo(() => {
+  const tickerStatsBySymbol = useMemo<Map<string, DisplayTickerStat>>(() => {
     return new Map(liveTickerStats.map((ticker) => [ticker.symbol, ticker]));
   }, [liveTickerStats]);
+
+  const resolveDisplayTickerStat = (rawSymbol: string): DisplayTickerStat | null => {
+    const normalizedSymbol = normalizeStoredSymbolValue(rawSymbol);
+    if (!normalizedSymbol) return null;
+
+    const registeredTicker = tickerStatsBySymbol.get(normalizedSymbol);
+    if (registeredTicker) return registeredTicker;
+
+    const expression = normalizeSymbolExpressionForStorage(normalizedSymbol);
+    if (expression) {
+      const leftQuote = quoteCache[expression.left];
+      const rightQuote = quoteCache[expression.right];
+      const expressionQuote = leftQuote && rightQuote
+        ? calculateExpressionQuote(expression, leftQuote, rightQuote)
+        : null;
+      const expressionPrice = Number(expressionQuote?.price);
+      const expressionChange = Number(expressionQuote?.changePct);
+      return {
+        symbol: normalizedSymbol,
+        name: watchlistNameOverrides[normalizedSymbol]
+          || `${leftQuote?.name || formatWatchlistSymbol(expression.left)} ${expression.operator} ${rightQuote?.name || formatWatchlistSymbol(expression.right)}`,
+        basePrice: Number.isFinite(expressionPrice) ? expressionPrice : 0,
+        dailyChangePct: Number.isFinite(expressionChange) ? expressionChange : 0,
+        currentPrice: Number.isFinite(expressionPrice) ? expressionPrice : null,
+        computedChange: Number.isFinite(expressionChange) ? expressionChange : null,
+      };
+    }
+
+    const quote = quoteCache[normalizedSymbol];
+    const quotePrice = Number(quote?.price);
+    const quoteChange = Number(quote?.changePct);
+    if (Number.isFinite(quotePrice) && quotePrice > 0) {
+      return {
+        symbol: normalizedSymbol,
+        name: watchlistNameOverrides[normalizedSymbol] || quote?.name || formatWatchlistSymbol(normalizedSymbol),
+        basePrice: quotePrice,
+        dailyChangePct: Number.isFinite(quoteChange) ? quoteChange : 0,
+        currentPrice: quotePrice,
+        computedChange: Number.isFinite(quoteChange) ? quoteChange : null,
+        marketCap: quote?.marketCap,
+      };
+    }
+
+    return null;
+  };
 
   const getDefaultWatchlistName = (symbol: string): string => {
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
@@ -5893,6 +6089,7 @@ export default function App() {
     }
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
     return watchlistNameOverrides[normalizedSymbol]
+      || resolveDisplayTickerStat(normalizedSymbol)?.name
       || tickerStatsBySymbol.get(normalizedSymbol)?.name
       || getDefaultWatchlistName(normalizedSymbol);
   };
@@ -6083,6 +6280,7 @@ export default function App() {
     timeframe: Timeframe,
     displayRange: ChartDisplayRange | undefined,
     useDemoFallback = false,
+    allowQuoteFallback = true,
   ): Candle[] => {
     const normalizedChartSymbol = normalizeStoredSymbolValue(rawSymbol);
     if (!normalizedChartSymbol) return [];
@@ -6093,13 +6291,24 @@ export default function App() {
     ].filter((seedTimeframe): seedTimeframe is Timeframe => Boolean(seedTimeframe))));
 
     const options = { tickerStatsBySymbol, watchlistTabs };
-    let chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, timeframe, candlesCache, options);
+    let chartCandles = getUsableChartCandles(
+      resolveCandlesForSymbol(normalizedChartSymbol, timeframe, candlesCache, options),
+      timeframe,
+    );
     for (const seedTimeframe of seedTimeframes) {
       if (chartCandles.length > 0 || seedTimeframe === timeframe) continue;
-      chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, seedTimeframe, candlesCache, options);
+      chartCandles = getUsableChartCandles(
+        resolveCandlesForSymbol(normalizedChartSymbol, seedTimeframe, candlesCache, options),
+        seedTimeframe,
+      );
     }
 
-    if (chartCandles.length === 0) {
+    if (
+      chartCandles.length === 0
+      && allowQuoteFallback
+      && !isIntradayTimeframe(timeframe)
+      && canUseQuoteFallbackCandles(normalizedChartSymbol)
+    ) {
       chartCandles = createQuoteFallbackCandlesForSymbol(normalizedChartSymbol);
     }
 
@@ -6121,7 +6330,7 @@ export default function App() {
         ...(panel.comparisonSymbols || []),
       ].map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean)));
       chartSymbols.forEach((symbol) => {
-        const candles = resolveChartCandlesForSymbol(symbol, panel.timeframe, panel.displayRange, false);
+        const candles = resolveChartCandlesForSymbol(symbol, panel.timeframe, panel.displayRange, false, false);
         if (candles.length > 0) return;
         missingSymbols.add(symbol);
         missingRequests.push(`${symbol}-${panel.timeframe}-${panel.displayRange || 'normal'}`);
@@ -6135,6 +6344,7 @@ export default function App() {
         normalizedSymbol,
         valueChainChartState.timeframe,
         valueChainChartState.displayRange,
+        false,
         false,
       );
       if (candles.length > 0) return;
@@ -6244,7 +6454,7 @@ export default function App() {
       ? watchlistTabs.find((tab) => tab.id === quoteFetchTarget.tabId) ?? activeWatchlistTab
       : activeWatchlistTab;
     const isQuoteResolved = (symbol: string) => {
-      const ticker = tickerStatsBySymbol.get(symbol);
+      const ticker = resolveDisplayTickerStat(symbol);
       const quote = quoteCache[symbol];
       const currentPrice = Number(ticker?.currentPrice ?? quote?.price);
       const computedChange = Number(ticker?.computedChange ?? quote?.changePct);
@@ -6412,7 +6622,7 @@ export default function App() {
         .map((symbol) => {
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
           if (!normalizedSymbol) return null;
-          return tickerStatsBySymbol.get(normalizedSymbol) || {
+          return resolveDisplayTickerStat(normalizedSymbol) || {
             symbol: normalizedSymbol,
             name: watchlistNameOverrides[normalizedSymbol] || formatWatchlistSymbol(normalizedSymbol),
             basePrice: 0,
@@ -6427,7 +6637,7 @@ export default function App() {
         rows: watchlistSort.column ? [...rows].sort(compareRows) : rows,
       };
     });
-  }, [activeWatchlistTab, tickerStatsBySymbol, watchlistNameOverrides, watchlistSort]);
+  }, [activeWatchlistTab, quoteCache, tickerStatsBySymbol, watchlistNameOverrides, watchlistSort]);
 
   const getComparableSymbolsForPanel = (
     panel: ChartPanel,
@@ -6440,7 +6650,7 @@ export default function App() {
       // BASKET:xxxx シンボルは特別扱い（tickerStats不要）
       if (symbol.startsWith('BASKET:')) return true;
       if (options.allowMissingData) return true;
-      const ticker = tickerStatsBySymbol.get(symbol);
+      const ticker = resolveDisplayTickerStat(symbol);
       const currentPrice = Number(ticker?.currentPrice);
       return !moomooRealTimeActive
         || (ticker?.currentPrice !== null && Number.isFinite(currentPrice) && currentPrice > 0);
@@ -6606,6 +6816,7 @@ export default function App() {
               valueChainChartState.timeframe,
               valueChainChartState.displayRange,
               !moomooRealTimeActive,
+              false,
             );
             if (moomooRealTimeActive) {
               if (candles.length > 0) acc[comparisonSymbol] = candles;
@@ -6922,6 +7133,7 @@ export default function App() {
                         panel.timeframe,
                         panel.displayRange,
                         !moomooRealTimeActive,
+                        false,
                       );
                       if (candles.length > 0) {
                         acc[compSym] = candles;
@@ -6929,7 +7141,7 @@ export default function App() {
                       return acc;
                     }, {} as Record<string, Candle[]>);
                     const comparisonAnchorSymbol = panelComparisonOnly
-                      ? panelComparisonSymbols.find((symbol) => (panelComparisonCandles[symbol]?.length ?? 0) > 0)
+                      ? selectLongestCandleSeriesSymbol(panelComparisonSymbols, panelComparisonCandles)
                         || panelComparisonSymbols[0]
                         || ''
                       : '';
@@ -6962,6 +7174,7 @@ export default function App() {
                         ...panelComparisonSymbols,
                       ].filter(Boolean),
                     ));
+                    const panelUsesJapanYahooFallback = chartDisplaySymbols.some(isJapaneseMarketSymbolInput);
 
                     return (
                       <React.Fragment key={panel.id}>
@@ -7348,7 +7561,7 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-                                  {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
+                                  {CHART_TIMEFRAME_OPTIONS.map((tf) => (
                                     <button
                                       key={tf}
                                       disabled={Boolean(panel.displayRange)}
@@ -7360,9 +7573,9 @@ export default function App() {
                                           ? 'bg-emerald-500 text-black'
                                           : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                                       }`}
-                                      title={panel.displayRange ? 'D/W表示中は時間足を固定しています' : undefined}
+                                      title={getChartTimeframeButtonTitle(tf, panelUsesJapanYahooFallback, Boolean(panel.displayRange))}
                                     >
-                                      {tf === '1mo' ? '1M' : tf === '1d' ? 'day' : tf === '1w' ? 'Week' : tf}
+                                      {formatChartTimeframeLabel(tf, panelUsesJapanYahooFallback)}
                                     </button>
                                   ))}
                                 </div>

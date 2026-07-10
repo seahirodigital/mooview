@@ -25,10 +25,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 LockPersonality=true
 RestrictSUIDSGID=true
-IPAddressDeny=any
-IPAddressAllow=localhost
 UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-

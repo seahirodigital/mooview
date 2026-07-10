@@ -722,7 +722,9 @@ export function InteractiveCustomChart({
           y: getY(scaledPrice),
           close: compCandle.close,
           scaledPrice,
-          changePct: calculateChangePct(compCandle.close, startPrice),
+          changePct: sliceIndex === visibleCandles.length - 1 && getChangePctOverride(compSym) !== null
+            ? getChangePctOverride(compSym)!
+            : calculateChangePct(compCandle.close, startPrice),
           sliceIndex,
           globalIndex: startIndex + sliceIndex,
         });
@@ -753,13 +755,15 @@ export function InteractiveCustomChart({
 
     const firstMainCandle = visibleCandles[0];
     const lastMainCandle = visibleCandles[visibleCandles.length - 1];
+    const primaryChangePctOverride = getChangePctOverride(symbol);
     const rawLabels = [
       ...(renderPrimarySeries ? [{
         key: symbol,
         symbol,
         color: '#475569',
         y: getY(lastMainCandle.close),
-        changePct: getChangePctOverride(symbol) ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
+        rankPrice: lastMainCandle.close,
+        changePct: primaryChangePctOverride ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
       }] : []),
       ...comparisonSymbols.flatMap((compSym, index) => {
         const points = comparisonSeriesData[compSym] || [];
@@ -770,12 +774,13 @@ export function InteractiveCustomChart({
           symbol: compSym,
           color: getSeriesColor(compSym, index),
           y: lastPoint.y,
+          rankPrice: lastPoint.scaledPrice,
           changePct: lastPoint.changePct,
         }];
       }),
     ].sort((first, second) => {
-      const changeDiff = second.changePct - first.changePct;
-      return changeDiff !== 0 ? changeDiff : first.y - second.y;
+      const rankDiff = second.rankPrice - first.rankPrice;
+      return rankDiff !== 0 ? rankDiff : first.y - second.y;
     });
     if (rawLabels.length === 0) return [];
 

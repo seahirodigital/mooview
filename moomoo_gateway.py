@@ -6,6 +6,8 @@ import re
 import threading
 import time
 import unicodedata
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +31,32 @@ GATEWAY_HOST = os.getenv("MOOMOO_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("MOOMOO_GATEWAY_PORT", "8787"))
 GATEWAY_KEY = os.getenv("MOOMOO_GATEWAY_KEY", "")
 QUOTE_CACHE_TTL_SECONDS = 30
+SNAPSHOT_RATE_LIMIT_CALLS = int(os.getenv("MOOMOO_SNAPSHOT_RATE_LIMIT_CALLS", "45"))
+SNAPSHOT_RATE_LIMIT_WINDOW_SECONDS = float(os.getenv("MOOMOO_SNAPSHOT_RATE_LIMIT_WINDOW_SECONDS", "30"))
+KLINE_RATE_LIMIT_CALLS = int(os.getenv("MOOMOO_KLINE_RATE_LIMIT_CALLS", "35"))
+KLINE_RATE_LIMIT_WINDOW_SECONDS = float(os.getenv("MOOMOO_KLINE_RATE_LIMIT_WINDOW_SECONDS", "30"))
+RATE_LIMIT_EXTRA_WAIT_SECONDS = float(os.getenv("MOOMOO_RATE_LIMIT_EXTRA_WAIT_SECONDS", "0.5"))
 JP_SYMBOLS_PATH = Path(__file__).resolve().parent / "data" / "jp_symbols.json"
+JP_YAHOO_FALLBACK_ENABLED = os.getenv("MOOMOO_JP_YAHOO_FALLBACK_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+JP_YAHOO_CHART_URL = os.getenv(
+    "MOOMOO_JP_YAHOO_CHART_URL",
+    "https://query1.finance.yahoo.com/v8/finance/chart",
+).rstrip("/")
+JP_YAHOO_TIMEOUT_SECONDS = float(os.getenv("MOOMOO_JP_YAHOO_TIMEOUT_SECONDS", "10"))
+JP_YAHOO_USER_AGENT = os.getenv("MOOMOO_JP_YAHOO_USER_AGENT", "Mozilla/5.0")
+JP_YAHOO_SYMBOL_ALIASES = {
+    ".N225": "^N225",
+    "N225": "^N225",
+    "NI225": "^N225",
+    ".TOPIX": "1308.T",
+    "TOPIX": "1308.T",
+    ".TPX": "1308.T",
+    "TPX": "1308.T",
+}
 
 KLINE_TYPES = {
     "1m": (SubType.K_1M, KLType.K_1M),
@@ -262,6 +289,135 @@ def quote_to_fallback_candles(symbol: str, quote: Dict[str, Any]) -> List[Dict[s
     ]
 
 
+def is_jp_symbol(symbol: str) -> bool:
+    return symbol.startswith("JP.") and len(symbol.split(".", 1)) == 2
+
+
+def jp_yahoo_symbol(symbol: str) -> str:
+    code = symbol.split(".", 1)[1].strip().upper()
+    if not code:
+        raise ValueError("empty JP symbol")
+    if code in JP_YAHOO_SYMBOL_ALIASES:
+        return JP_YAHOO_SYMBOL_ALIASES[code]
+    if code.startswith("^"):
+        return code
+    return f"{code}.T"
+
+
+def yahoo_interval_for_timeframe(timeframe: str) -> str:
+    return {
+        "1m": "1m",
+        "3m": "2m",
+        "5m": "5m",
+        "10m": "15m",
+        "30m": "30m",
+        "1h": "60m",
+        "4h": "60m",
+        "1d": "1d",
+        "1w": "1wk",
+        "1mo": "1mo",
+    }.get(timeframe, "5m")
+
+
+def yahoo_range_for_timeframe(timeframe: str, count: int) -> str:
+    if timeframe in {"1m", "3m"}:
+        return "5d"
+    if timeframe in {"5m", "10m", "30m", "1h", "4h"}:
+        return "60d"
+    if timeframe == "1d":
+        if count <= 5:
+            return "5d"
+        if count <= 22:
+            return "1mo"
+        if count <= 66:
+            return "3mo"
+        if count <= 132:
+            return "6mo"
+        if count <= 260:
+            return "1y"
+        return "2y"
+    if timeframe == "1w":
+        return "10y"
+    if timeframe == "1mo":
+        return "10y"
+    return "6mo"
+
+
+def yahoo_chart_url(symbol: str, timeframe: str, count: int) -> str:
+    yahoo_symbol = urllib.parse.quote(jp_yahoo_symbol(symbol), safe="")
+    query = urllib.parse.urlencode(
+        {
+            "range": yahoo_range_for_timeframe(timeframe, count),
+            "interval": yahoo_interval_for_timeframe(timeframe),
+            "includePrePost": "false",
+            "events": "div,splits",
+        }
+    )
+    return f"{JP_YAHOO_CHART_URL}/{yahoo_symbol}?{query}"
+
+
+def yahoo_chart_result(symbol: str, timeframe: str, count: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    if not JP_YAHOO_FALLBACK_ENABLED or not is_jp_symbol(symbol):
+        raise RuntimeError("JP Yahoo fallback disabled")
+
+    request = urllib.request.Request(
+        yahoo_chart_url(symbol, timeframe, count),
+        headers={"User-Agent": JP_YAHOO_USER_AGENT},
+    )
+    with urllib.request.urlopen(request, timeout=JP_YAHOO_TIMEOUT_SECONDS) as response:
+        payload = json.load(response)
+
+    chart = payload.get("chart") if isinstance(payload, dict) else None
+    if not isinstance(chart, dict) or chart.get("error"):
+        raise RuntimeError(str(chart.get("error") if isinstance(chart, dict) else "Yahoo chart failed"))
+    results = chart.get("result")
+    if not isinstance(results, list) or not results:
+        raise RuntimeError("Yahoo chart returned empty result")
+
+    result = results[0]
+    meta = result.get("meta") if isinstance(result, dict) else {}
+    timestamps = result.get("timestamp") if isinstance(result, dict) else []
+    indicators = result.get("indicators") if isinstance(result, dict) else {}
+    quotes = indicators.get("quote") if isinstance(indicators, dict) else []
+    quote = quotes[0] if isinstance(quotes, list) and quotes else {}
+    if not isinstance(meta, dict) or not isinstance(timestamps, list) or not isinstance(quote, dict):
+        raise RuntimeError("Yahoo chart returned invalid shape")
+
+    timezone = pytz.timezone(MARKET_TIMEZONES["JP"])
+    candles: List[Dict[str, Any]] = []
+    opens = quote.get("open") if isinstance(quote.get("open"), list) else []
+    highs = quote.get("high") if isinstance(quote.get("high"), list) else []
+    lows = quote.get("low") if isinstance(quote.get("low"), list) else []
+    closes = quote.get("close") if isinstance(quote.get("close"), list) else []
+    volumes = quote.get("volume") if isinstance(quote.get("volume"), list) else []
+
+    for index, timestamp in enumerate(timestamps):
+        close = as_optional_float(closes[index] if index < len(closes) else None)
+        if close is None:
+            continue
+        open_price = as_optional_float(opens[index] if index < len(opens) else None) or close
+        high_price = as_optional_float(highs[index] if index < len(highs) else None) or max(open_price, close)
+        low_price = as_optional_float(lows[index] if index < len(lows) else None) or min(open_price, close)
+        volume = int(as_float(volumes[index] if index < len(volumes) else 0))
+        timestamp_int = int(as_float(timestamp))
+        time_value = datetime.fromtimestamp(timestamp_int, timezone)
+        candles.append(
+            {
+                "time": timestamp_int,
+                "timeStr": time_value.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close,
+                "volume": volume,
+            }
+        )
+
+    if not candles:
+        raise RuntimeError("Yahoo chart returned empty candles")
+    return meta, candles[-count:]
+
+
 class MoomooQuoteService:
     def __init__(self) -> None:
         self._context: Optional[OpenQuoteContext] = None
@@ -271,6 +427,8 @@ class MoomooQuoteService:
         self._jp_english_names: Optional[Dict[str, str]] = None
         self._us_symbols: Optional[List[Dict[str, str]]] = None
         self._quote_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._snapshot_request_times: List[float] = []
+        self._kline_request_times: List[float] = []
 
     def _get_context(self) -> OpenQuoteContext:
         if self._context is None:
@@ -313,6 +471,41 @@ class MoomooQuoteService:
         if ret != RET_OK:
             raise RuntimeError(str(message))
         self._subscriptions.add(subscription)
+
+    def _wait_for_rate_slot(
+        self,
+        request_times: List[float],
+        max_calls: int,
+        window_seconds: float,
+    ) -> None:
+        if max_calls <= 0 or window_seconds <= 0:
+            return
+
+        while True:
+            now = time.monotonic()
+            while request_times and now - request_times[0] >= window_seconds:
+                request_times.pop(0)
+
+            if len(request_times) < max_calls:
+                request_times.append(now)
+                return
+
+            wait_seconds = window_seconds - (now - request_times[0]) + RATE_LIMIT_EXTRA_WAIT_SECONDS
+            time.sleep(max(0.1, wait_seconds))
+
+    def _wait_for_snapshot_slot(self) -> None:
+        self._wait_for_rate_slot(
+            self._snapshot_request_times,
+            SNAPSHOT_RATE_LIMIT_CALLS,
+            SNAPSHOT_RATE_LIMIT_WINDOW_SECONDS,
+        )
+
+    def _wait_for_kline_slot(self) -> None:
+        self._wait_for_rate_slot(
+            self._kline_request_times,
+            KLINE_RATE_LIMIT_CALLS,
+            KLINE_RATE_LIMIT_WINDOW_SECONDS,
+        )
 
     def _quote_from_row(self, row: Any) -> Dict[str, Any]:
         symbol = str(row.get("code", ""))
@@ -414,6 +607,64 @@ class MoomooQuoteService:
             ),
         }
 
+    def _quote_from_yahoo(self, symbol: str) -> Dict[str, Any]:
+        meta, candles = yahoo_chart_result(symbol, "1m", 500)
+        latest = candles[-1]
+        price = first_optional_float(meta, ["regularMarketPrice"]) or as_float(latest.get("close"))
+        previous_close = first_optional_float(
+            meta,
+            ["previousClose", "chartPreviousClose", "regularMarketPreviousClose"],
+        )
+        change_pct = (
+            ((price - previous_close) / previous_close) * 100
+            if previous_close and previous_close > 0
+            else 0.0
+        )
+        timestamp = int(
+            as_float(
+                meta.get("regularMarketTime"),
+                as_float(latest.get("time")),
+            )
+        )
+        timezone = pytz.timezone(MARKET_TIMEZONES["JP"])
+        time_value = datetime.fromtimestamp(timestamp, timezone)
+        open_price = (
+            first_optional_float(meta, ["regularMarketOpen", "regularMarketDayOpen"])
+            or as_float(candles[0].get("open"))
+        )
+        return {
+            "success": True,
+            "symbol": symbol,
+            "name": str(meta.get("longName") or meta.get("shortName") or symbol),
+            "price": price,
+            "open": open_price,
+            "high": first_optional_float(meta, ["regularMarketDayHigh"]) or as_float(latest.get("high")),
+            "low": first_optional_float(meta, ["regularMarketDayLow"]) or as_float(latest.get("low")),
+            "previousClose": previous_close or 0.0,
+            "volume": int(first_optional_float(meta, ["regularMarketVolume"]) or as_float(latest.get("volume"))),
+            "changePct": change_pct,
+            "marketCap": first_optional_float(meta, ["marketCap"]) or 0.0,
+            "dataDate": time_value.strftime("%Y-%m-%d"),
+            "dataTime": time_value.strftime("%H:%M:%S"),
+            "source": "yahoo-chart",
+        }
+
+    def _quote_failure_result(self, symbol: str, error_message: str) -> Dict[str, Any]:
+        if is_jp_symbol(symbol):
+            try:
+                result = self._quote_from_yahoo(symbol)
+                self._quote_cache[symbol] = (time.monotonic(), result)
+                return result
+            except Exception as fallback_error:
+                error_message = f"{error_message}; Yahoo JP fallback failed: {str(fallback_error)}"
+        failure = {
+            "success": False,
+            "symbol": symbol,
+            "error": error_message,
+        }
+        self._quote_cache[symbol] = (time.monotonic(), failure)
+        return failure
+
     def _quote_locked(self, symbol: str) -> Dict[str, Any]:
         cached = self._quote_cache.get(symbol)
         if cached and time.monotonic() - cached[0] < QUOTE_CACHE_TTL_SECONDS:
@@ -422,17 +673,27 @@ class MoomooQuoteService:
                 return result
             raise RuntimeError(str(result.get("error", "価格を取得できません。")))
 
+        yahoo_priority_error: Optional[Exception] = None
+        if is_jp_symbol(symbol):
+            try:
+                result = self._quote_from_yahoo(symbol)
+                self._quote_cache[symbol] = (time.monotonic(), result)
+                return result
+            except Exception as error:
+                yahoo_priority_error = error
+
+        self._wait_for_snapshot_slot()
         ret, data = self._get_context().get_market_snapshot([symbol])
         if ret != RET_OK:
-            self._quote_cache[symbol] = (
-                time.monotonic(),
-                {
-                    "success": False,
-                    "symbol": symbol,
-                    "error": str(data),
-                },
+            error_message = (
+                f"Yahoo JP priority failed: {str(yahoo_priority_error)}; OpenD snapshot failed: {str(data)}"
+                if yahoo_priority_error
+                else str(data)
             )
-            raise RuntimeError(str(data))
+            result = self._quote_failure_result(symbol, error_message)
+            if result.get("success"):
+                return result
+            raise RuntimeError(str(result.get("error", data)))
         result = self._quote_from_row(data.iloc[0])
         self._quote_cache[symbol] = (time.monotonic(), result)
         return result
@@ -457,6 +718,18 @@ class MoomooQuoteService:
         if not unresolved:
             return
 
+        jp_unresolved = [symbol for symbol in unresolved if is_jp_symbol(symbol)]
+        unresolved = [symbol for symbol in unresolved if not is_jp_symbol(symbol)]
+        for symbol in jp_unresolved:
+            try:
+                results[symbol] = self._quote_locked(symbol)
+            except Exception as error:
+                results[symbol] = self._quote_failure_result(symbol, str(error))
+
+        if not unresolved:
+            return
+
+        self._wait_for_snapshot_slot()
         ret, data = self._get_context().get_market_snapshot(unresolved)
         if ret == RET_OK:
             resolved = set()
@@ -471,13 +744,7 @@ class MoomooQuoteService:
                 try:
                     results[symbol] = self._quote_locked(symbol)
                 except Exception as error:
-                    failure = {
-                        "success": False,
-                        "symbol": symbol,
-                        "error": str(error),
-                    }
-                    self._quote_cache[symbol] = (time.monotonic(), failure)
-                    results[symbol] = failure
+                    results[symbol] = self._quote_failure_result(symbol, str(error))
             return
 
         error_message = str(data)
@@ -488,13 +755,7 @@ class MoomooQuoteService:
             return
 
         for symbol in unresolved:
-            failure = {
-                "success": False,
-                "symbol": symbol,
-                "error": error_message,
-            }
-            self._quote_cache[symbol] = (time.monotonic(), failure)
-            results[symbol] = failure
+            results[symbol] = self._quote_failure_result(symbol, error_message)
 
     def _load_jp_symbols(self) -> List[Dict[str, str]]:
         if self._jp_symbols is None:
@@ -761,14 +1022,33 @@ class MoomooQuoteService:
 
         subtype, kline_type = KLINE_TYPES[timeframe]
         count = max(1, min(int(requested_count), 1000))
+        yahoo_priority_error: Optional[Exception] = None
+
+        if is_jp_symbol(symbol):
+            try:
+                _, candles = yahoo_chart_result(symbol, timeframe, count)
+                if candles:
+                    return {
+                        "success": True,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "requestedTimeframe": timeframe,
+                        "effectiveTimeframe": yahoo_interval_for_timeframe(timeframe),
+                        "source": "yahoo-chart",
+                        "candles": candles,
+                    }
+                raise RuntimeError("Yahoo chart returned empty candles")
+            except Exception as error:
+                yahoo_priority_error = error
 
         with self._lock:
-            history_error: Optional[Exception] = None
+            history_error: Optional[Exception] = yahoo_priority_error
             try:
                 start, end = history_date_range(symbol, timeframe, count)
                 candles = []
                 page_req_key = None
                 for _ in range(24):
+                    self._wait_for_kline_slot()
                     ret, data, page_req_key = self._get_context().request_history_kline(
                         symbol,
                         start=start,
@@ -794,7 +1074,9 @@ class MoomooQuoteService:
                     }
                 raise RuntimeError("history kline returned empty data")
             except Exception as error:
-                history_error = error
+                history_error = RuntimeError(
+                    f"Yahoo JP priority failed: {str(history_error)}; OpenD history failed: {str(error)}"
+                ) if history_error else error
 
             if timeframe == "1d" and count <= 2:
                 try:
@@ -813,6 +1095,7 @@ class MoomooQuoteService:
 
             try:
                 self._subscribe(symbol, subtype)
+                self._wait_for_kline_slot()
                 ret, data = self._get_context().get_cur_kline(
                     symbol,
                     count,

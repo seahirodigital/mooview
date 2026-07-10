@@ -10,7 +10,7 @@ Type=simple
 User=mooview
 Group=mooview
 WorkingDirectory=/opt/mooview/opend/current
-ExecStart=/opt/mooview/opend/current/OpenD -cfg_file=/etc/mooview/OpenD.xml -console=1 -api_ip=127.0.0.1 -api_port=11111 -lang=en -log_level=info -auto_hold_quote_right=0
+ExecStart=/opt/mooview/opend/current/OpenD -cfg_file=/etc/mooview/OpenD.xml -console=1 -api_ip=127.0.0.1 -api_port=11111 -lang=en -log_level=info -auto_hold_quote_right=1
 StandardInput=null
 Restart=always
 RestartSec=10

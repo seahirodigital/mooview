@@ -38,9 +38,10 @@ Windows / Mac のブラウザ
 - `C:\Users\mahha\OneDrive\開発\mooview\scripts\start-mooview.ps1` は変更しません。
 - `C:\Users\mahha\OneDrive\開発\mooview\server.ts` と `C:\Users\mahha\OneDrive\開発\mooview\moomoo_gateway.py` は共通ソースとしてそのまま利用します。
 - OCI専用設定は、ローカルでは `C:\Users\mahha\OneDrive\開発\mooview\oci-server`、OCIでは `/etc/mooview` と `/opt/mooview` に分離します。
-- OCI側OpenDは `auto_hold_quote_right=0` で起動し、ローカルの最高相場権限を自動で奪い返しません。
+- OCI側OpenDは `auto_hold_quote_right=1` で起動し、クラウド側のデータ取得を優先します。日本株セクターやTPX系ウォッチリストをOCIで安定表示するためです。
+- 日本株のquote権限がOpenD側で取得できない場合でもチャート描画を維持するため、`/opt/mooview/app/moomoo_gateway.py` はJP銘柄だけYahoo Finance chart APIへフォールバックします。このため `/etc/systemd/system/moomoo-gateway.service` は外部HTTPSへ到達できる必要があります。待受は引き続き `127.0.0.1:8787` に限定します。
 
-同じmoomooアカウントでは複数OpenDを起動できますが、最高相場権限は同時に1台だけです。ローカルとOCIの両方が停止するわけではありませんが、一方がBMP相当の権限へ下がる場合があります。
+同じmoomooアカウントでは複数OpenDを起動できますが、最高相場権限は同時に1台だけです。OCI側を優先するため、ローカル側がBMP相当の権限へ下がる場合があります。
 
 ## OCIコンソールで作成するインスタンス
 
@@ -142,7 +143,7 @@ OpenDの公式設定ファイルは `/etc/mooview/OpenD.xml` です。次の項�
 | `api_port` | `11111` |
 | `lang` | `en` |
 | `log_level` | `info` |
-| `auto_hold_quote_right` | `0` |
+| `auto_hold_quote_right` | `1` |
 | `telnet_port` | 空欄 |
 | `websocket_port` | 空欄 |
 
@@ -164,7 +165,7 @@ OpenDの公式設定ファイルは `/etc/mooview/OpenD.xml` です。次の項�
 初回は端末上でOpenDを対話起動し、APIアンケート、規約同意、端末認証を完了します。
 
 ```bash
-/usr/bin/sudo -u mooview /opt/mooview/opend/current/OpenD -cfg_file=/etc/mooview/OpenD.xml -console=1 -api_ip=127.0.0.1 -api_port=11111 -lang=en -log_level=info -auto_hold_quote_right=0
+/usr/bin/sudo -u mooview /opt/mooview/opend/current/OpenD -cfg_file=/etc/mooview/OpenD.xml -console=1 -api_ip=127.0.0.1 -api_port=11111 -lang=en -log_level=info -auto_hold_quote_right=1
 ```
 
 電話認証が要求された場合、OpenDコンソールで `req_phone_verify_code` を実行し、受信したコードを `input_phone_verify_code -code=受信コード` で入力します。認証完了と `11111` の起動を確認したら、`exit` で終了します。

@@ -53,6 +53,7 @@ interface InteractiveCustomChartProps {
   focusDateActive?: boolean;
   allowNegativeValues?: boolean;
   valuePrecision?: number;
+  exportPlaybackProgress?: number | null;
 }
 
 const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
@@ -274,6 +275,7 @@ export function InteractiveCustomChart({
   focusDateActive = false,
   allowNegativeValues = false,
   valuePrecision = 2,
+  exportPlaybackProgress = null,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -457,6 +459,20 @@ export function InteractiveCustomChart({
   const visibleCandles = useMemo(() => {
     return candles.slice(startIndex, endIndex + 1);
   }, [candles, startIndex, endIndex]);
+  const exportPlaybackActive = typeof exportPlaybackProgress === 'number';
+  const exportVisibleCount = exportPlaybackActive && visibleCandles.length > 0
+    ? Math.max(
+      1,
+      Math.min(
+        visibleCandles.length,
+        Math.floor(Math.max(0, Math.min(1, exportPlaybackProgress)) * (visibleCandles.length - 1)) + 1,
+      ),
+    )
+    : visibleCandles.length;
+  const playbackVisibleCandles = useMemo(
+    () => visibleCandles.slice(0, exportVisibleCount),
+    [exportVisibleCount, visibleCandles],
+  );
   const focusSliceIndex = focusCandleIndex !== null && focusCandleIndex >= startIndex && focusCandleIndex <= endIndex
     ? focusCandleIndex - startIndex
     : null;
@@ -749,13 +765,26 @@ export function InteractiveCustomChart({
     startIndex,
     changePctOverrides,
   ]);
+  const playbackComparisonSeriesData = useMemo<Record<string, ComparisonSeriesPoint[]>>(
+    () => Object.fromEntries(
+      comparisonSymbols.map((compSym) => [
+        compSym,
+        (comparisonSeriesData[compSym] || []).filter(
+          (point) => point.sliceIndex < exportVisibleCount,
+        ),
+      ]),
+    ),
+    [comparisonSeriesData, comparisonSymbols, exportVisibleCount],
+  );
 
   const rightAxisLabels = useMemo(() => {
-    if (comparisonSymbols.length === 0 || visibleCandles.length === 0) return [];
+    if (comparisonSymbols.length === 0 || playbackVisibleCandles.length === 0) return [];
 
     const firstMainCandle = visibleCandles[0];
-    const lastMainCandle = visibleCandles[visibleCandles.length - 1];
-    const primaryChangePctOverride = getChangePctOverride(symbol);
+    const lastMainCandle = playbackVisibleCandles[playbackVisibleCandles.length - 1];
+    const primaryChangePctOverride = !exportPlaybackActive || exportVisibleCount >= visibleCandles.length
+      ? getChangePctOverride(symbol)
+      : null;
     const rawLabels = [
       ...(renderPrimarySeries ? [{
         key: symbol,
@@ -766,7 +795,7 @@ export function InteractiveCustomChart({
         changePct: primaryChangePctOverride ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
       }] : []),
       ...comparisonSymbols.flatMap((compSym, index) => {
-        const points = comparisonSeriesData[compSym] || [];
+        const points = playbackComparisonSeriesData[compSym] || [];
         const lastPoint = points[points.length - 1];
         if (!lastPoint) return [];
         return [{
@@ -911,7 +940,8 @@ export function InteractiveCustomChart({
       .sort((first, second) => first.adjustedY - second.adjustedY);
   }, [
     comparisonSymbols,
-    comparisonSeriesData,
+    playbackComparisonSeriesData,
+    playbackVisibleCandles,
     visibleCandles,
     symbol,
     mainHeight,
@@ -922,6 +952,8 @@ export function InteractiveCustomChart({
     renderPrimarySeries,
     comparisonLabelLayoutMode,
     comparisonLabelRankSpacingScale,
+    exportPlaybackActive,
+    exportVisibleCount,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {
@@ -1159,12 +1191,16 @@ export function InteractiveCustomChart({
     return () => chartElement.removeEventListener('wheel', handleNativeWheel);
   }, [candles.length, plotWidth, priceAxisFocused, priceScale, zoomFactor]);
 
-  const currentCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
+  const currentCandle = hoverData
+    ? candles[hoverData.candleIdx]
+    : exportPlaybackActive
+      ? playbackVisibleCandles[playbackVisibleCandles.length - 1]
+      : candles[candles.length - 1];
 
   // Map polylines paths
   const getPolylinePoints = (valueArray: (number | null)[]) => {
     const pts: string[] = [];
-    visibleCandles.forEach((_, i) => {
+    playbackVisibleCandles.forEach((_, i) => {
       const globalIdx = startIndex + i;
       const v = valueArray[globalIdx];
       if (v !== null && v !== undefined) {
@@ -1176,7 +1212,7 @@ export function InteractiveCustomChart({
 
   // Map comparison lines paths
   const getComparisonPolylinePoints = (sym: string) => {
-    return (comparisonSeriesData[sym] || [])
+    return (playbackComparisonSeriesData[sym] || [])
       .map((point) => `${point.x},${point.y}`)
       .join(' ');
   };
@@ -1474,8 +1510,9 @@ export function InteractiveCustomChart({
             {emptyMessage}
           </div>
         ) : (
-          <svg 
+          <svg
             ref={svgRef}
+            data-chart-export-svg="true"
             width={width}
             height={height}
             onMouseDown={handleMouseDown}
@@ -1619,7 +1656,7 @@ export function InteractiveCustomChart({
                   })()}
 
                   {bollResults.map(({ level, result }, index) => {
-                    const lastIndex = startIndex + visibleCandles.length - 1;
+                    const lastIndex = startIndex + playbackVisibleCandles.length - 1;
                     const upperValue = result.upper[lastIndex];
                     const lowerValue = result.lower[lastIndex];
                     const opacity = Math.max(0.45, 0.9 - index * 0.16);
@@ -1719,7 +1756,7 @@ export function InteractiveCustomChart({
               })}
 
               {/* Render Candlesticks */}
-              {renderPrimarySeries && visibleCandles.map((c, i) => {
+              {renderPrimarySeries && playbackVisibleCandles.map((c, i) => {
                 const xVal = getX(i);
                 const w = Math.max(1.5, zoomFactor * 0.75);
                 const candleX = xVal - w / 2;
@@ -1783,7 +1820,7 @@ export function InteractiveCustomChart({
               {/* Subtle Volume Overlay at bottom */}
               {renderPrimarySeries && showVolume && (
                 <g opacity="0.35">
-                  {visibleCandles.map((c, i) => {
+                  {playbackVisibleCandles.map((c, i) => {
                     const xVal = getX(i);
                     const w = Math.max(1.0, zoomFactor * 0.75 - 1);
                     const barX = xVal - w / 2;
@@ -1951,7 +1988,7 @@ export function InteractiveCustomChart({
                 {rsiPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
+                      playbackVisibleCandles.map((_, i) => {
                         const idx = startIndex + i;
                         const rsiV = rsi[idx];
                         const rsiY = rsiV !== null ? rsiHeight - (rsiV / 100) * rsiHeight : rsiHeight / 2;
@@ -2004,7 +2041,7 @@ export function InteractiveCustomChart({
                 )}
 
                 {/* Histogram Bars */}
-                {macdPlotActive && visibleCandles.map((_, i) => {
+                {macdPlotActive && playbackVisibleCandles.map((_, i) => {
                   const idx = startIndex + i;
                   const val = macd.hist[idx];
                   if (val === null || val === undefined) return null;
@@ -2034,7 +2071,7 @@ export function InteractiveCustomChart({
                 {macdPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
+                      playbackVisibleCandles.map((_, i) => {
                         const idx = startIndex + i;
                         const val = macd.macd[idx];
                         const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
@@ -2053,7 +2090,7 @@ export function InteractiveCustomChart({
                 {macdPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
+                      playbackVisibleCandles.map((_, i) => {
                         const idx = startIndex + i;
                         const val = macd.signal[idx];
                         const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);

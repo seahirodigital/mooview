@@ -21,7 +21,11 @@ import {
   RotateCcw,
   Upload,
   Download,
-  ArrowUpDown
+  ArrowUpDown,
+  Camera,
+  Video,
+  Check,
+  LoaderCircle
 } from 'lucide-react';
 
 import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle, ComparisonLabelLayoutMode } from './types';
@@ -43,6 +47,19 @@ import {
   BasketQuoteInput,
 } from './symbolExpression';
 import { getSeriesColor } from './chartSeriesColors';
+import {
+  CHART_EXPORT_RESOLUTIONS,
+  ChartExportSelection,
+  ChartImageExportSettings,
+  ChartVideoExportSettings,
+  DEFAULT_CHART_IMAGE_EXPORT_SETTINGS,
+  DEFAULT_CHART_VIDEO_EXPORT_SETTINGS,
+  exportChartImage,
+  exportChartVideo,
+  normalizeChartImageExportSettings,
+  normalizeChartVideoExportSettings,
+  resolveChartExportPanelIds,
+} from './chartExport';
 import type {
   SharedWorkspaceEnvelope,
   SharedWorkspaceProfile,
@@ -103,6 +120,8 @@ const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v
 const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
 const COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY = 'mooview_comparison_label_layout_mode_v1';
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
+const CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_video_export_settings_v1';
+const CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_image_export_settings_v1';
 const SHARED_WORKSPACE_SETTINGS_ENDPOINT = '/api/workspace-settings';
 const DEFAULT_OCI_SHARED_WORKSPACE_URL = 'https://mooview-oci.taild87712.ts.net';
 const SHARED_WORKSPACE_SAVE_DELAY_MS = 800;
@@ -119,6 +138,8 @@ const SHARED_BROWSER_SETTING_KEYS = [
   'mooview_comparison_label_font_size_v1',
   'mooview_comparison_label_layout_mode_v1',
   'mooview_watchlist_quote_fetch_modes_v1',
+  'mooview_chart_video_export_settings_v1',
+  'mooview_chart_image_export_settings_v1',
   'moomoo_active',
   'tv_dashboard_tickers',
   'tv_dashboard_watchlist_tabs',
@@ -317,6 +338,20 @@ function readStoredValue<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function toggleChartExportPanel(
+  selection: ChartExportSelection,
+  panelId: string,
+): ChartExportSelection {
+  const panelIds = selection.panelIds.includes(panelId)
+    ? selection.panelIds.filter((currentPanelId) => currentPanelId !== panelId)
+    : [...selection.panelIds, panelId];
+  return {
+    ...selection,
+    mode: 'custom',
+    panelIds,
+  };
 }
 
 function normalizeWatchlistQuoteFetchModes(raw: unknown): Record<string, WatchlistQuoteFetchMode> {
@@ -2221,6 +2256,27 @@ export default function App() {
     readStoredValue('mooview_active_view', 'charts')
   );
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [videoExportMenu, setVideoExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const [imageExportMenu, setImageExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const [chartVideoExportSettings, setChartVideoExportSettings] = useState<ChartVideoExportSettings>(
+    () => normalizeChartVideoExportSettings(
+      readStoredValue(CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_VIDEO_EXPORT_SETTINGS),
+    ),
+  );
+  const [chartImageExportSettings, setChartImageExportSettings] = useState<ChartImageExportSettings>(
+    () => normalizeChartImageExportSettings(
+      readStoredValue(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_IMAGE_EXPORT_SETTINGS),
+    ),
+  );
+  const [chartExportStatus, setChartExportStatus] = useState<{
+    kind: 'video' | 'image';
+    progress: number;
+  } | null>(null);
+  const [chartExportError, setChartExportError] = useState<string | null>(null);
+  const [chartExportPlayback, setChartExportPlayback] = useState<{
+    panelIds: string[];
+    progress: number;
+  } | null>(null);
   const [workspacePersistenceMode, setWorkspacePersistenceMode] =
     useState<WorkspacePersistenceMode>('checking');
   const sharedWorkspaceProfile = useMemo(detectSharedWorkspaceProfile, []);
@@ -2848,6 +2904,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!videoExportMenu && !imageExportMenu) return;
+    const closeExportMenus = () => {
+      setVideoExportMenu(null);
+      setImageExportMenu(null);
+    };
+    window.addEventListener('click', closeExportMenus);
+    return () => window.removeEventListener('click', closeExportMenus);
+  }, [imageExportMenu, videoExportMenu]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const hydrateSharedWorkspace = async () => {
@@ -3161,6 +3227,14 @@ export default function App() {
   useEffect(() => {
     writeStoredJson(COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY, comparisonLabelLayoutMode);
   }, [comparisonLabelLayoutMode]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY, chartVideoExportSettings);
+  }, [chartVideoExportSettings]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, chartImageExportSettings);
+  }, [chartImageExportSettings]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -6744,6 +6818,77 @@ export default function App() {
       || null;
   };
 
+  const getSelectedChartExportPanelIds = (selection: ChartExportSelection): string[] => {
+    return resolveChartExportPanelIds(
+      selection,
+      panels.map((panel) => panel.id),
+    );
+  };
+
+  const handleChartVideoExport = async () => {
+    if (chartExportStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartExportError(null);
+    const resolution = CHART_EXPORT_RESOLUTIONS.find(
+      (candidate) => candidate.id === chartVideoExportSettings.resolutionId,
+    ) ?? CHART_EXPORT_RESOLUTIONS[0];
+    setChartExportStatus({ kind: 'video', progress: 0 });
+
+    try {
+      const panelIds = getSelectedChartExportPanelIds(chartVideoExportSettings.selection);
+      if (panelIds.length === 0) {
+        throw new Error('ダウンロードするチャートを1つ以上選択してください。');
+      }
+      await exportChartVideo({
+        width: resolution.width,
+        height: resolution.height,
+        panelIds,
+        durationSeconds: chartVideoExportSettings.durationSeconds,
+        frameRate: 30,
+        beforeFrame: async (progress) => {
+          setChartExportPlayback({ panelIds, progress });
+          await new Promise<void>((resolve) => {
+            window.requestAnimationFrame(() => resolve());
+          });
+        },
+        onProgress: (progress) => {
+          setChartExportStatus({ kind: 'video', progress });
+        },
+      });
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'MP4動画の作成に失敗しました。',
+      );
+    } finally {
+      setChartExportPlayback(null);
+      setChartExportStatus(null);
+    }
+  };
+
+  const handleChartImageExport = async () => {
+    if (chartExportStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartExportError(null);
+    setChartExportStatus({ kind: 'image', progress: 0.25 });
+
+    try {
+      const panelIds = getSelectedChartExportPanelIds(chartImageExportSettings.selection);
+      if (panelIds.length === 0) {
+        throw new Error('ダウンロードするチャートを1つ以上選択してください。');
+      }
+      await exportChartImage(panelIds);
+      setChartExportStatus({ kind: 'image', progress: 1 });
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'PNG画像の作成に失敗しました。',
+      );
+    } finally {
+      setChartExportStatus(null);
+    }
+  };
+
   const renderValueChainTickerChart = ({
     symbol,
     comparisonSymbols = [],
@@ -7677,7 +7822,10 @@ export default function App() {
                             </div>
 
                             {/* Rendering workspace */}
-                            <div className="flex-1 flex flex-col min-h-0 bg-[#090909]">
+                            <div
+                              className="flex-1 flex flex-col min-h-0 bg-[#090909]"
+                              data-chart-export-panel-id={panel.id}
+                            >
                               {isTvEmbed ? (
                                 <TradingViewWidget 
                                   symbol={panelSymbol}
@@ -7742,6 +7890,11 @@ export default function App() {
                                   onTogglePrimaryCandles={!panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showPrimaryCandles: panelShowPrimaryCandles ? false : undefined }) : undefined}
                                   allowNegativeValues={Boolean(panelExpression)}
                                   valuePrecision={panelExpression ? 4 : 2}
+                                  exportPlaybackProgress={
+                                    chartExportPlayback?.panelIds.includes(panel.id)
+                                      ? chartExportPlayback.progress
+                                      : null
+                                  }
                                 />
                               )}
                             </div>
@@ -9185,10 +9338,341 @@ export default function App() {
             >
               <Settings className="w-5 h-5" />
             </button>
+            <button
+              type="button"
+              onClick={() => void handleChartVideoExport()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setImageExportMenu(null);
+                setVideoExportMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={Boolean(chartExportStatus)}
+              className="relative w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-cyan-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
+              title="チャート動画をMP4でダウンロード（右クリックで時間・解像度・対象を設定）"
+              aria-label="チャート動画をダウンロード"
+            >
+              {chartExportStatus?.kind === 'video' ? (
+                <LoaderCircle className="w-5 h-5 animate-spin text-cyan-300" />
+              ) : (
+                <Video className="w-5 h-5" />
+              )}
+              {chartExportStatus?.kind === 'video' && (
+                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-cyan-200">
+                  {Math.round(chartExportStatus.progress * 100)}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleChartImageExport()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setVideoExportMenu(null);
+                setImageExportMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={Boolean(chartExportStatus)}
+              className="w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-emerald-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
+              title="チャート画像をPNGでダウンロード（右クリックで対象を設定）"
+              aria-label="チャート画像をダウンロード"
+            >
+              {chartExportStatus?.kind === 'image' ? (
+                <LoaderCircle className="w-5 h-5 animate-spin text-emerald-300" />
+              ) : (
+                <Camera className="w-5 h-5" />
+              )}
+            </button>
+
+            {videoExportMenu && (
+              <div
+                className="fixed z-[110] w-72 max-h-[calc(100vh-16px)] overflow-y-auto border border-[#3a3a3a] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(videoExportMenu.x - 288, window.innerWidth - 296)),
+                  top: Math.max(8, Math.min(videoExportMenu.y, window.innerHeight - 608)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#242424] px-3 py-2">
+                  <div className="font-bold text-cyan-200">チャート動画の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">左クリック時もこの設定を使用します</div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="font-bold text-gray-300">時間</span>
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        step={1}
+                        value={chartVideoExportSettings.durationSeconds}
+                        onChange={(event) => {
+                          const durationSeconds = Math.max(
+                            1,
+                            Math.min(30, Number(event.target.value) || 5),
+                          );
+                          setChartVideoExportSettings((current) => ({
+                            ...current,
+                            durationSeconds,
+                          }));
+                        }}
+                        className="h-6 w-14 border border-[#343434] bg-[#111111] px-1.5 text-right font-mono text-white outline-none focus:border-cyan-600"
+                        aria-label="動画時間"
+                      />
+                      <span className="text-gray-500">秒</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1">
+                    {[3, 5, 8, 10, 15].map((seconds) => (
+                      <button
+                        key={seconds}
+                        type="button"
+                        onClick={() => setChartVideoExportSettings((current) => ({
+                          ...current,
+                          durationSeconds: seconds,
+                        }))}
+                        className={`h-6 border font-mono transition ${
+                          chartVideoExportSettings.durationSeconds === seconds
+                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                            : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                        }`}
+                      >
+                        {seconds}秒
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">解像度</div>
+                  <div className="space-y-1">
+                    {CHART_EXPORT_RESOLUTIONS.map((resolution) => {
+                      const selected = chartVideoExportSettings.resolutionId === resolution.id;
+                      return (
+                        <button
+                          key={resolution.id}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            resolutionId: resolution.id,
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border px-2 text-left transition ${
+                            selected
+                              ? 'border-cyan-700 bg-cyan-950/50 text-cyan-100'
+                              : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 items-center justify-center border ${
+                            selected ? 'border-cyan-400 text-cyan-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          {resolution.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                  <div className="grid grid-cols-5 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        selection: { ...current.selection, mode: 'all' },
+                      }))}
+                      className={`h-7 border ${
+                        chartVideoExportSettings.selection.mode === 'all'
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      全て
+                    </button>
+                    {[1, 2, 3, 4].map((count) => (
+                      <button
+                        key={count}
+                        type="button"
+                        onClick={() => setChartVideoExportSettings((current) => ({
+                          ...current,
+                          selection: { ...current.selection, mode: 'first', firstCount: count },
+                        }))}
+                        className={`h-7 border ${
+                          chartVideoExportSettings.selection.mode === 'first'
+                          && chartVideoExportSettings.selection.firstCount === count
+                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                            : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                        }`}
+                        title={`左上から${count}個`}
+                      >
+                        左上{count}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 max-h-36 overflow-y-auto border border-[#242424]">
+                    {panels.map((panel, index) => {
+                      const selected = chartVideoExportSettings.selection.mode === 'custom'
+                        && chartVideoExportSettings.selection.panelIds.includes(panel.id);
+                      return (
+                        <button
+                          key={panel.id}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            selection: toggleChartExportPanel(current.selection, panel.id),
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
+                            selected ? 'bg-cyan-950/30 text-cyan-100' : 'text-gray-400'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
+                            selected ? 'border-cyan-400 text-cyan-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          <span className="truncate">
+                            {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleChartVideoExport()}
+                    disabled={
+                      chartVideoExportSettings.selection.mode === 'custom'
+                      && chartVideoExportSettings.selection.panelIds.length === 0
+                    }
+                    className="flex h-8 w-full items-center justify-center gap-2 border border-cyan-700 bg-cyan-950/50 font-bold text-cyan-100 hover:bg-cyan-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Download className="h-4 w-4" />
+                    この設定でMP4を作成
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {imageExportMenu && (
+              <div
+                className="fixed z-[110] w-64 max-h-[calc(100vh-16px)] overflow-y-auto border border-[#3a3a3a] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(imageExportMenu.x - 256, window.innerWidth - 264)),
+                  top: Math.max(8, Math.min(imageExportMenu.y, window.innerHeight - 416)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#242424] px-3 py-2">
+                  <div className="font-bold text-emerald-200">チャート画像の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">左クリック時もこの設定を使用します</div>
+                </div>
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                  <div className="grid grid-cols-5 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setChartImageExportSettings((current) => ({
+                        ...current,
+                        selection: { ...current.selection, mode: 'all' },
+                      }))}
+                      className={`h-7 border ${
+                        chartImageExportSettings.selection.mode === 'all'
+                          ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      全て
+                    </button>
+                    {[1, 2, 3, 4].map((count) => (
+                      <button
+                        key={count}
+                        type="button"
+                        onClick={() => setChartImageExportSettings((current) => ({
+                          ...current,
+                          selection: { ...current.selection, mode: 'first', firstCount: count },
+                        }))}
+                        className={`h-7 border ${
+                          chartImageExportSettings.selection.mode === 'first'
+                          && chartImageExportSettings.selection.firstCount === count
+                            ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
+                            : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                        }`}
+                        title={`左上から${count}個`}
+                      >
+                        左上{count}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 max-h-40 overflow-y-auto border border-[#242424]">
+                    {panels.map((panel, index) => {
+                      const selected = chartImageExportSettings.selection.mode === 'custom'
+                        && chartImageExportSettings.selection.panelIds.includes(panel.id);
+                      return (
+                        <button
+                          key={panel.id}
+                          type="button"
+                          onClick={() => setChartImageExportSettings((current) => ({
+                            ...current,
+                            selection: toggleChartExportPanel(current.selection, panel.id),
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
+                            selected ? 'bg-emerald-950/30 text-emerald-100' : 'text-gray-400'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
+                            selected ? 'border-emerald-400 text-emerald-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          <span className="truncate">
+                            {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleChartImageExport()}
+                    disabled={
+                      chartImageExportSettings.selection.mode === 'custom'
+                      && chartImageExportSettings.selection.panelIds.length === 0
+                    }
+                    className="flex h-8 w-full items-center justify-center gap-2 border border-emerald-700 bg-emerald-950/50 font-bold text-emerald-100 hover:bg-emerald-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Download className="h-4 w-4" />
+                    この設定でPNGを作成
+                  </button>
+                </div>
+              </div>
+            )}
           </nav>
         </div>
 
       </div>
+      )}
+
+      {chartExportError && (
+        <div className="fixed bottom-12 right-14 z-[120] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl">
+          <span className="min-w-0 flex-1 leading-relaxed">{chartExportError}</span>
+          <button
+            type="button"
+            onClick={() => setChartExportError(null)}
+            className="shrink-0 text-red-300 hover:text-white"
+            aria-label="エラーを閉じる"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
 
       {/* Footer information panel */}

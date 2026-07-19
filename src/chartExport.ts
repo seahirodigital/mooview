@@ -68,18 +68,26 @@ export const DEFAULT_CHART_IMAGE_EXPORT_SETTINGS: ChartImageExportSettings = {
   },
 };
 
-interface ChartSvgEntry {
+interface ChartPanelEntry {
   panelId: string;
   svg: SVGSVGElement;
+  svgRect: DOMRect;
+  header: HTMLElement;
+  headerRect: DOMRect;
   rect: DOMRect;
 }
 
 interface CompositeLayout {
-  entries: ChartSvgEntry[];
+  entries: ChartPanelEntry[];
   left: number;
   top: number;
   width: number;
   height: number;
+}
+
+interface PreparedChartComposite {
+  layout: CompositeLayout;
+  headerCanvases: Map<string, HTMLCanvasElement>;
 }
 
 interface RenderCompositeOptions {
@@ -93,6 +101,8 @@ interface ExportChartVideoOptions extends RenderCompositeOptions {
   frameRate?: number;
   beforeFrame: (progress: number) => Promise<void>;
   onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
+  fileNumber?: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -128,7 +138,15 @@ function downloadBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-function collectChartSvgEntries(panelIds: string[]): ChartSvgEntry[] {
+function createUnionRect(first: DOMRect, second: DOMRect): DOMRect {
+  const left = Math.min(first.left, second.left);
+  const top = Math.min(first.top, second.top);
+  const right = Math.max(first.right, second.right);
+  const bottom = Math.max(first.bottom, second.bottom);
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+
+function collectChartPanelEntries(panelIds: string[]): ChartPanelEntry[] {
   const requestedPanelIds = new Set(panelIds);
   const entries = Array.from(
     document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'),
@@ -136,10 +154,26 @@ function collectChartSvgEntries(panelIds: string[]): ChartSvgEntry[] {
     const panelId = panelElement.dataset.chartExportPanelId;
     if (!panelId || !requestedPanelIds.has(panelId)) return [];
     const svg = panelElement.querySelector<SVGSVGElement>('svg[data-chart-export-svg="true"]');
-    if (!svg) return [];
-    const rect = svg.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return [];
-    return [{ panelId, svg, rect }];
+    const header = panelElement.querySelector<HTMLElement>('[data-chart-export-panel-header="true"]');
+    if (!svg || !header) return [];
+    const svgRect = svg.getBoundingClientRect();
+    const headerRect = header.getBoundingClientRect();
+    if (
+      svgRect.width <= 0
+      || svgRect.height <= 0
+      || headerRect.width <= 0
+      || headerRect.height <= 0
+    ) {
+      return [];
+    }
+    return [{
+      panelId,
+      svg,
+      svgRect,
+      header,
+      headerRect,
+      rect: createUnionRect(headerRect, svgRect),
+    }];
   });
 
   const order = new Map(panelIds.map((panelId, index) => [panelId, index]));
@@ -150,7 +184,7 @@ function collectChartSvgEntries(panelIds: string[]): ChartSvgEntry[] {
 }
 
 function createCompositeLayout(panelIds: string[]): CompositeLayout {
-  const entries = collectChartSvgEntries(panelIds);
+  const entries = collectChartPanelEntries(panelIds);
   if (entries.length === 0) {
     throw new Error('選択したカスタムチャートを画面内で取得できませんでした。');
   }
@@ -166,6 +200,26 @@ function createCompositeLayout(panelIds: string[]): CompositeLayout {
     width: Math.max(1, right - left),
     height: Math.max(1, bottom - top),
   };
+}
+
+async function prepareChartComposite(panelIds: string[]): Promise<PreparedChartComposite> {
+  const layout = createCompositeLayout(panelIds);
+  const { toCanvas } = await import('html-to-image');
+  const headerCanvases = new Map<string, HTMLCanvasElement>();
+
+  for (const entry of layout.entries) {
+    const headerCanvas = await toCanvas(entry.header, {
+      backgroundColor: '#111111',
+      cacheBust: false,
+      pixelRatio: 1,
+      skipFonts: true,
+      width: Math.max(1, Math.ceil(entry.headerRect.width)),
+      height: Math.max(1, Math.ceil(entry.headerRect.height)),
+    });
+    headerCanvases.set(entry.panelId, headerCanvas);
+  }
+
+  return { layout, headerCanvases };
 }
 
 function loadSvgImage(svg: SVGSVGElement, width: number, height: number): Promise<HTMLImageElement> {
@@ -200,8 +254,9 @@ function loadSvgImage(svg: SVGSVGElement, width: number, height: number): Promis
 async function renderChartComposite(
   canvas: HTMLCanvasElement,
   options: RenderCompositeOptions,
+  prepared: PreparedChartComposite,
 ): Promise<void> {
-  const layout = createCompositeLayout(options.panelIds);
+  const { layout, headerCanvases } = prepared;
   const targetWidth = ensureEven(options.width);
   const targetHeight = ensureEven(options.height);
   if (canvas.width !== targetWidth) canvas.width = targetWidth;
@@ -221,21 +276,31 @@ async function renderChartComposite(
   const offsetY = (canvas.height - renderedHeight) / 2;
 
   for (const entry of layout.entries) {
-    const sourceWidth = Math.max(1, entry.rect.width);
-    const sourceHeight = Math.max(1, entry.rect.height);
+    const headerCanvas = headerCanvases.get(entry.panelId);
+    if (headerCanvas) {
+      context.drawImage(
+        headerCanvas,
+        offsetX + (entry.headerRect.left - layout.left) * scale,
+        offsetY + (entry.headerRect.top - layout.top) * scale,
+        entry.headerRect.width * scale,
+        entry.headerRect.height * scale,
+      );
+    }
+
+    const sourceWidth = Math.max(1, entry.svgRect.width);
+    const sourceHeight = Math.max(1, entry.svgRect.height);
     const image = await loadSvgImage(entry.svg, sourceWidth, sourceHeight);
     context.drawImage(
       image,
-      offsetX + (entry.rect.left - layout.left) * scale,
-      offsetY + (entry.rect.top - layout.top) * scale,
+      offsetX + (entry.svgRect.left - layout.left) * scale,
+      offsetY + (entry.svgRect.top - layout.top) * scale,
       sourceWidth * scale,
       sourceHeight * scale,
     );
   }
 }
 
-function resolveImageDimensions(panelIds: string[]): { width: number; height: number } {
-  const layout = createCompositeLayout(panelIds);
+function resolveImageDimensions(layout: CompositeLayout): { width: number; height: number } {
   const scale = Math.min(1, 1920 / layout.width, 1080 / layout.height);
   return {
     width: ensureEven(layout.width * scale),
@@ -309,11 +374,12 @@ export async function exportChartImage(
   const canvas = document.createElement('canvas');
   for (let index = 0; index < panelIds.length; index += 1) {
     const panelId = panelIds[index];
-    const dimensions = resolveImageDimensions([panelId]);
+    const prepared = await prepareChartComposite([panelId]);
+    const dimensions = resolveImageDimensions(prepared.layout);
     await renderChartComposite(canvas, {
       ...dimensions,
       panelIds: [panelId],
-    });
+    }, prepared);
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((result) => {
         if (result) {
@@ -332,6 +398,12 @@ export async function exportChartImage(
 export async function exportChartVideo(
   options: ExportChartVideoOptions,
 ): Promise<void> {
+  const throwIfAborted = () => {
+    if (options.signal?.aborted) {
+      throw new DOMException('動画作成を停止しました。', 'AbortError');
+    }
+  };
+  throwIfAborted();
   const frameRate = clamp(Math.round(options.frameRate ?? 30), 1, 60);
   const animationDurationSeconds = clamp(options.durationSeconds, 1, 30);
   const animationFrameCount = Math.max(2, Math.round(animationDurationSeconds * frameRate));
@@ -340,6 +412,8 @@ export async function exportChartVideo(
   const canvas = document.createElement('canvas');
   canvas.width = ensureEven(options.width);
   canvas.height = ensureEven(options.height);
+  const prepared = await prepareChartComposite(options.panelIds);
+  throwIfAborted();
 
   const {
     BufferTarget,
@@ -362,35 +436,52 @@ export async function exportChartVideo(
     hardwareAcceleration: 'no-preference',
   });
   output.addVideoTrack(videoSource);
-  await output.start();
+  let finalized = false;
 
-  for (let frameIndex = 0; frameIndex < totalFrameCount; frameIndex += 1) {
-    if (frameIndex < animationFrameCount) {
-      const progress = animationFrameCount <= 1
-        ? 1
-        : frameIndex / (animationFrameCount - 1);
-      await options.beforeFrame(progress);
-      await renderChartComposite(canvas, options);
+  try {
+    await output.start();
+    throwIfAborted();
+
+    for (let frameIndex = 0; frameIndex < totalFrameCount; frameIndex += 1) {
+      throwIfAborted();
+      if (frameIndex < animationFrameCount) {
+        const progress = animationFrameCount <= 1
+          ? 1
+          : frameIndex / (animationFrameCount - 1);
+        await options.beforeFrame(progress);
+        throwIfAborted();
+        await renderChartComposite(canvas, options, prepared);
+      }
+      throwIfAborted();
+      await videoSource.add(
+        frameIndex / frameRate,
+        1 / frameRate,
+        {
+          keyFrame: frameIndex === 0
+            || frameIndex === animationFrameCount
+            || frameIndex % (frameRate * 2) === 0,
+        },
+      );
+      options.onProgress?.((frameIndex + 1) / totalFrameCount);
     }
-    await videoSource.add(
-      frameIndex / frameRate,
-      1 / frameRate,
-      {
-        keyFrame: frameIndex === 0
-          || frameIndex === animationFrameCount
-          || frameIndex % (frameRate * 2) === 0,
-      },
-    );
-    options.onProgress?.((frameIndex + 1) / totalFrameCount);
+
+    throwIfAborted();
+    videoSource.close();
+    await output.finalize();
+    finalized = true;
+  } catch (error) {
+    if (!finalized) {
+      await output.cancel().catch(() => undefined);
+    }
+    throw error;
   }
 
-  videoSource.close();
-  await output.finalize();
   if (!target.buffer) {
     throw new Error('MP4動画データを取得できませんでした。');
   }
+  const fileNumber = String(options.fileNumber ?? 1).padStart(2, '0');
   downloadBlob(
     new Blob([target.buffer], { type: 'video/mp4' }),
-    `mooview-chart-${createTimestamp()}.mp4`,
+    `mooview-chart-${fileNumber}-${createTimestamp()}.mp4`,
   );
 }

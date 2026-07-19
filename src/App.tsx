@@ -24,6 +24,7 @@ import {
   ArrowUpDown,
   Camera,
   Video,
+  Square,
   Check,
   LoaderCircle
 } from 'lucide-react';
@@ -2275,6 +2276,7 @@ export default function App() {
     kind: 'video' | 'image';
     progress: number;
   } | null>(null);
+  const chartVideoExportAbortControllerRef = useRef<AbortController | null>(null);
   const [chartExportError, setChartExportError] = useState<string | null>(null);
   const [chartExportPlayback, setChartExportPlayback] = useState<{
     panelIds: string[];
@@ -6829,6 +6831,10 @@ export default function App() {
   };
 
   const handleChartVideoExport = async () => {
+    if (chartVideoExportAbortControllerRef.current) {
+      chartVideoExportAbortControllerRef.current.abort();
+      return;
+    }
     if (chartExportStatus) return;
     setVideoExportMenu(null);
     setImageExportMenu(null);
@@ -6836,34 +6842,51 @@ export default function App() {
     const resolution = CHART_EXPORT_RESOLUTIONS.find(
       (candidate) => candidate.id === chartVideoExportSettings.resolutionId,
     ) ?? CHART_EXPORT_RESOLUTIONS[0];
+    const panelIds = getSelectedChartExportPanelIds(chartVideoExportSettings.selection);
+    if (panelIds.length === 0) {
+      setChartExportError('ダウンロードするチャートを1つ以上選択してください。');
+      return;
+    }
+    const abortController = new AbortController();
+    chartVideoExportAbortControllerRef.current = abortController;
     setChartExportStatus({ kind: 'video', progress: 0 });
 
     try {
-      const panelIds = getSelectedChartExportPanelIds(chartVideoExportSettings.selection);
-      if (panelIds.length === 0) {
-        throw new Error('ダウンロードするチャートを1つ以上選択してください。');
+      for (let index = 0; index < panelIds.length; index += 1) {
+        const panelId = panelIds[index];
+        const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
+        await exportChartVideo({
+          width: resolution.width,
+          height: resolution.height,
+          panelIds: [panelId],
+          durationSeconds: chartVideoExportSettings.durationSeconds,
+          frameRate: chartVideoExportSettings.frameRate,
+          signal: abortController.signal,
+          fileNumber: panelNumber > 0 ? panelNumber : index + 1,
+          beforeFrame: async (progress) => {
+            setChartExportPlayback({ panelIds: [panelId], progress });
+            await new Promise<void>((resolve) => {
+              window.requestAnimationFrame(() => resolve());
+            });
+          },
+          onProgress: (progress) => {
+            setChartExportStatus({
+              kind: 'video',
+              progress: (index + progress) / panelIds.length,
+            });
+          },
+        });
       }
-      await exportChartVideo({
-        width: resolution.width,
-        height: resolution.height,
-        panelIds,
-        durationSeconds: chartVideoExportSettings.durationSeconds,
-        frameRate: chartVideoExportSettings.frameRate,
-        beforeFrame: async (progress) => {
-          setChartExportPlayback({ panelIds, progress });
-          await new Promise<void>((resolve) => {
-            window.requestAnimationFrame(() => resolve());
-          });
-        },
-        onProgress: (progress) => {
-          setChartExportStatus({ kind: 'video', progress });
-        },
-      });
     } catch (error) {
-      setChartExportError(
-        error instanceof Error ? error.message : 'MP4動画の作成に失敗しました。',
-      );
+      if (!(error instanceof Error && error.name === 'AbortError')) {
+        setChartExportError(
+          error instanceof Error ? error.message : 'MP4動画の作成に失敗しました。',
+        );
+      }
     } finally {
+      if (chartVideoExportAbortControllerRef.current === abortController) {
+        chartVideoExportAbortControllerRef.current = null;
+      }
       setChartExportPlayback(null);
       setChartExportStatus(null);
     }
@@ -7329,6 +7352,7 @@ export default function App() {
                       <React.Fragment key={panel.id}>
                         <div
                           id={`chart-panel-container-${panel.id}`}
+                          data-chart-export-panel-id={panel.id}
                           style={{
                             height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
@@ -7434,7 +7458,10 @@ export default function App() {
                             )}
 
                             {/* Panel Toolbar Header */}
-                            <div className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none">
+                            <div
+                              className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none"
+                              data-chart-export-panel-header="true"
+                            >
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
                                 {/* タブ選択で、そのリスト内の銘柄を比較表示に展開する */}
@@ -7828,7 +7855,6 @@ export default function App() {
                             {/* Rendering workspace */}
                             <div
                               className="flex-1 flex flex-col min-h-0 bg-[#090909]"
-                              data-chart-export-panel-id={panel.id}
                             >
                               {isTvEmbed ? (
                                 <TradingViewWidget 
@@ -9344,31 +9370,6 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => void handleChartVideoExport()}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setImageExportMenu(null);
-                setVideoExportMenu({ x: event.clientX, y: event.clientY });
-              }}
-              disabled={Boolean(chartExportStatus)}
-              className="relative w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-cyan-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
-              title="チャート動画をMP4でダウンロード（右クリックで時間・fps・解像度・対象を設定）"
-              aria-label="チャート動画をダウンロード"
-            >
-              {chartExportStatus?.kind === 'video' ? (
-                <LoaderCircle className="w-5 h-5 animate-spin text-cyan-300" />
-              ) : (
-                <Video className="w-5 h-5" />
-              )}
-              {chartExportStatus?.kind === 'video' && (
-                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-cyan-200">
-                  {Math.round(chartExportStatus.progress * 100)}
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
               onClick={() => void handleChartImageExport()}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -9385,6 +9386,39 @@ export default function App() {
                 <LoaderCircle className="w-5 h-5 animate-spin text-emerald-300" />
               ) : (
                 <Camera className="w-5 h-5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleChartVideoExport()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setImageExportMenu(null);
+                setVideoExportMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={chartExportStatus?.kind === 'image'}
+              className={`relative w-9 h-10 flex items-center justify-center border border-transparent transition disabled:cursor-wait disabled:opacity-70 ${
+                chartExportStatus?.kind === 'video'
+                  ? 'bg-red-950/70 text-red-300 hover:bg-red-900/80 hover:text-white'
+                  : 'text-gray-400 hover:text-cyan-200 hover:bg-[#161616]'
+              }`}
+              title={chartExportStatus?.kind === 'video'
+                ? '動画作成を停止'
+                : 'チャート動画をMP4でダウンロード（右クリックで時間・fps・解像度・対象を設定）'}
+              aria-label={chartExportStatus?.kind === 'video'
+                ? '動画作成を停止'
+                : 'チャート動画をダウンロード'}
+            >
+              {chartExportStatus?.kind === 'video' ? (
+                <Square className="w-4 h-4 fill-current" />
+              ) : (
+                <Video className="w-5 h-5" />
+              )}
+              {chartExportStatus?.kind === 'video' && (
+                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-cyan-200">
+                  {Math.round(chartExportStatus.progress * 100)}
+                </span>
               )}
             </button>
 
@@ -9521,7 +9555,7 @@ export default function App() {
 
                 <div className="border-b border-[#242424] p-2.5">
                   <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
-                  <div className="grid grid-cols-5 gap-1">
+                  <div className="grid grid-cols-2 gap-1">
                     <button
                       type="button"
                       onClick={() => setChartVideoExportSettings((current) => ({
@@ -9534,27 +9568,27 @@ export default function App() {
                           : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
                       }`}
                     >
-                      全て
+                      全て選択
                     </button>
-                    {[1, 2, 3, 4].map((count) => (
-                      <button
-                        key={count}
-                        type="button"
-                        onClick={() => setChartVideoExportSettings((current) => ({
-                          ...current,
-                          selection: { ...current.selection, mode: 'first', firstCount: count },
-                        }))}
-                        className={`h-7 border ${
-                          chartVideoExportSettings.selection.mode === 'first'
-                          && chartVideoExportSettings.selection.firstCount === count
-                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
-                            : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
-                        }`}
-                        title={`左上から${count}個`}
-                      >
-                        左上{count}
-                      </button>
-                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        selection: {
+                          ...current.selection,
+                          mode: 'custom',
+                          panelIds: [],
+                        },
+                      }))}
+                      className={`h-7 border ${
+                        chartVideoExportSettings.selection.mode === 'custom'
+                        && chartVideoExportSettings.selection.panelIds.length === 0
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      選択解除
+                    </button>
                   </div>
                   <div className="mt-2 max-h-36 overflow-y-auto border border-[#242424]">
                     {panels.map((panel, index) => {
@@ -9602,7 +9636,7 @@ export default function App() {
                     className="flex h-8 w-full items-center justify-center gap-2 border border-cyan-700 bg-cyan-950/50 font-bold text-cyan-100 hover:bg-cyan-900/50 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Download className="h-4 w-4" />
-                    この設定でMP4を作成
+                    選択したチャートを個別MP4で作成
                   </button>
                 </div>
               </div>

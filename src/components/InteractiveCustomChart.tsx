@@ -59,6 +59,7 @@ interface InteractiveCustomChartProps {
 const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
 const CHART_BULL_COLOR = '#009b87';
 const CHART_BEAR_COLOR = '#ff4057';
+const EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS = 0.9;
 
 function findAlignedOrNearestCandle(
   candles: Candle[],
@@ -1009,24 +1010,60 @@ export function InteractiveCustomChart({
       }).sort((first, second) => first.adjustedY - second.adjustedY);
     };
 
-    if (exportPlaybackActive || comparisonLabelLayoutMode === 'rank') {
-      return createSmoothRankedLabels(rawLabels);
-    }
-
-    if (comparisonLabelLayoutMode === 'stack') {
+    const createStackedLabels = (labels: typeof rawLabels) => {
       const availableHeight = Math.max(1, maxCenterY - minCenterY);
-      const slotHeight = availableHeight / Math.max(1, rawLabels.length);
+      const slotHeight = availableHeight / Math.max(1, labels.length);
       const labelHeight = Math.max(2, Math.min(
         Math.max(17, comparisonLabelFontSize + 8),
         slotHeight * 0.88,
       ));
       const fontSize = Math.max(3, Math.min(comparisonLabelFontSize, labelHeight - 1));
-      return rawLabels.map((label, index) => ({
+      return labels.map((label, index) => ({
         ...label,
         adjustedY: minCenterY + slotHeight * (index + 0.5),
         labelHeight,
         fontSize,
       }));
+    };
+
+    if (exportPlaybackActive) {
+      const smoothLabels = createSmoothRankedLabels(rawLabels);
+      const stackedLabelsByKey = new Map(
+        createStackedLabels(rawLabels).map((label) => [label.key, label]),
+      );
+      const settleProgress = Math.max(
+        0,
+        Math.min(
+          1,
+          (normalizedExportPlaybackProgress - EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS)
+            / (1 - EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS),
+        ),
+      );
+      if (settleProgress <= 0) return smoothLabels;
+
+      // 最終10%で既存の整列位置へ移動し、3秒停止へ渡す時点では重なりをなくす
+      return smoothLabels.map((label) => {
+        const stackedLabel = stackedLabelsByKey.get(label.key);
+        if (!stackedLabel) return label;
+        return {
+          ...label,
+          adjustedY: interpolateNumber(
+            label.adjustedY,
+            stackedLabel.adjustedY,
+            settleProgress,
+          ),
+          labelHeight: stackedLabel.labelHeight,
+          fontSize: stackedLabel.fontSize,
+        };
+      }).sort((first, second) => first.adjustedY - second.adjustedY);
+    }
+
+    if (comparisonLabelLayoutMode === 'rank') {
+      return createSmoothRankedLabels(rawLabels);
+    }
+
+    if (comparisonLabelLayoutMode === 'stack') {
+      return createStackedLabels(rawLabels);
     }
 
     const maxPositivePct = Math.max(0, ...positiveLabels.map((label) => label.changePct));
@@ -1070,6 +1107,7 @@ export function InteractiveCustomChart({
     comparisonLabelRankSpacingScale,
     exportPlaybackActive,
     exportPlaybackPosition,
+    normalizedExportPlaybackProgress,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {

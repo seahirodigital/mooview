@@ -48,6 +48,7 @@ import {
 } from './symbolExpression';
 import { getSeriesColor } from './chartSeriesColors';
 import {
+  CHART_EXPORT_FINAL_HOLD_SECONDS,
   CHART_EXPORT_RESOLUTIONS,
   ChartExportSelection,
   ChartImageExportSettings,
@@ -343,14 +344,16 @@ function readStoredValue<T>(key: string, fallback: T): T {
 function toggleChartExportPanel(
   selection: ChartExportSelection,
   panelId: string,
+  availablePanelIds: string[],
 ): ChartExportSelection {
-  const panelIds = selection.panelIds.includes(panelId)
-    ? selection.panelIds.filter((currentPanelId) => currentPanelId !== panelId)
-    : [...selection.panelIds, panelId];
+  const selectedPanelIds = resolveChartExportPanelIds(selection, availablePanelIds);
+  const panelIds = selectedPanelIds.includes(panelId)
+    ? selectedPanelIds.filter((currentPanelId) => currentPanelId !== panelId)
+    : [...selectedPanelIds, panelId];
   return {
     ...selection,
     mode: 'custom',
-    panelIds,
+    panelIds: availablePanelIds.filter((currentPanelId) => panelIds.includes(currentPanelId)),
   };
 }
 
@@ -6845,7 +6848,7 @@ export default function App() {
         height: resolution.height,
         panelIds,
         durationSeconds: chartVideoExportSettings.durationSeconds,
-        frameRate: 30,
+        frameRate: chartVideoExportSettings.frameRate,
         beforeFrame: async (progress) => {
           setChartExportPlayback({ panelIds, progress });
           await new Promise<void>((resolve) => {
@@ -6878,8 +6881,9 @@ export default function App() {
       if (panelIds.length === 0) {
         throw new Error('ダウンロードするチャートを1つ以上選択してください。');
       }
-      await exportChartImage(panelIds);
-      setChartExportStatus({ kind: 'image', progress: 1 });
+      await exportChartImage(panelIds, (progress) => {
+        setChartExportStatus({ kind: 'image', progress });
+      });
     } catch (error) {
       setChartExportError(
         error instanceof Error ? error.message : 'PNG画像の作成に失敗しました。',
@@ -9349,7 +9353,7 @@ export default function App() {
               }}
               disabled={Boolean(chartExportStatus)}
               className="relative w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-cyan-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
-              title="チャート動画をMP4でダウンロード（右クリックで時間・解像度・対象を設定）"
+              title="チャート動画をMP4でダウンロード（右クリックで時間・fps・解像度・対象を設定）"
               aria-label="チャート動画をダウンロード"
             >
               {chartExportStatus?.kind === 'video' ? (
@@ -9400,7 +9404,7 @@ export default function App() {
 
                 <div className="border-b border-[#242424] p-2.5">
                   <div className="mb-1.5 flex items-center justify-between">
-                    <span className="font-bold text-gray-300">時間</span>
+                    <span className="font-bold text-gray-300">チャート移動時間</span>
                     <label className="flex items-center gap-1">
                       <input
                         type="number"
@@ -9419,7 +9423,7 @@ export default function App() {
                           }));
                         }}
                         className="h-6 w-14 border border-[#343434] bg-[#111111] px-1.5 text-right font-mono text-white outline-none focus:border-cyan-600"
-                        aria-label="動画時間"
+                        aria-label="チャート移動時間"
                       />
                       <span className="text-gray-500">秒</span>
                     </label>
@@ -9442,6 +9446,45 @@ export default function App() {
                         {seconds}秒
                       </button>
                     ))}
+                  </div>
+                  <div className="mt-1.5 border border-[#2d2d2d] bg-[#101010] px-2 py-1 text-[9px] text-gray-400">
+                    移動 {chartVideoExportSettings.durationSeconds}秒
+                    {' + '}
+                    最終画面 {CHART_EXPORT_FINAL_HOLD_SECONDS}秒
+                    {' = '}
+                    <span className="font-bold text-cyan-200">
+                      合計 {chartVideoExportSettings.durationSeconds + CHART_EXPORT_FINAL_HOLD_SECONDS}秒
+                    </span>
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">フレームレート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    {([30, 60] as const).map((frameRate) => {
+                      const selected = chartVideoExportSettings.frameRate === frameRate;
+                      return (
+                        <button
+                          key={frameRate}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            frameRate,
+                          }))}
+                          className={`flex h-7 items-center justify-center gap-1.5 border font-mono transition ${
+                            selected
+                              ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                              : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                          }`}
+                        >
+                          {selected && <Check className="h-3 w-3" />}
+                          {frameRate}fps
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 text-[9px] text-gray-500">
+                    30fpsは書き出しが速く、60fpsはより滑らかな動画になります
                   </div>
                 </div>
 
@@ -9515,15 +9558,20 @@ export default function App() {
                   </div>
                   <div className="mt-2 max-h-36 overflow-y-auto border border-[#242424]">
                     {panels.map((panel, index) => {
-                      const selected = chartVideoExportSettings.selection.mode === 'custom'
-                        && chartVideoExportSettings.selection.panelIds.includes(panel.id);
+                      const selected = getSelectedChartExportPanelIds(
+                        chartVideoExportSettings.selection,
+                      ).includes(panel.id);
                       return (
                         <button
                           key={panel.id}
                           type="button"
                           onClick={() => setChartVideoExportSettings((current) => ({
                             ...current,
-                            selection: toggleChartExportPanel(current.selection, panel.id),
+                            selection: toggleChartExportPanel(
+                              current.selection,
+                              panel.id,
+                              panels.map((currentPanel) => currentPanel.id),
+                            ),
                           }))}
                           className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
                             selected ? 'bg-cyan-950/30 text-cyan-100' : 'text-gray-400'
@@ -9575,7 +9623,7 @@ export default function App() {
                 </div>
                 <div className="border-b border-[#242424] p-2.5">
                   <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
-                  <div className="grid grid-cols-5 gap-1">
+                  <div className="grid grid-cols-2 gap-1">
                     <button
                       type="button"
                       onClick={() => setChartImageExportSettings((current) => ({
@@ -9588,39 +9636,44 @@ export default function App() {
                           : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
                       }`}
                     >
-                      全て
+                      全て選択
                     </button>
-                    {[1, 2, 3, 4].map((count) => (
-                      <button
-                        key={count}
-                        type="button"
-                        onClick={() => setChartImageExportSettings((current) => ({
-                          ...current,
-                          selection: { ...current.selection, mode: 'first', firstCount: count },
-                        }))}
-                        className={`h-7 border ${
-                          chartImageExportSettings.selection.mode === 'first'
-                          && chartImageExportSettings.selection.firstCount === count
-                            ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
-                            : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
-                        }`}
-                        title={`左上から${count}個`}
-                      >
-                        左上{count}
-                      </button>
-                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setChartImageExportSettings((current) => ({
+                        ...current,
+                        selection: {
+                          ...current.selection,
+                          mode: 'custom',
+                          panelIds: [],
+                        },
+                      }))}
+                      className={`h-7 border ${
+                        chartImageExportSettings.selection.mode === 'custom'
+                        && chartImageExportSettings.selection.panelIds.length === 0
+                          ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      選択解除
+                    </button>
                   </div>
                   <div className="mt-2 max-h-40 overflow-y-auto border border-[#242424]">
                     {panels.map((panel, index) => {
-                      const selected = chartImageExportSettings.selection.mode === 'custom'
-                        && chartImageExportSettings.selection.panelIds.includes(panel.id);
+                      const selected = getSelectedChartExportPanelIds(
+                        chartImageExportSettings.selection,
+                      ).includes(panel.id);
                       return (
                         <button
                           key={panel.id}
                           type="button"
                           onClick={() => setChartImageExportSettings((current) => ({
                             ...current,
-                            selection: toggleChartExportPanel(current.selection, panel.id),
+                            selection: toggleChartExportPanel(
+                              current.selection,
+                              panel.id,
+                              panels.map((currentPanel) => currentPanel.id),
+                            ),
                           }))}
                           className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
                             selected ? 'bg-emerald-950/30 text-emerald-100' : 'text-gray-400'
@@ -9650,7 +9703,7 @@ export default function App() {
                     className="flex h-8 w-full items-center justify-center gap-2 border border-emerald-700 bg-emerald-950/50 font-bold text-emerald-100 hover:bg-emerald-900/50 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Download className="h-4 w-4" />
-                    この設定でPNGを作成
+                    選択したチャートを個別PNGで作成
                   </button>
                 </div>
               </div>

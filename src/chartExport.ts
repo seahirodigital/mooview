@@ -1,5 +1,6 @@
 export type ChartExportResolutionId = 'square-720' | 'landscape-720' | 'landscape-1080';
 export type ChartExportSelectionMode = 'all' | 'first' | 'custom';
+export type ChartExportFrameRate = 30 | 60;
 
 export interface ChartExportSelection {
   mode: ChartExportSelectionMode;
@@ -9,6 +10,7 @@ export interface ChartExportSelection {
 
 export interface ChartVideoExportSettings {
   durationSeconds: number;
+  frameRate: ChartExportFrameRate;
   resolutionId: ChartExportResolutionId;
   selection: ChartExportSelection;
 }
@@ -45,8 +47,11 @@ export const CHART_EXPORT_RESOLUTIONS: ChartExportResolution[] = [
   },
 ];
 
+export const CHART_EXPORT_FINAL_HOLD_SECONDS = 3;
+
 export const DEFAULT_CHART_VIDEO_EXPORT_SETTINGS: ChartVideoExportSettings = {
   durationSeconds: 5,
+  frameRate: 30,
   resolutionId: 'square-720',
   selection: {
     mode: 'all',
@@ -265,6 +270,7 @@ export function normalizeChartVideoExportSettings(raw: unknown): ChartVideoExpor
       1,
       30,
     ),
+    frameRate: source.frameRate === 60 ? 60 : 30,
     resolutionId,
     selection: normalizeChartExportSelection(source.selection),
   };
@@ -297,31 +303,40 @@ function normalizeChartExportSelection(raw: unknown): ChartExportSelection {
 
 export async function exportChartImage(
   panelIds: string[],
+  onProgress?: (progress: number) => void,
 ): Promise<void> {
-  const dimensions = resolveImageDimensions(panelIds);
+  const timestamp = createTimestamp();
   const canvas = document.createElement('canvas');
-  await renderChartComposite(canvas, {
-    ...dimensions,
-    panelIds,
-  });
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((result) => {
-      if (result) {
-        resolve(result);
-      } else {
-        reject(new Error('PNG画像の作成に失敗しました。'));
-      }
-    }, 'image/png');
-  });
-  downloadBlob(blob, `mooview-chart-${createTimestamp()}.png`);
+  for (let index = 0; index < panelIds.length; index += 1) {
+    const panelId = panelIds[index];
+    const dimensions = resolveImageDimensions([panelId]);
+    await renderChartComposite(canvas, {
+      ...dimensions,
+      panelIds: [panelId],
+    });
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((result) => {
+        if (result) {
+          resolve(result);
+        } else {
+          reject(new Error('PNG画像の作成に失敗しました。'));
+        }
+      }, 'image/png');
+    });
+    const panelNumber = String(index + 1).padStart(2, '0');
+    downloadBlob(blob, `mooview-chart-${panelNumber}-${timestamp}.png`);
+    onProgress?.((index + 1) / panelIds.length);
+  }
 }
 
 export async function exportChartVideo(
   options: ExportChartVideoOptions,
 ): Promise<void> {
   const frameRate = clamp(Math.round(options.frameRate ?? 30), 1, 60);
-  const durationSeconds = clamp(options.durationSeconds, 1, 30);
-  const frameCount = Math.max(2, Math.round(durationSeconds * frameRate));
+  const animationDurationSeconds = clamp(options.durationSeconds, 1, 30);
+  const animationFrameCount = Math.max(2, Math.round(animationDurationSeconds * frameRate));
+  const finalHoldFrameCount = Math.round(CHART_EXPORT_FINAL_HOLD_SECONDS * frameRate);
+  const totalFrameCount = animationFrameCount + finalHoldFrameCount;
   const canvas = document.createElement('canvas');
   canvas.width = ensureEven(options.width);
   canvas.height = ensureEven(options.height);
@@ -349,16 +364,24 @@ export async function exportChartVideo(
   output.addVideoTrack(videoSource);
   await output.start();
 
-  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-    const progress = frameCount <= 1 ? 1 : frameIndex / (frameCount - 1);
-    await options.beforeFrame(progress);
-    await renderChartComposite(canvas, options);
+  for (let frameIndex = 0; frameIndex < totalFrameCount; frameIndex += 1) {
+    if (frameIndex < animationFrameCount) {
+      const progress = animationFrameCount <= 1
+        ? 1
+        : frameIndex / (animationFrameCount - 1);
+      await options.beforeFrame(progress);
+      await renderChartComposite(canvas, options);
+    }
     await videoSource.add(
       frameIndex / frameRate,
       1 / frameRate,
-      { keyFrame: frameIndex === 0 || frameIndex % (frameRate * 2) === 0 },
+      {
+        keyFrame: frameIndex === 0
+          || frameIndex === animationFrameCount
+          || frameIndex % (frameRate * 2) === 0,
+      },
     );
-    options.onProgress?.((frameIndex + 1) / frameCount);
+    options.onProgress?.((frameIndex + 1) / totalFrameCount);
   }
 
   videoSource.close();

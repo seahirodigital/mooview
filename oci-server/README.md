@@ -7,9 +7,12 @@
 完成後は、同じTailscaleネットワークへ参加したWindowsとMacから、専用HTTPS URLでOCI版MooViewを開けます。OpenD、Pythonゲートウェイ、MooViewはOS再起動後も自動復旧します。
 
 OCI版のチャート一覧、配置、比較線、インジケーター、ウォッチリスト、サイドバー、
-バリューチェーン／マクロ画面などの設定はサーバーへ保存されます。WindowsとMacは
-`/var/lib/mooview/workspace-settings.desktop.json`、iPhoneとAndroidは
-`/var/lib/mooview/workspace-settings.mobile.json` を正本として使用します。
+バリューチェーン／マクロ画面などの設定はサーバーへ保存されます。
+`/var/lib/mooview/workspace-settings.desktop.json` を全端末共通の正本として使用し、
+Windows、Mac、iPhone、Androidはすべて同じ設定を読み書きします。
+`profile=mobile` でアクセスした既存クライアントも共通正本へ接続します。
+旧 `/var/lib/mooview/workspace-settings.mobile.json` は移行時の保全対象として残しますが、
+新しい保存先としては使用しません。
 別端末では画面の再読込またはブラウザへ戻った時に最新設定を取得します。
 ローカル版は従来どおりブラウザ保存を維持し、接続設定画面の
 「現在の設定をOCIへコピー」から初回データを移行できます。

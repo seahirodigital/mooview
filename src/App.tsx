@@ -814,15 +814,8 @@ async function readWorkspaceEnvelope(response: Response): Promise<SharedWorkspac
 }
 
 function detectSharedWorkspaceProfile(): SharedWorkspaceProfile {
-  const navigatorWithHints = navigator as Navigator & {
-    userAgentData?: { mobile?: boolean };
-  };
-  if (navigatorWithHints.userAgentData?.mobile) {
-    return 'mobile';
-  }
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    ? 'mobile'
-    : 'desktop';
+  // チャート・ウォッチリストは端末種別で分離せず、全端末で同じクラウド設定を使用する。
+  return 'desktop';
 }
 
 function getSharedWorkspaceEndpoint(
@@ -9376,7 +9369,7 @@ export default function App() {
                     : 'border-gray-700 bg-gray-900 text-gray-400'
               }`}>
                 {workspacePersistenceMode === 'shared'
-                  ? `OCI共有保存・${sharedWorkspaceProfile === 'mobile' ? 'スマホ' : 'PC'}`
+                  ? 'OCIクラウド・全端末共通'
                   : workspacePersistenceMode === 'local'
                     ? 'このブラウザ'
                     : '確認中'}
@@ -9384,9 +9377,7 @@ export default function App() {
             </div>
             <div className="text-[10px] text-gray-400">
               {workspacePersistenceMode === 'shared'
-                ? sharedWorkspaceProfile === 'mobile'
-                  ? '変更はOCIのスマホ専用設定へ保存されます。'
-                  : '変更はOCIへ保存され、WindowsとMacで共通表示されます。'
+                ? '変更はOCIへ保存され、PC・Mac・スマホで共通表示されます。'
                 : '現在の設定はこのブラウザに保存されています。'}
             </div>
             {workspacePersistenceMode === 'shared' && sharedWorkspaceUpdatedAt && (

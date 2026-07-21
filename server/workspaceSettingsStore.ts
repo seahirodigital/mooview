@@ -33,8 +33,9 @@ export function resolveWorkspaceSettingsDirectory(): string {
   return path.join(os.homedir(), '.local', 'share', 'mooview');
 }
 
-export function normalizeSharedWorkspaceProfile(value: unknown): SharedWorkspaceProfile {
-  return value === 'mobile' ? 'mobile' : 'desktop';
+export function normalizeSharedWorkspaceProfile(_value: unknown): SharedWorkspaceProfile {
+  // 既存クライアントの profile=mobile も、全端末共通の正本へ接続する。
+  return 'desktop';
 }
 
 function resolveSettingsPath(profile: SharedWorkspaceProfile): string {

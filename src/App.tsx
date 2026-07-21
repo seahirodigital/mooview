@@ -2230,6 +2230,7 @@ export default function App() {
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
   const candleFetchPendingRef = useRef(false);
+  const candleFetchGenerationRef = useRef(0);
   const candleRetryTimerRef = useRef<number | null>(null);
   const forceCandleRefreshRef = useRef(false);
   const initialVisibleChartRefreshRef = useRef(true);
@@ -3619,6 +3620,8 @@ export default function App() {
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    const fetchGeneration = candleFetchGenerationRef.current + 1;
+    candleFetchGenerationRef.current = fetchGeneration;
     if (candleFetchInFlightRef.current) {
       candleFetchPendingRef.current = true;
       return;
@@ -3674,31 +3677,39 @@ export default function App() {
       const panelPriorityOffset = appView === 'charts' ? 0 : 5_000;
       const valueChainPriorityOffset = appView === 'charts' ? 10_000 : 0;
 
-      panels.forEach((panel, panelIndex) => {
+      const mobilePanelIndex = Math.max(0, Math.min(mobileActivePanelIndex, panels.length - 1));
+      const panelsToFetch = isMobileViewport
+        ? appView === 'charts' && panels[mobilePanelIndex]
+          ? [panels[mobilePanelIndex]]
+          : []
+        : panels;
+
+      panelsToFetch.forEach((panel, panelIndex) => {
         const chartSymbols = [panel.symbol, ...(panel.comparisonSymbols || [])];
         const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
-        chartSymbols.forEach((symbol) => {
-          addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, panelPriorityBase);
-        });
-        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
-        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
-          chartSymbols.forEach((symbol) => {
-            addCandleRequest(symbol, displayRangeTimeframe, panelPriorityBase + 1);
-          });
-        }
-        chartSymbols.forEach((symbol) => {
-          addCandleRequest(symbol, panel.timeframe, panelPriorityBase + 2);
+        chartSymbols.forEach((symbol, symbolIndex) => {
+          // スマホは主銘柄を比較銘柄より先に描画できるよう、最優先で取得する。
+          const symbolPriority = panelPriorityBase
+            + (isMobileViewport && symbolIndex === 0 ? -2_000 : symbolIndex);
+          addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriority);
+          const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
+          if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+            addCandleRequest(symbol, displayRangeTimeframe, symbolPriority + 1);
+          }
+          addCandleRequest(symbol, panel.timeframe, symbolPriority + 2);
         });
       });
-      valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
-        const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
-        addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
-        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(valueChainChartState.displayRange);
-        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
-          addCandleRequest(chartSymbol, displayRangeTimeframe, symbolPriorityBase + 1);
-        }
-        addCandleRequest(chartSymbol, valueChainChartState.timeframe, symbolPriorityBase + 2);
-      });
+      if (!isMobileViewport || appView !== 'charts') {
+        valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
+          const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
+          addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
+          const displayRangeTimeframe = getDisplayRangeSeedTimeframe(valueChainChartState.displayRange);
+          if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+            addCandleRequest(chartSymbol, displayRangeTimeframe, symbolPriorityBase + 1);
+          }
+          addCandleRequest(chartSymbol, valueChainChartState.timeframe, symbolPriorityBase + 2);
+        });
+      }
 
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
         const cachedCandles = candlesCache[key];
@@ -3729,6 +3740,20 @@ export default function App() {
       const retryableFailedKeys = new Set<string>();
       let firstError: string | null = null;
       let klineRequestCount = 0;
+      const commitFetchedCandles = (entries: Record<string, Candle[]>) => {
+        const fetchedAt = Date.now();
+        Object.keys(entries).forEach((key) => {
+          candleFetchTimestampsRef.current[key] = fetchedAt;
+        });
+        Object.assign(updatedCache, entries);
+        setCandlesCache((currentCache) => compactCandlesCache({
+          ...currentCache,
+          ...entries,
+        }));
+        // 接続確認APIが一時的に失敗しても、実データ取得成功を接続済みの根拠とする。
+        setMoomooStatus('connected');
+        setMoomooError(null);
+      };
       const waitForKlineSlot = async () => {
         if (klineRequestCount > 0 && klineRequestCount % KLINE_FETCH_BATCH_LIMIT === 0) {
           setMoomooStatus('connecting');
@@ -3798,12 +3823,15 @@ export default function App() {
 
       try {
         for (const [key, request] of requestsToFetch) {
-          if (!moomooRealTimeActiveRef.current) break;
+          if (
+            !moomooRealTimeActiveRef.current
+            || candleFetchGenerationRef.current !== fetchGeneration
+          ) break;
           try {
             const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
             if (directResult.candles.length > 0) {
-              updatedCache[key] = directResult.candles;
               successfulKeys.add(key);
+              commitFetchedCandles({ [key]: directResult.candles });
               continue;
             }
 
@@ -3813,10 +3841,12 @@ export default function App() {
               const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
               if (fallbackResult.candles.length > 0) {
                 const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
-                updatedCache[key] = fallbackResult.candles;
-                updatedCache[fallbackKey] = fallbackResult.candles;
                 successfulKeys.add(key);
                 successfulKeys.add(fallbackKey);
+                commitFetchedCandles({
+                  [key]: fallbackResult.candles,
+                  [fallbackKey]: fallbackResult.candles,
+                });
                 continue;
               }
               shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
@@ -3833,7 +3863,10 @@ export default function App() {
           }
         }
 
-        if (!moomooRealTimeActiveRef.current) return;
+        if (
+          !moomooRealTimeActiveRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration
+        ) return;
 
         const attemptedAt = Date.now();
         Object.keys(failedErrors).forEach((key) => {
@@ -3847,13 +3880,6 @@ export default function App() {
         }
 
         if (Object.keys(updatedCache).length > 0) {
-          Object.keys(updatedCache).forEach((key) => {
-            candleFetchTimestampsRef.current[key] = attemptedAt;
-          });
-          setCandlesCache((currentCache) => compactCandlesCache({
-            ...currentCache,
-            ...updatedCache,
-          }));
           setMoomooStatus('connected');
           setMoomooError(null);
         } else if (firstError) {
@@ -3870,7 +3896,8 @@ export default function App() {
         });
       } finally {
         candleFetchInFlightRef.current = false;
-        const shouldRefetch = candleFetchPendingRef.current;
+        const shouldRefetch = candleFetchPendingRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration;
         candleFetchPendingRef.current = false;
         forceCandleRefreshRef.current = false;
         initialVisibleChartRefreshRef.current = false;
@@ -3881,7 +3908,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [activeWatchlistTabId, appView, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, appView, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) {

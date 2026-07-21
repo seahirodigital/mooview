@@ -78,6 +78,7 @@ const WATCHLIST_TARGET_SEPARATOR = '::section::';
 const INDICATOR_LINE_STYLES: IndicatorLineStyle[] = ['solid', 'dashed', 'dotted', 'dashdot'];
 
 type SidebarView = 'watchlist' | 'indicators' | 'settings';
+type MobileSheetView = SidebarView | 'image-export' | 'video-export';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
@@ -2597,6 +2598,12 @@ export default function App() {
       860,
     )
   );
+  const [isMobileViewport, setIsMobileViewport] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+  ));
+  const [mobileSheetView, setMobileSheetView] = useState<MobileSheetView | null>(null);
+  const [mobileActivePanelIndex, setMobileActivePanelIndex] = useState(0);
+  const mobileChartSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Active panel ID currently displaying comparison symbol overlay selector
   const [activeComparisonPopoverPanelId, setActiveComparisonPopoverPanelId] = useState<string | null>(null);
@@ -3336,6 +3343,26 @@ export default function App() {
   useEffect(() => {
     writeStoredJson('tv_dashboard_panel_heights', panelHeights);
   }, [panelHeights]);
+
+  useEffect(() => {
+    const mobileViewportQuery = window.matchMedia('(max-width: 767px)');
+    const syncMobileViewport = () => {
+      setIsMobileViewport(mobileViewportQuery.matches);
+      if (!mobileViewportQuery.matches) {
+        setMobileSheetView(null);
+      }
+    };
+
+    syncMobileViewport();
+    mobileViewportQuery.addEventListener('change', syncMobileViewport);
+    return () => mobileViewportQuery.removeEventListener('change', syncMobileViewport);
+  }, []);
+
+  useEffect(() => {
+    setMobileActivePanelIndex((currentIndex) => (
+      Math.max(0, Math.min(currentIndex, panels.length - 1))
+    ));
+  }, [panels.length]);
 
   useEffect(() => {
     writeStoredJson('tv_dashboard_watchlist_column_widths', watchlistColumnWidths);
@@ -4200,6 +4227,41 @@ export default function App() {
     return cols.filter(col => col.length > 0);
   }, [panels, layoutStyle, gridCols]);
 
+  const activeMobilePanelIndex = Math.max(
+    0,
+    Math.min(mobileActivePanelIndex, panels.length - 1),
+  );
+  const visibleColGroups = useMemo(() => {
+    if (!isMobileViewport) return colGroups;
+    const activePanel = panels[activeMobilePanelIndex];
+    return activePanel ? [[activePanel]] : [];
+  }, [activeMobilePanelIndex, colGroups, isMobileViewport, panels]);
+
+  const handleMobileChartHeaderTouchStart = (event: React.TouchEvent) => {
+    if (!isMobileViewport || event.touches.length !== 1) return;
+    mobileChartSwipeStartRef.current = {
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY,
+    };
+  };
+
+  const handleMobileChartHeaderTouchEnd = (event: React.TouchEvent) => {
+    const swipeStart = mobileChartSwipeStartRef.current;
+    mobileChartSwipeStartRef.current = null;
+    if (!isMobileViewport || !swipeStart || event.changedTouches.length !== 1) return;
+
+    const deltaX = event.changedTouches[0].clientX - swipeStart.x;
+    const deltaY = event.changedTouches[0].clientY - swipeStart.y;
+    if (Math.abs(deltaX) < 48 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.15) return;
+
+    setMobileActivePanelIndex((currentIndex) => {
+      const lastPanelIndex = Math.max(0, panels.length - 1);
+      return deltaX < 0
+        ? Math.min(lastPanelIndex, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+    });
+  };
+
   // Handle column width dragging
   const handleColResizeMouseDown = (
     e: React.MouseEvent,
@@ -4943,6 +5005,27 @@ export default function App() {
     setSidebarOpen(true);
   };
 
+  const handleMobileSheetNavClick = (view: MobileSheetView) => {
+    setAppView('charts');
+    if (view === 'watchlist' || view === 'indicators' || view === 'settings') {
+      setSidebarView(view);
+    }
+    const activePanel = panels[activeMobilePanelIndex];
+    if (activePanel && view === 'image-export') {
+      setChartImageExportSettings((current) => ({
+        ...current,
+        selection: { ...current.selection, mode: 'custom', panelIds: [activePanel.id] },
+      }));
+    }
+    if (activePanel && view === 'video-export') {
+      setChartVideoExportSettings((current) => ({
+        ...current,
+        selection: { ...current.selection, mode: 'custom', panelIds: [activePanel.id] },
+      }));
+    }
+    setMobileSheetView((currentView) => currentView === view ? null : view);
+  };
+
   const addSymbolToActiveWatchlist = (symbol: string) => {
     addSymbolsToActiveWatchlist([symbol]);
   };
@@ -5025,7 +5108,11 @@ export default function App() {
     ));
     setFocusedSymbolIndex(symbolKey);
     setSidebarView('indicators');
-    setSidebarOpen(true);
+    if (isMobileViewport) {
+      setMobileSheetView('indicators');
+    } else {
+      setSidebarOpen(true);
+    }
   };
 
   const selectTickerForPrimaryChart = (symbol: string) => {
@@ -5037,6 +5124,7 @@ export default function App() {
       setMoomooRealTimeActive(true);
     }
     queuePriorityQuoteRefreshForChartSymbols([chartSymbol]);
+    setMobileActivePanelIndex(0);
     setPanels((currentPanels) =>
       currentPanels.map((panel, index) =>
         index === 0
@@ -5828,6 +5916,9 @@ export default function App() {
       : basePanel;
 
     setPanels(prev => [...prev, newPanel]);
+    if (isMobileViewport) {
+      setMobileActivePanelIndex(panels.length);
+    }
     setPanelEngineToggle(prev => ({ ...prev, [newId]: false }));
   };
 
@@ -5859,6 +5950,9 @@ export default function App() {
     };
 
     setPanels((currentPanels) => [...currentPanels, emptyPanel]);
+    if (isMobileViewport) {
+      setMobileActivePanelIndex(panels.length);
+    }
     setPanelEngineToggle((current) => ({ ...current, [newId]: false }));
     setWatchlistTargetMenu(null);
   };
@@ -7068,7 +7162,7 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25"
+      className="h-[100dvh] min-h-0 overflow-hidden bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25 md:h-auto md:min-h-screen md:overflow-visible"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}
     >
       <style>
@@ -7081,7 +7175,7 @@ export default function App() {
       </style>
       
       {/* Dynamic Upper Banner with real-time quote ticks */}
-      <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-hidden whitespace-nowrap flex items-center gap-4 text-xs">
+      <div className="bg-[#080808] border-b border-[#202020] py-1.5 px-2 shrink-0 overflow-hidden whitespace-nowrap flex items-center gap-2 text-xs md:py-2 md:px-4 md:gap-4">
         <div className="flex items-center space-x-2 shrink-0">
             <button
               type="button"
@@ -7188,7 +7282,7 @@ export default function App() {
         </div>
         
         {/* Right header actions */}
-        <div className="flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
+        <div className="hidden sm:flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
           <div className="flex flex-col items-end leading-tight font-mono">
             <span className="text-[#d1d4dc]">{currentClockTime}</span>
             <span className="text-[9px] text-[#848e9c]">更新 {lastApiSyncTime}</span>
@@ -7277,13 +7371,13 @@ export default function App() {
           onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : (
-      <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+      <div className="relative flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
         
         {/* Workspace Panels container */}
-        <div className="flex-1 flex flex-col min-h-0 p-3 bg-[#050505] overflow-y-auto">
+        <div className="flex-1 flex flex-col min-h-0 p-1 bg-[#050505] overflow-hidden md:p-3 md:overflow-y-auto">
           
-          <div className="flex-1 min-h-0 w-full flex flex-row select-none">
-            {colGroups.map((col, colIdx) => (
+          <div className="flex-1 min-h-0 w-full flex flex-row select-none overflow-hidden">
+            {visibleColGroups.map((col, colIdx) => (
               <React.Fragment key={colIdx}>
                 <div
                   id={`col-group-${colIdx}`}
@@ -7292,7 +7386,7 @@ export default function App() {
                     flexShrink: 1,
                     flexBasis: 0,
                   }}
-                  className="flex flex-col min-h-0 min-w-[120px]"
+                  className="flex flex-col min-h-0 min-w-[120px] h-full"
                 >
                   {col.map((panel, pIdx) => {
                     const panelSymbol = normalizeStoredSymbolValue(panel.symbol);
@@ -7354,7 +7448,9 @@ export default function App() {
                           id={`chart-panel-container-${panel.id}`}
                           data-chart-export-panel-id={panel.id}
                           style={{
-                            height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
+                            height: isMobileViewport
+                              ? '100%'
+                              : `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
                           onDragOver={(event) => {
                             if (event.dataTransfer.types.includes('application/x-mooview-panel')) {
@@ -7391,7 +7487,7 @@ export default function App() {
                             setDraggedBasket(null);
                             setDraggedSectionId(null);
                           }}
-                          className="w-full flex flex-col shrink-0"
+                          className="w-full flex flex-col shrink-0 min-h-0"
                         >
                           <div className="flex-1 flex flex-col min-h-0 bg-[#0d0d0d] border border-[#242424] rounded-lg overflow-hidden relative focus-within:border-emerald-500 transition-colors shadow-lg">
                             {/* Active Comparison (Add Overlaid Symbol) Custom Popover */}
@@ -7459,8 +7555,10 @@ export default function App() {
 
                             {/* Panel Toolbar Header */}
                             <div
-                              className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none"
+                              className="h-10 border-b border-[#242424] bg-[#111111] px-2 flex items-center justify-between shrink-0 select-none md:px-3"
                               data-chart-export-panel-header="true"
+                              onTouchStart={handleMobileChartHeaderTouchStart}
+                              onTouchEnd={handleMobileChartHeaderTouchEnd}
                             >
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
@@ -7782,6 +7880,14 @@ export default function App() {
 
                               {/* ACTIONS AND PANEL REMOVAL (MINUS BUTTON) */}
                               <div className="flex items-center space-x-2 shrink-0">
+                                {isMobileViewport && panels.length > 1 && (
+                                  <span
+                                    className="rounded border border-[#303030] bg-[#171717] px-1.5 py-0.5 text-[9px] font-bold text-gray-300"
+                                    title="ヘッダーを左右にスワイプしてチャートを切り替え"
+                                  >
+                                    {activeMobilePanelIndex + 1}/{panels.length}
+                                  </span>
+                                )}
                                 
                                 {/* Quick setting indicators toggles */}
                                 {false && !isTvEmbed && (
@@ -7933,7 +8039,7 @@ export default function App() {
 
                         {/* Drag splitter to change absolute height for every panel */}
                         <div
-                          className="h-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded"
+                          className="hidden h-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded md:block"
                           onMouseDown={(e) => handlePanelHeightResizeMouseDown(e, panel.id)}
                           title="上下にドラッグして高さを変更"
                         />
@@ -7943,7 +8049,7 @@ export default function App() {
                 </div>
 
                 {/* Drag splitter between adjacent column groups */}
-                {colIdx < colGroups.length - 1 && (
+                {!isMobileViewport && colIdx < visibleColGroups.length - 1 && (
                   <div
                     className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch mx-1 rounded"
                     onMouseDown={(e) => handleColResizeMouseDown(e, colIdx, colIdx + 1)}
@@ -7955,7 +8061,7 @@ export default function App() {
           </div>
         </div>
 
-        {sidebarOpen && (
+        {sidebarOpen && !isMobileViewport && (
           <div
             className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch"
             onMouseDown={handleSidebarResizeMouseDown}
@@ -7963,18 +8069,73 @@ export default function App() {
           />
         )}
 
-        {/* Right-hand Sidebar - 常設アイコンと開閉式パネル */}
+        {isMobileViewport && mobileSheetView && (
+          <button
+            type="button"
+            className="fixed inset-x-0 top-0 z-[80] bg-black/55 md:hidden"
+            style={{ bottom: 'calc(4rem + env(safe-area-inset-bottom))' }}
+            onClick={() => setMobileSheetView(null)}
+            aria-label="下部パネルを閉じる"
+          />
+        )}
+
+        {/* PC右サイドバー／スマホ下部ボトムシート */}
         <div
-          className="shrink-0 border-l border-[#202020] bg-[#080808] flex overflow-hidden transition-[width] duration-150 ease-out"
-          style={{ width: sidebarOpen ? `${sidebarWidth + SIDEBAR_NAV_WIDTH}px` : `${SIDEBAR_NAV_WIDTH}px` }}
+          data-mobile-bottom-sheet={isMobileViewport ? mobileSheetView ?? 'closed' : undefined}
+          className={`bg-[#080808] flex overflow-hidden ease-out ${
+            isMobileViewport
+              ? `fixed inset-x-0 z-[90] rounded-t-2xl border-t border-[#343434] shadow-[0_-18px_50px_rgba(0,0,0,0.65)] transition-transform duration-300 ${
+                  mobileSheetView ? 'translate-y-0' : 'translate-y-full pointer-events-none'
+                }`
+              : 'shrink-0 border-l border-[#202020] transition-[width] duration-150'
+          }`}
+          style={isMobileViewport
+            ? {
+                bottom: 'calc(4rem + env(safe-area-inset-bottom))',
+                height: 'min(76dvh, 720px)',
+                width: '100%',
+              }
+            : { width: sidebarOpen ? `${sidebarWidth + SIDEBAR_NAV_WIDTH}px` : `${SIDEBAR_NAV_WIDTH}px` }}
+          aria-hidden={isMobileViewport ? !mobileSheetView : undefined}
         >
           <div
-            className={`min-w-0 flex flex-col overflow-hidden transition-[width] duration-150 ease-out ${sidebarOpen ? '' : 'pointer-events-none'}`}
-            style={{ width: sidebarOpen ? `${sidebarWidth}px` : '0px' }}
+            className={`min-w-0 flex flex-col overflow-hidden ease-out ${
+              isMobileViewport
+                ? 'w-full'
+                : `transition-[width] duration-150 ${sidebarOpen ? '' : 'pointer-events-none'}`
+            }`}
+            style={isMobileViewport
+              ? { width: '100%' }
+              : { width: sidebarOpen ? `${sidebarWidth}px` : '0px' }}
           >
 
+          {isMobileViewport && (
+            <div className="relative flex h-11 shrink-0 items-center justify-center border-b border-[#242424] bg-[#0b0b0b] px-12">
+              <span className="absolute top-1.5 h-1 w-10 rounded-full bg-gray-600" />
+              <span className="mt-1 truncate text-xs font-bold text-gray-100">
+                {mobileSheetView === 'watchlist'
+                  ? 'ウォッチリスト'
+                  : mobileSheetView === 'indicators'
+                    ? 'インジケーター設定'
+                    : mobileSheetView === 'settings'
+                      ? '接続・保存設定'
+                      : mobileSheetView === 'image-export'
+                        ? 'チャート画像'
+                        : 'チャート動画'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileSheetView(null)}
+                className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full text-gray-400 hover:bg-[#202020] hover:text-white"
+                aria-label="下部パネルを閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
-          <div className="shrink-0 p-2 border-b border-[#242424] relative">
+          <div className={`shrink-0 p-2 border-b border-[#242424] relative ${isMobileViewport ? 'hidden' : ''}`}>
             <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] font-bold">
               <span
                 className={`min-w-0 truncate ${
@@ -8099,7 +8260,7 @@ export default function App() {
           </div>
 
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
-          {sidebarView === 'watchlist' && (
+          {(!isMobileViewport || mobileSheetView === 'watchlist') && sidebarView === 'watchlist' && (
           <div
             className="flex-1 min-h-0 bg-[#0b0b0b] overflow-hidden flex flex-col relative"
             onContextMenu={openWatchlistEmptyMenu}
@@ -9180,7 +9341,7 @@ export default function App() {
           )}
 
           {/* 3. INDICATOR PARAMETERS */}
-          {sidebarView === 'indicators' && (
+          {(!isMobileViewport || mobileSheetView === 'indicators') && sidebarView === 'indicators' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2">
             {focusedSymbolIndex && indicatorDatabase[focusedSymbolIndex] ? (
               <div className="flex flex-col min-h-full">
@@ -9200,7 +9361,7 @@ export default function App() {
           )}
 
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
-          {sidebarView === 'settings' && (
+          {(!isMobileViewport || mobileSheetView === 'settings') && sidebarView === 'settings' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
           <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between gap-2">
@@ -9326,9 +9487,172 @@ export default function App() {
           </div>
           )}
 
+          {isMobileViewport && mobileSheetView === 'image-export' && (
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 text-xs">
+              <div className="mb-3 border border-[#2d2d2d] bg-[#101010] p-3 text-gray-300">
+                スマホ画面に現在表示している1つのチャートをPNG画像として保存します。
+              </div>
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">対象チャートを切り替える</div>
+                <div className="mt-2 border border-[#242424]">
+                  {panels.map((panel, index) => {
+                    const selected = index === activeMobilePanelIndex;
+                    return (
+                      <button
+                        key={panel.id}
+                        type="button"
+                        onClick={() => {
+                          setMobileActivePanelIndex(index);
+                          setChartImageExportSettings((current) => ({
+                            ...current,
+                            selection: { ...current.selection, mode: 'custom', panelIds: [panel.id] },
+                          }));
+                        }}
+                        className={`flex h-10 w-full items-center gap-2 border-b border-[#202020] px-3 text-left last:border-b-0 ${
+                          selected ? 'bg-emerald-950/30 text-emerald-100' : 'text-gray-400'
+                        }`}
+                      >
+                        <span className={`flex h-4 w-4 items-center justify-center border ${
+                          selected ? 'border-emerald-500 bg-emerald-800 text-white' : 'border-gray-600'
+                        }`}>
+                          {selected && <Check className="h-3 w-3" />}
+                        </span>
+                        <span className="truncate">
+                          {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleChartImageExport()}
+                disabled={Boolean(chartExportStatus)
+                  || (chartImageExportSettings.selection.mode === 'custom'
+                    && chartImageExportSettings.selection.panelIds.length === 0)}
+                className="flex h-11 w-full items-center justify-center gap-2 border border-emerald-700 bg-emerald-950/60 font-bold text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {chartExportStatus?.kind === 'image' ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                PNG画像を作成
+              </button>
+            </div>
+          )}
+
+          {isMobileViewport && mobileSheetView === 'video-export' && (
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 text-xs">
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">チャート移動時間</div>
+                <div className="grid grid-cols-5 gap-1">
+                  {[3, 5, 8, 10, 15].map((seconds) => (
+                    <button
+                      key={seconds}
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        durationSeconds: seconds,
+                      }))}
+                      className={`h-9 border font-mono ${
+                        chartVideoExportSettings.durationSeconds === seconds
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400'
+                      }`}
+                    >
+                      {seconds}秒
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1.5 text-[10px] text-gray-500">
+                  最終画面の静止 {CHART_EXPORT_FINAL_HOLD_SECONDS}秒を追加します。
+                </div>
+              </div>
+
+              <div className="mb-3 grid grid-cols-2 gap-3">
+                <div>
+                  <div className="mb-1.5 font-bold text-gray-300">フレームレート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    {([30, 60] as const).map((frameRate) => (
+                      <button
+                        key={frameRate}
+                        type="button"
+                        onClick={() => setChartVideoExportSettings((current) => ({
+                          ...current,
+                          frameRate,
+                        }))}
+                        className={`h-9 border ${
+                          chartVideoExportSettings.frameRate === frameRate
+                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                            : 'border-[#303030] text-gray-400'
+                        }`}
+                      >
+                        {frameRate} fps
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 font-bold text-gray-300">解像度</div>
+                  <select
+                    value={chartVideoExportSettings.resolutionId}
+                    onChange={(event) => setChartVideoExportSettings((current) => ({
+                      ...current,
+                      resolutionId: event.target.value,
+                    }))}
+                    className="h-9 w-full border border-[#303030] bg-[#101010] px-2 text-gray-200 outline-none"
+                  >
+                    {CHART_EXPORT_RESOLUTIONS.map((resolution) => (
+                      <option key={resolution.id} value={resolution.id}>
+                        {resolution.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                <div className="border border-[#303030] bg-[#101010] px-3 py-2 text-cyan-100">
+                  {activeMobilePanelIndex + 1}番目: {' '}
+                  {panels[activeMobilePanelIndex]?.name
+                    || normalizeStoredSymbolValue(panels[activeMobilePanelIndex]?.symbol || '')
+                    || '空のチャート'}
+                </div>
+                <div className="mt-1.5 text-[10px] text-gray-500">
+                  対象を変更する場合は、チャート画面へ戻ってヘッダーを左右にスワイプしてください。
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleChartVideoExport()}
+                disabled={chartExportStatus?.kind === 'image'
+                  || (chartVideoExportSettings.selection.mode === 'custom'
+                    && chartVideoExportSettings.selection.panelIds.length === 0)}
+                className={`flex h-11 w-full items-center justify-center gap-2 border font-bold disabled:cursor-not-allowed disabled:opacity-40 ${
+                  chartExportStatus?.kind === 'video'
+                    ? 'border-red-700 bg-red-950/60 text-red-100'
+                    : 'border-cyan-700 bg-cyan-950/60 text-cyan-100'
+                }`}
+              >
+                {chartExportStatus?.kind === 'video' ? (
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                ) : (
+                  <Video className="h-4 w-4" />
+                )}
+                {chartExportStatus?.kind === 'video'
+                  ? `動画作成を停止（${Math.round(chartExportStatus.progress * 100)}%）`
+                  : 'MP4動画を作成'}
+              </button>
+            </div>
+          )}
+
           </div>
 
-          <nav className="w-11 shrink-0 border-l border-[#242424] bg-[#070707] flex flex-col items-center py-2 gap-1">
+          <nav className="hidden w-11 shrink-0 border-l border-[#242424] bg-[#070707] flex-col items-center py-2 gap-1 md:flex">
             <button
               type="button"
               onClick={() => handleSidebarNavClick('watchlist')}
@@ -9749,7 +10073,7 @@ export default function App() {
       )}
 
       {chartExportError && (
-        <div className="fixed bottom-12 right-14 z-[120] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl">
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[120] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl md:bottom-12 md:right-14">
           <span className="min-w-0 flex-1 leading-relaxed">{chartExportError}</span>
           <button
             type="button"
@@ -9763,7 +10087,7 @@ export default function App() {
       )}
 
       {/* Footer information panel */}
-      <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">
+      <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 hidden items-center justify-between px-4 text-[10px] text-[#848e9c] md:flex">
         <div className="flex items-center space-x-3">
           <span className="flex items-center space-x-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-[#009b87]"></span>
@@ -9777,6 +10101,114 @@ export default function App() {
           <span>© {new Date().getFullYear()} trading multi dashboard workspace</span>
         </div>
       </footer>
+
+      <div
+        className="shrink-0 md:hidden"
+        style={{ height: 'calc(4rem + env(safe-area-inset-bottom))' }}
+        aria-hidden="true"
+      />
+
+      <nav
+        data-mobile-bottom-navigation="true"
+        className="fixed inset-x-0 bottom-0 z-[100] grid grid-cols-6 border-t border-[#303030] bg-[#080808]/98 shadow-[0_-8px_28px_rgba(0,0,0,0.55)] backdrop-blur md:hidden"
+        style={{
+          height: 'calc(4rem + env(safe-area-inset-bottom))',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}
+        aria-label="スマホ用メインナビゲーション"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setAppView('charts');
+            setMobileSheetView(null);
+          }}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            appView === 'charts' && !mobileSheetView
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="チャートを表示"
+        >
+          <LayoutGrid className="h-5 w-5" />
+          <span>チャート</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('watchlist')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'watchlist'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="ウォッチリストを表示"
+        >
+          <List className="h-5 w-5" />
+          <span>リスト</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('indicators')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'indicators'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="インジケーター設定を表示"
+        >
+          <ChartNoAxesCombined className="h-5 w-5" />
+          <span>指標</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('settings')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'settings'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="接続・保存設定を表示"
+        >
+          <Settings className="h-5 w-5" />
+          <span>設定</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('image-export')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'image-export'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="チャート画像の設定を表示"
+        >
+          {chartExportStatus?.kind === 'image' ? (
+            <LoaderCircle className="h-5 w-5 animate-spin" />
+          ) : (
+            <Camera className="h-5 w-5" />
+          )}
+          <span>画像</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('video-export')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'video-export'
+              ? 'bg-cyan-950/70 text-cyan-300'
+              : chartExportStatus?.kind === 'video'
+                ? 'bg-red-950/70 text-red-300'
+                : 'text-gray-400'
+          }`}
+          aria-label="チャート動画の設定を表示"
+        >
+          {chartExportStatus?.kind === 'video' ? (
+            <Square className="h-4 w-4 fill-current" />
+          ) : (
+            <Video className="h-5 w-5" />
+          )}
+          <span>動画</span>
+        </button>
+      </nav>
 
     </div>
   );

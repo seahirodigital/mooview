@@ -56,6 +56,7 @@ import {
   ChartVideoExportSettings,
   DEFAULT_CHART_IMAGE_EXPORT_SETTINGS,
   DEFAULT_CHART_VIDEO_EXPORT_SETTINGS,
+  downloadChartVideoFile,
   exportChartImage,
   exportChartVideo,
   normalizeChartImageExportSettings,
@@ -816,6 +817,11 @@ async function readWorkspaceEnvelope(response: Response): Promise<SharedWorkspac
 function detectSharedWorkspaceProfile(): SharedWorkspaceProfile {
   // チャート・ウォッチリストは端末種別で分離せず、全端末で同じクラウド設定を使用する。
   return 'desktop';
+}
+
+function isAppleMobileDevice(): boolean {
+  return /iPad|iPhone|iPod/i.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
 function getSharedWorkspaceEndpoint(
@@ -2273,6 +2279,8 @@ export default function App() {
   } | null>(null);
   const chartVideoExportAbortControllerRef = useRef<AbortController | null>(null);
   const [chartExportError, setChartExportError] = useState<string | null>(null);
+  const [pendingIosVideoFiles, setPendingIosVideoFiles] = useState<File[]>([]);
+  const [iosVideoShareInFlight, setIosVideoShareInFlight] = useState(false);
   const [chartExportPlayback, setChartExportPlayback] = useState<{
     panelIds: string[];
     progress: number;
@@ -6964,12 +6972,14 @@ export default function App() {
     const abortController = new AbortController();
     chartVideoExportAbortControllerRef.current = abortController;
     setChartExportStatus({ kind: 'video', progress: 0 });
+    const iosPhotoSaveEnabled = isAppleMobileDevice();
+    const exportedIosVideoFiles: File[] = [];
 
     try {
       for (let index = 0; index < panelIds.length; index += 1) {
         const panelId = panelIds[index];
         const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
-        await exportChartVideo({
+        const exportedVideoFile = await exportChartVideo({
           width: resolution.width,
           height: resolution.height,
           panelIds: [panelId],
@@ -6989,7 +6999,14 @@ export default function App() {
               progress: (index + progress) / panelIds.length,
             });
           },
+          ...(iosPhotoSaveEnabled ? {
+            download: false,
+            iosCompatible: true,
+          } : {}),
         });
+        if (iosPhotoSaveEnabled) {
+          exportedIosVideoFiles.push(exportedVideoFile);
+        }
       }
     } catch (error) {
       if (!(error instanceof Error && error.name === 'AbortError')) {
@@ -6998,12 +7015,59 @@ export default function App() {
         );
       }
     } finally {
+      if (iosPhotoSaveEnabled && exportedIosVideoFiles.length > 0) {
+        setPendingIosVideoFiles(exportedIosVideoFiles);
+      }
       if (chartVideoExportAbortControllerRef.current === abortController) {
         chartVideoExportAbortControllerRef.current = null;
       }
       setChartExportPlayback(null);
       setChartExportStatus(null);
     }
+  };
+
+  const handleShareIosVideoFiles = () => {
+    const files = [...pendingIosVideoFiles];
+    if (files.length === 0 || iosVideoShareInFlight) return;
+    if (
+      typeof navigator.share !== 'function'
+      || typeof navigator.canShare !== 'function'
+      || !navigator.canShare({ files })
+    ) {
+      setChartExportError('このiOSでは動画共有を利用できません。「ファイルへ保存」を使用してください。');
+      return;
+    }
+
+    let sharePromise: Promise<void>;
+    try {
+      // ファイル以外を渡すとiOSで添付が外れる場合があるため、MP4だけを共有する。
+      sharePromise = navigator.share({ files });
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'iOSの共有シートを開けませんでした。',
+      );
+      return;
+    }
+
+    setIosVideoShareInFlight(true);
+    void sharePromise
+      .then(() => {
+        setPendingIosVideoFiles([]);
+        setChartExportError(null);
+      })
+      .catch((error) => {
+        if (!(error instanceof Error && error.name === 'AbortError')) {
+          setChartExportError(
+            error instanceof Error ? error.message : 'iOSの共有シートを開けませんでした。',
+          );
+        }
+      })
+      .finally(() => setIosVideoShareInFlight(false));
+  };
+
+  const handleDownloadIosVideoFiles = () => {
+    pendingIosVideoFiles.forEach((file) => downloadChartVideoFile(file));
+    setPendingIosVideoFiles([]);
   };
 
   const handleChartImageExport = async () => {
@@ -10101,6 +10165,63 @@ export default function App() {
           >
             <X className="h-4 w-4" />
           </button>
+        </div>
+      )}
+
+      {pendingIosVideoFiles.length > 0 && (
+        <div
+          className="fixed inset-0 z-[140] flex items-end justify-center bg-black/70 px-3 pb-[calc(4.75rem+env(safe-area-inset-bottom))] pt-8 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="iOS写真への動画保存"
+          data-ios-video-save-dialog="true"
+        >
+          <div className="w-full max-w-md border border-cyan-700 bg-[#090909] p-4 text-gray-100 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-cyan-200">動画の作成が完了しました</div>
+                <div className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                  下のボタンをタップし、iOS共有シートで「ビデオを保存」を選ぶと「写真」へ追加できます。
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingIosVideoFiles([])}
+                disabled={iosVideoShareInFlight}
+                className="shrink-0 text-gray-400 hover:text-white disabled:opacity-40"
+                aria-label="動画保存画面を閉じる"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-3 border border-[#303030] bg-black/40 px-3 py-2 text-[10px] text-gray-400">
+              {pendingIosVideoFiles.length}本・
+              {(pendingIosVideoFiles.reduce((total, file) => total + file.size, 0) / 1024 / 1024).toFixed(1)}MB
+              ・iOS互換MP4
+            </div>
+            <button
+              type="button"
+              onClick={handleShareIosVideoFiles}
+              disabled={iosVideoShareInFlight}
+              className="mt-3 flex h-12 w-full items-center justify-center gap-2 bg-cyan-700 text-sm font-bold text-white transition hover:bg-cyan-600 disabled:cursor-wait disabled:opacity-60"
+            >
+              {iosVideoShareInFlight ? (
+                <LoaderCircle className="h-5 w-5 animate-spin" />
+              ) : (
+                <Upload className="h-5 w-5" />
+              )}
+              iOS「写真」へ保存
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadIosVideoFiles}
+              disabled={iosVideoShareInFlight}
+              className="mt-2 flex h-9 w-full items-center justify-center gap-2 border border-gray-700 text-[11px] font-bold text-gray-300 hover:bg-gray-900 disabled:opacity-40"
+            >
+              <Download className="h-4 w-4" />
+              従来どおり「ファイル」へ保存
+            </button>
+          </div>
         </div>
       )}
 

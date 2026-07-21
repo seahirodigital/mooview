@@ -103,6 +103,8 @@ interface ExportChartVideoOptions extends RenderCompositeOptions {
   onProgress?: (progress: number) => void;
   signal?: AbortSignal;
   fileNumber?: number;
+  download?: boolean;
+  iosCompatible?: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -136,6 +138,10 @@ function downloadBlob(blob: Blob, filename: string): void {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+export function downloadChartVideoFile(file: File): void {
+  downloadBlob(file, file.name);
 }
 
 function createUnionRect(first: DOMRect, second: DOMRect): DOMRect {
@@ -397,14 +403,16 @@ export async function exportChartImage(
 
 export async function exportChartVideo(
   options: ExportChartVideoOptions,
-): Promise<void> {
+): Promise<File> {
   const throwIfAborted = () => {
     if (options.signal?.aborted) {
       throw new DOMException('動画作成を停止しました。', 'AbortError');
     }
   };
   throwIfAborted();
-  const frameRate = clamp(Math.round(options.frameRate ?? 30), 1, 60);
+  const requestedFrameRate = clamp(Math.round(options.frameRate ?? 30), 1, 60);
+  // PCは従来設定を維持し、iOSだけ写真アプリとの互換性を優先して30fpsを上限にする。
+  const frameRate = options.iosCompatible ? Math.min(requestedFrameRate, 30) : requestedFrameRate;
   const animationDurationSeconds = clamp(options.durationSeconds, 1, 30);
   const animationFrameCount = Math.max(2, Math.round(animationDurationSeconds * frameRate));
   const finalHoldFrameCount = Math.round(CHART_EXPORT_FINAL_HOLD_SECONDS * frameRate);
@@ -423,16 +431,19 @@ export async function exportChartVideo(
   } = await import('mediabunny');
   const target = new BufferTarget();
   const output = new Output({
-    format: new Mp4OutputFormat(),
+    format: new Mp4OutputFormat(options.iosCompatible ? { fastStart: 'in-memory' } : undefined),
     target,
   });
   const bitrate = canvas.width >= 1920 ? 8_000_000 : 5_000_000;
+  const fullCodecString = options.iosCompatible
+    ? canvas.width >= 1920 ? 'avc1.42e028' : 'avc1.42e01f'
+    : canvas.width >= 1920 ? 'avc1.640028' : 'avc1.64001f';
   const videoSource = new CanvasSource(canvas, {
     codec: 'avc',
     bitrate,
     bitrateMode: 'variable',
     keyFrameInterval: 2,
-    fullCodecString: canvas.width >= 1920 ? 'avc1.640028' : 'avc1.64001f',
+    fullCodecString,
     hardwareAcceleration: 'no-preference',
   });
   output.addVideoTrack(videoSource);
@@ -480,8 +491,13 @@ export async function exportChartVideo(
     throw new Error('MP4動画データを取得できませんでした。');
   }
   const fileNumber = String(options.fileNumber ?? 1).padStart(2, '0');
-  downloadBlob(
-    new Blob([target.buffer], { type: 'video/mp4' }),
-    `mooview-chart-${fileNumber}-${createTimestamp()}.mp4`,
-  );
+  const filename = `mooview-chart-${fileNumber}-${createTimestamp()}.mp4`;
+  const file = new File([target.buffer], filename, {
+    type: 'video/mp4',
+    lastModified: Date.now(),
+  });
+  if (options.download !== false) {
+    downloadBlob(file, filename);
+  }
+  return file;
 }

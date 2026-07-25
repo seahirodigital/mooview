@@ -2264,6 +2264,8 @@ function formatCandleLookupError(symbol: string): string {
 
 export default function App() {
   // --- STATE ---
+  const isDiscordAutomationPage = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('discordAutomation');
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
@@ -2292,6 +2294,7 @@ export default function App() {
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
+  const [discordAutomationTargetPanelIds, setDiscordAutomationTargetPanelIds] = useState<string[]>([]);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [videoExportMenu, setVideoExportMenu] = useState<{ x: number; y: number } | null>(null);
   const [imageExportMenu, setImageExportMenu] = useState<{ x: number; y: number } | null>(null);
@@ -3706,6 +3709,9 @@ export default function App() {
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    // Discord自動通知用のヘッドレス画面では、実行ジョブが対象パネルを指定するまで
+    // 全画面のKLine取得を開始しない。選択チャートを60秒待機内に確定させるため。
+    if (isDiscordAutomationPage && discordAutomationTargetPanelIds.length === 0) return;
     const fetchGeneration = candleFetchGenerationRef.current + 1;
     candleFetchGenerationRef.current = fetchGeneration;
     if (candleFetchInFlightRef.current) {
@@ -3764,7 +3770,9 @@ export default function App() {
       const valueChainPriorityOffset = appView === 'charts' ? 10_000 : 0;
 
       const mobilePanelIndex = Math.max(0, Math.min(mobileActivePanelIndex, panels.length - 1));
-      const panelsToFetch = isMobileViewport
+      const panelsToFetch = isDiscordAutomationPage
+        ? panels.filter((panel) => discordAutomationTargetPanelIds.includes(panel.id))
+        : isMobileViewport
         ? appView === 'charts' && panels[mobilePanelIndex]
           ? [panels[mobilePanelIndex]]
           : []
@@ -3778,6 +3786,7 @@ export default function App() {
           const symbolPriority = panelPriorityBase
             + (isMobileViewport && symbolIndex === 0 ? -2_000 : symbolIndex);
           addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriority);
+          if (isDiscordAutomationPage) return;
           const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
           if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
             addCandleRequest(symbol, displayRangeTimeframe, symbolPriority + 1);
@@ -3785,7 +3794,7 @@ export default function App() {
           addCandleRequest(symbol, panel.timeframe, symbolPriority + 2);
         });
       });
-      if (!isMobileViewport || appView !== 'charts') {
+      if (!isDiscordAutomationPage && (!isMobileViewport || appView !== 'charts')) {
         valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
           const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
           addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
@@ -3994,7 +4003,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [activeWatchlistTabId, appView, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, appView, discordAutomationTargetPanelIds, isDiscordAutomationPage, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) {
@@ -7209,8 +7218,9 @@ export default function App() {
     }
   };
 
-  const refreshChartsForDiscordAutomation = () => {
+  const refreshChartsForDiscordAutomation = (targetPanelIds: string[]) => {
     // 画面の更新操作と同じく、ローソク足・ウォッチリスト価格を強制再取得する。
+    setDiscordAutomationTargetPanelIds(Array.from(new Set(targetPanelIds)));
     forceCandleRefreshRef.current = true;
     if (candleFetchInFlightRef.current) {
       candleFetchPendingRef.current = true;
@@ -7261,7 +7271,10 @@ export default function App() {
     setChartExportError(null);
     try {
       // 最新チャートを確定させるため、必ず更新処理を開始してから60秒待機する。
-      refreshChartsForDiscordAutomation();
+      refreshChartsForDiscordAutomation(Array.from(new Set([
+        ...requestedImagePanelIds,
+        ...requestedVideoPanelIds,
+      ])));
       await sleep(60_000);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 

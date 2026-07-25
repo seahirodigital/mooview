@@ -1,9 +1,11 @@
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 
 import {
   isDiscordAutomationDaySelected,
+  type DiscordAutomationArtifact,
   type DiscordAutomationArtifacts,
   type DiscordAutomationJob,
+  type DiscordAutomationPreparation,
   type DiscordAutomationRunRecord,
 } from '../discordAutomation';
 import { notifyDiscordWithAutomationArtifacts } from './discordNotifier';
@@ -15,7 +17,7 @@ import {
 
 const JAPAN_TIME_ZONE = 'Asia/Tokyo';
 const SCHEDULER_INTERVAL_MS = 15_000;
-const AUTOMATION_BROWSER_TIMEOUT_MS = 8 * 60_000;
+const AUTOMATION_BROWSER_TIMEOUT_MS = 12 * 60_000;
 
 interface JapanClock {
   scheduledFor: string;
@@ -101,6 +103,69 @@ function validateArtifacts(value: unknown): DiscordAutomationArtifacts {
   return { text, model, videos, images };
 }
 
+function validatePreparation(value: unknown): DiscordAutomationPreparation {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Discord自動通知のチャート準備結果を取得できませんでした。');
+  }
+  const source = value as Partial<DiscordAutomationPreparation>;
+  const validPanelIds = (panelIds: unknown): string[] => (
+    Array.isArray(panelIds)
+      ? panelIds.filter((panelId): panelId is string => (
+        typeof panelId === 'string' && panelId.length > 0 && panelId.length <= 160
+      ))
+      : []
+  );
+  const prompt = typeof source.prompt === 'string' ? source.prompt.trim() : '';
+  const model = typeof source.model === 'string' ? source.model.trim() : '';
+  const imagePanelIds = validPanelIds(source.imagePanelIds);
+  const videoPanelIds = validPanelIds(source.videoPanelIds);
+  if (!prompt || !model || imagePanelIds.length === 0 || videoPanelIds.length === 0) {
+    throw new Error('Discord自動通知のチャート準備結果が不足しています。');
+  }
+  return {
+    prompt,
+    model: model as DiscordAutomationPreparation['model'],
+    imagePanelIds,
+    videoPanelIds,
+    videoDurationSeconds: Number(source.videoDurationSeconds),
+    videoFrameRate: source.videoFrameRate === 60 ? 60 : 30,
+    videoResolutionId: source.videoResolutionId === 'landscape-720'
+      || source.videoResolutionId === 'landscape-1080'
+      ? source.videoResolutionId
+      : 'square-720',
+  };
+}
+
+async function captureRenderedChartScreenshots(
+  page: Page,
+  panelIds: string[],
+): Promise<DiscordAutomationArtifact[]> {
+  const allPanels = page.locator('[data-chart-export-panel-id]');
+  const panelsById = new Map<string, ReturnType<typeof allPanels.nth>>();
+  for (let index = 0; index < await allPanels.count(); index += 1) {
+    const panel = allPanels.nth(index);
+    const panelId = await panel.getAttribute('data-chart-export-panel-id');
+    if (panelId) panelsById.set(panelId, panel);
+  }
+
+  const timestamp = Date.now();
+  const artifacts: DiscordAutomationArtifact[] = [];
+  for (let index = 0; index < panelIds.length; index += 1) {
+    const panelId = panelIds[index];
+    const panel = panelsById.get(panelId);
+    if (!panel) {
+      throw new Error('選択したDiscord添付チャートが見つかりません。');
+    }
+    const screenshot = await panel.screenshot({ type: 'png', animations: 'disabled' });
+    artifacts.push({
+      name: `mooview-chart-${String(index + 1).padStart(2, '0')}-${timestamp}.png`,
+      mimeType: 'image/png',
+      base64: screenshot.toString('base64'),
+    });
+  }
+  return artifacts;
+}
+
 async function createArtifactsInBrowser(
   port: number,
   job: DiscordAutomationJob,
@@ -120,15 +185,27 @@ async function createArtifactsInBrowser(
       timeout: AUTOMATION_BROWSER_TIMEOUT_MS,
     });
     await page.waitForFunction(
-      () => Boolean(window.mooviewDiscordAutomation?.run),
+      () => Boolean(
+        window.mooviewDiscordAutomation?.prepare
+        && window.mooviewDiscordAutomation?.complete,
+      ),
       undefined,
       { timeout: AUTOMATION_BROWSER_TIMEOUT_MS },
     );
-    const artifacts = await page.evaluate(async (scheduledJob) => {
+    const preparationResult = await page.evaluate(async (scheduledJob) => {
       const bridge = window.mooviewDiscordAutomation;
       if (!bridge) throw new Error('Discord自動通知のブラウザ実行機能を初期化できませんでした。');
-      return bridge.run(scheduledJob);
+      return bridge.prepare(scheduledJob);
     }, job);
+    const preparation = validatePreparation(preparationResult);
+    // SVGを再描画するのではなく、ブラウザ上の対象チャート要素を直接PNG化する。
+    // Geminiにもこの同一PNGを渡すため、本文と添付チャートの内容が一致する。
+    const screenshots = await captureRenderedChartScreenshots(page, preparation.imagePanelIds);
+    const artifacts = await page.evaluate(async ({ preparedRun, capturedImages }) => {
+      const bridge = window.mooviewDiscordAutomation;
+      if (!bridge) throw new Error('Discord自動通知のブラウザ実行機能を初期化できませんでした。');
+      return bridge.complete(preparedRun, capturedImages);
+    }, { preparedRun: preparation, capturedImages: screenshots });
     return validateArtifacts(artifacts);
   } finally {
     await browser.close();

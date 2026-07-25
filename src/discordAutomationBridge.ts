@@ -1,10 +1,16 @@
 import type {
   DiscordAutomationArtifacts,
+  DiscordAutomationArtifact,
   DiscordAutomationJob,
+  DiscordAutomationPreparation,
 } from '../discordAutomation';
 
 export interface DiscordAutomationBrowserBridge {
-  run: (job: DiscordAutomationJob) => Promise<DiscordAutomationArtifacts>;
+  prepare: (job: DiscordAutomationJob) => Promise<DiscordAutomationPreparation>;
+  complete: (
+    preparation: DiscordAutomationPreparation,
+    screenshots: DiscordAutomationArtifact[],
+  ) => Promise<DiscordAutomationArtifacts>;
 }
 
 declare global {

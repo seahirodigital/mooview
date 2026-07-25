@@ -817,6 +817,17 @@ export function InteractiveCustomChart({
     startIndex,
     changePctOverrides,
   ]);
+  const loadedComparisonSeriesCount = useMemo(
+    () => comparisonSymbols.filter((symbol) => (comparisonSeriesData[symbol] || []).length >= 2).length,
+    [comparisonSeriesData, comparisonSymbols],
+  );
+  const renderedPrimarySeriesCount = renderPrimarySeries && playbackVisibleCandles.length >= 2 ? 1 : 0;
+  const renderedSeriesCount = renderedPrimarySeriesCount + loadedComparisonSeriesCount;
+  const expectedSeriesCount = (renderPrimarySeries ? 1 : 0) + comparisonSymbols.length;
+  // SVGの枠やグリッドだけができた状態を「出力可能」と誤認しないための明示的な完了印。
+  const chartExportReady = playbackVisibleCandles.length >= 2
+    && renderedSeriesCount > 0
+    && loadedComparisonSeriesCount === comparisonSymbols.length;
   const playbackComparisonSeriesData = useMemo<Record<string, ComparisonSeriesPoint[]>>(
     () => Object.fromEntries(
       comparisonSymbols.map((compSym) => {
@@ -1426,6 +1437,9 @@ export function InteractiveCustomChart({
   return (
     <div 
       ref={containerRef}
+      data-chart-export-ready={chartExportReady ? 'true' : 'false'}
+      data-chart-export-series-count={renderedSeriesCount}
+      data-chart-export-expected-series-count={expectedSeriesCount}
       className="flex-1 w-full h-full flex flex-col min-h-0 relative select-none"
       onContextMenu={openChartContextMenu}
     >

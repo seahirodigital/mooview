@@ -81,6 +81,8 @@ import {
   createDefaultDiscordAutomationSettings,
   normalizeDiscordAutomationSettings,
   type DiscordAutomationJob,
+  type DiscordAutomationArtifact,
+  type DiscordAutomationPreparation,
   type DiscordAutomationRunRecord,
   type DiscordAutomationSelection,
   type DiscordAutomationSettings,
@@ -3779,12 +3781,10 @@ export default function App() {
         : panels;
 
       panelsToFetch.forEach((panel, panelIndex) => {
-        // 通常画面は比較銘柄もすべて更新する。一方Discord実行では、比較対象が数十銘柄に
-        // 及ぶパネルでも主系列を先に描画し、更新待機中に添付チャートを確定できるようにする。
-        const chartSymbols = isDiscordAutomationPage
-          ? panel.comparisonOnly
-            ? []
-            : [panel.symbol]
+        // Discord実行でも、通知対象パネルの比較銘柄を含めて取得する。
+        // 主系列だけでは比較チャートが枠・グリッドのみになり、通知画像が実画面と一致しない。
+        const chartSymbols = panel.comparisonOnly
+          ? [...(panel.comparisonSymbols || [])]
           : [panel.symbol, ...(panel.comparisonSymbols || [])];
         const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
         chartSymbols.forEach((symbol, symbolIndex) => {
@@ -7252,7 +7252,9 @@ export default function App() {
     };
   };
 
-  const runDiscordAutomationInBrowser = async (job: DiscordAutomationJob) => {
+  const prepareDiscordAutomationInBrowser = async (
+    job: DiscordAutomationJob,
+  ): Promise<DiscordAutomationPreparation> => {
     if (chartExportStatus || chartAiStatus) {
       throw new Error('別のチャート出力またはAI分析が実行中です。');
     }
@@ -7269,7 +7271,9 @@ export default function App() {
     if (requestedImagePanelIds.length === 0 || requestedVideoPanelIds.length === 0) {
       throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
     }
-    if (!job.prompt.trim()) {
+    const prompt = (job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt).trim();
+    const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
+    if (!prompt) {
       throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
     }
 
@@ -7284,7 +7288,7 @@ export default function App() {
       await sleep(60_000);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 
-      const collectExportablePanelIds = (requestedPanelIds: string[]) => {
+      const collectFullyRenderedPanelIds = (requestedPanelIds: string[]) => {
         const panelsById = new Map(
           Array.from(document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'))
             .map((element) => [element.dataset.chartExportPanelId, element] as const),
@@ -7293,50 +7297,90 @@ export default function App() {
           const panelElement = panelsById.get(panelId);
           const svg = panelElement?.querySelector<SVGSVGElement>('svg[data-chart-export-svg="true"]');
           const header = panelElement?.querySelector<HTMLElement>('[data-chart-export-panel-header="true"]');
-          if (!svg || !header) return false;
+          const chart = panelElement?.querySelector<HTMLElement>('[data-chart-export-ready="true"]');
+          if (!svg || !header || !chart) return false;
           const svgRect = svg.getBoundingClientRect();
           const headerRect = header.getBoundingClientRect();
           return svgRect.width > 0 && svgRect.height > 0 && headerRect.width > 0 && headerRect.height > 0;
         });
       };
-      const waitForExportablePanelIds = async (requestedPanelIds: string[]) => {
-        const deadline = Date.now() + 60_000;
-        let exportablePanelIds = collectExportablePanelIds(requestedPanelIds);
-        while (exportablePanelIds.length === 0 && Date.now() < deadline) {
+      const waitForFullyRenderedPanelIds = async (requestedPanelIds: string[]) => {
+        // 比較銘柄が多いチャートでは、60秒の必須待機後にも取得が続く。
+        // 枠だけの画像を送るより、全選択系列を描画できるまで待つ。
+        const deadline = Date.now() + 5 * 60_000;
+        let renderedPanelIds = collectFullyRenderedPanelIds(requestedPanelIds);
+        while (renderedPanelIds.length < requestedPanelIds.length && Date.now() < deadline) {
           await sleep(1_000);
-          exportablePanelIds = collectExportablePanelIds(requestedPanelIds);
+          renderedPanelIds = collectFullyRenderedPanelIds(requestedPanelIds);
         }
-        return exportablePanelIds;
+        return renderedPanelIds;
       };
-      const imagePanelIds = await waitForExportablePanelIds(requestedImagePanelIds);
-      const videoPanelIds = await waitForExportablePanelIds(requestedVideoPanelIds);
-      if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
-        throw new Error('更新後のチャート描画が完了しませんでした。データ接続を確認してから再実行してください。');
+      const [imagePanelIds, videoPanelIds] = await Promise.all([
+        waitForFullyRenderedPanelIds(requestedImagePanelIds),
+        waitForFullyRenderedPanelIds(requestedVideoPanelIds),
+      ]);
+      if (
+        imagePanelIds.length !== requestedImagePanelIds.length
+        || videoPanelIds.length !== requestedVideoPanelIds.length
+      ) {
+        throw new Error('選択した比較チャートの描画が完了しませんでした。データ接続を確認してから再実行してください。');
       }
-
-      const imageFiles = await exportChartImage(
+      return {
+        prompt,
+        model,
         imagePanelIds,
-        (progress) => setChartAiStatus({ stage: 'capturing', progress }),
-        { download: false },
-      );
-      setChartAiStatus({ stage: 'requesting', progress: 1 });
-      const aiResult = await requestChartAiAnalysis(job.prompt, imageFiles, job.model);
+        videoPanelIds,
+        videoDurationSeconds: job.videoDurationSeconds,
+        videoFrameRate: job.videoFrameRate,
+        videoResolutionId: job.videoResolutionId,
+      };
+    } catch (error) {
+      setChartAiStatus(null);
+      setChartExportStatus(null);
+      setChartExportPlayback(null);
+      throw error;
+    }
+  };
 
+  const completeDiscordAutomationInBrowser = async (
+    preparation: DiscordAutomationPreparation,
+    screenshots: DiscordAutomationArtifact[],
+  ) => {
+    if (screenshots.length !== preparation.imagePanelIds.length) {
+      throw new Error('Discord添付用のチャート画像を取得できませんでした。');
+    }
+    const imageFiles = screenshots.map((artifact) => {
+      const binary = window.atob(artifact.base64);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      return new File([bytes], artifact.name, {
+        type: artifact.mimeType || 'image/png',
+        lastModified: Date.now(),
+      });
+    });
+
+    try {
+      // Playwrightが撮影した、ユーザーがブラウザで見るものと同一のPNGをGeminiへ渡す。
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const aiResult = await requestChartAiAnalysis(
+        preparation.prompt,
+        imageFiles,
+        preparation.model,
+      );
       const resolution = CHART_EXPORT_RESOLUTIONS.find(
-        (candidate) => candidate.id === job.videoResolutionId,
+        (candidate) => candidate.id === preparation.videoResolutionId,
       ) ?? CHART_EXPORT_RESOLUTIONS[0];
       const videoFiles: File[] = [];
       setChartAiStatus(null);
       setChartExportStatus({ kind: 'video', progress: 0 });
-      for (let index = 0; index < videoPanelIds.length; index += 1) {
-        const panelId = videoPanelIds[index];
+      for (let index = 0; index < preparation.videoPanelIds.length; index += 1) {
+        const panelId = preparation.videoPanelIds[index];
         const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
         const videoFile = await exportChartVideo({
           width: resolution.width,
           height: resolution.height,
           panelIds: [panelId],
-          durationSeconds: job.videoDurationSeconds,
-          frameRate: job.videoFrameRate,
+          durationSeconds: preparation.videoDurationSeconds,
+          frameRate: preparation.videoFrameRate,
           fileNumber: panelNumber > 0 ? panelNumber : index + 1,
           download: false,
           beforeFrame: async (progress) => {
@@ -7345,17 +7389,16 @@ export default function App() {
           },
           onProgress: (progress) => setChartExportStatus({
             kind: 'video',
-            progress: (index + progress) / videoPanelIds.length,
+            progress: (index + progress) / preparation.videoPanelIds.length,
           }),
         });
         videoFiles.push(videoFile);
       }
-
       return {
         text: aiResult.text,
         model: aiResult.model,
         videos: await Promise.all(videoFiles.map(fileToDiscordAutomationArtifact)),
-        images: await Promise.all(imageFiles.map(fileToDiscordAutomationArtifact)),
+        images: screenshots,
       };
     } finally {
       setChartAiStatus(null);
@@ -7370,7 +7413,8 @@ export default function App() {
       return;
     }
     window.mooviewDiscordAutomation = {
-      run: runDiscordAutomationInBrowser,
+      prepare: prepareDiscordAutomationInBrowser,
+      complete: completeDiscordAutomationInBrowser,
     };
     return () => {
       delete window.mooviewDiscordAutomation;
@@ -7380,7 +7424,8 @@ export default function App() {
     chartExportStatus,
     panels,
     requestAutoWatchlistQuoteRefresh,
-    runDiscordAutomationInBrowser,
+    completeDiscordAutomationInBrowser,
+    prepareDiscordAutomationInBrowser,
     workspacePersistenceMode,
   ]);
 
@@ -7503,6 +7548,7 @@ export default function App() {
         times: ['12:00'],
         prompt: chartAiPrompt || DEFAULT_CHART_AI_PROMPT,
         model: chartAiModel,
+        useCurrentChartAiSettings: true,
         imageSelection: { mode: 'all', panelIds: [] },
         videoSelection: { mode: 'all', panelIds: [] },
         videoDurationSeconds: 5,
@@ -11025,11 +11071,12 @@ export default function App() {
                           <label className="block text-[10px]">
                             <span className="mb-1 block font-bold text-gray-300">Geminiモデル</span>
                             <select
-                              value={job.model}
+                              value={job.useCurrentChartAiSettings ? chartAiModel : job.model}
                               onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
                                 ...current,
                                 model: normalizeGeminiChartModelId(event.target.value),
                               }))}
+                              disabled={job.useCurrentChartAiSettings}
                               className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none"
                             >
                               {GEMINI_CHART_MODELS.map((model) => (
@@ -11040,33 +11087,56 @@ export default function App() {
                               選択モデルで失敗した場合はGemini 2.5 Flashへ自動切替します。
                             </span>
                           </label>
+                          <button
+                            type="button"
+                            aria-pressed={job.useCurrentChartAiSettings}
+                            onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                              ...current,
+                              useCurrentChartAiSettings: !current.useCurrentChartAiSettings,
+                            }))}
+                            className={`w-full border px-2 py-2 text-left text-[10px] leading-relaxed ${
+                              job.useCurrentChartAiSettings
+                                ? 'border-emerald-700 bg-emerald-950/45 text-emerald-100'
+                                : 'border-[#3a3a3a] bg-[#111] text-gray-400'
+                            }`}
+                          >
+                            <span className="block font-bold">
+                              右クリックAI設定を常に使用: {job.useCurrentChartAiSettings ? 'ON' : 'OFF'}
+                            </span>
+                            <span className="mt-0.5 block text-[9px] opacity-80">
+                              ONでは、通知時に右クリックのプロンプトとGeminiモデルを自動で使用します。
+                            </span>
+                          </button>
                         </div>
 
                         <div className="space-y-3">
                           <label className="block">
                             <span className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-gray-300">
                               Geminiへの指示
-                              <button
-                                type="button"
-                                onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
-                                  ...current,
-                                  prompt: chartAiPrompt,
-                                  model: chartAiModel,
-                                }))}
-                                className="font-normal text-violet-300 hover:text-violet-100"
-                              >
-                                現在のAI設定を反映
-                              </button>
+                              {!job.useCurrentChartAiSettings && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                                    ...current,
+                                    prompt: chartAiPrompt,
+                                    model: chartAiModel,
+                                  }))}
+                                  className="font-normal text-violet-300 hover:text-violet-100"
+                                >
+                                  現在のAI設定を反映
+                                </button>
+                              )}
                             </span>
                             <textarea
-                              value={job.prompt}
+                              value={job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt}
                               onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
                                 ...current,
                                 prompt: event.target.value,
                               }))}
+                              disabled={job.useCurrentChartAiSettings}
                               maxLength={30_000}
                               spellCheck={false}
-                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
+                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600 disabled:cursor-not-allowed disabled:opacity-70"
                             />
                           </label>
                           <div className="grid gap-3 xl:grid-cols-2">

@@ -26,6 +26,9 @@ export interface DiscordAutomationJob {
   times: string[];
   prompt: string;
   model: GeminiChartModelId;
+  // 右クリックのAI設定を、通知実行時に共有ワークスペースから読み取って使う。
+  // false を明示した通知だけ、ここに保存した個別設定を固定で使用する。
+  useCurrentChartAiSettings: boolean;
   imageSelection: DiscordAutomationSelection;
   videoSelection: DiscordAutomationSelection;
   videoDurationSeconds: number;
@@ -64,6 +67,16 @@ export interface DiscordAutomationArtifacts {
   images: DiscordAutomationArtifact[];
 }
 
+export interface DiscordAutomationPreparation {
+  prompt: string;
+  model: GeminiChartModelId;
+  imagePanelIds: string[];
+  videoPanelIds: string[];
+  videoDurationSeconds: number;
+  videoFrameRate: DiscordAutomationVideoFrameRate;
+  videoResolutionId: DiscordAutomationVideoResolution;
+}
+
 export const DEFAULT_DISCORD_AUTOMATION_PROMPT = `#日本株 フロー分析
 
 添付した最新チャートを読み取り、強いセクター・弱いセクター・注目個別銘柄を簡潔に分析してください。本文だけを出力し、前置きは不要です。`;
@@ -98,6 +111,7 @@ function createDefaultJob(
     times,
     prompt,
     model: DEFAULT_GEMINI_CHART_MODEL,
+    useCurrentChartAiSettings: true,
     imageSelection: cloneSelection(),
     videoSelection: cloneSelection(),
     videoDurationSeconds: 5,
@@ -194,6 +208,7 @@ function normalizeJob(value: unknown, fallback: DiscordAutomationJob, index: num
     times,
     prompt,
     model,
+    useCurrentChartAiSettings: source.useCurrentChartAiSettings !== false,
     imageSelection: normalizeSelection(source.imageSelection),
     videoSelection: normalizeSelection(source.videoSelection),
     videoDurationSeconds: Number.isFinite(duration)

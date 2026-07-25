@@ -429,6 +429,9 @@ export async function exportChartVideo(
   // PCは従来設定を維持し、iOSだけ写真アプリとの互換性を優先して30fpsを上限にする。
   const frameRate = options.iosCompatible ? Math.min(requestedFrameRate, 30) : requestedFrameRate;
   const animationDurationSeconds = clamp(options.durationSeconds, 1, 30);
+  // Discordは動画の先頭フレームをサムネイルに使う。比較線が見えない開始直後を
+  // 避け、最初からチャートが十分に描画された状態で動画を始める。
+  const initialPlaybackProgress = 0.15;
   const animationFrameCount = Math.max(2, Math.round(animationDurationSeconds * frameRate));
   const finalHoldFrameCount = Math.round(CHART_EXPORT_FINAL_HOLD_SECONDS * frameRate);
   const totalFrameCount = animationFrameCount + finalHoldFrameCount;
@@ -471,9 +474,11 @@ export async function exportChartVideo(
     for (let frameIndex = 0; frameIndex < totalFrameCount; frameIndex += 1) {
       throwIfAborted();
       if (frameIndex < animationFrameCount) {
-        const progress = animationFrameCount <= 1
+        const rawProgress = animationFrameCount <= 1
           ? 1
           : frameIndex / (animationFrameCount - 1);
+        const progress = initialPlaybackProgress
+          + (1 - initialPlaybackProgress) * rawProgress;
         await options.beforeFrame(progress);
         throwIfAborted();
         await renderChartComposite(canvas, options, prepared);

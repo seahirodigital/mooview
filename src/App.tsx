@@ -21,7 +21,13 @@ import {
   RotateCcw,
   Upload,
   Download,
-  ArrowUpDown
+  ArrowUpDown,
+  Camera,
+  Video,
+  Square,
+  Check,
+  Copy,
+  LoaderCircle
 } from 'lucide-react';
 
 import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle, ComparisonLabelLayoutMode } from './types';
@@ -43,6 +49,37 @@ import {
   BasketQuoteInput,
 } from './symbolExpression';
 import { getSeriesColor } from './chartSeriesColors';
+import {
+  CHART_EXPORT_FINAL_HOLD_SECONDS,
+  CHART_EXPORT_RESOLUTIONS,
+  ChartExportSelection,
+  ChartImageExportSettings,
+  ChartVideoExportSettings,
+  DEFAULT_CHART_IMAGE_EXPORT_SETTINGS,
+  DEFAULT_CHART_VIDEO_EXPORT_SETTINGS,
+  downloadChartVideoFile,
+  exportChartImage,
+  exportChartVideo,
+  normalizeChartImageExportSettings,
+  normalizeChartVideoExportSettings,
+  resolveChartExportPanelIds,
+} from './chartExport';
+import {
+  ChartAiAnalysisResult,
+  DEFAULT_CHART_AI_PROMPT,
+  requestChartAiAnalysis,
+} from './chartAi';
+import {
+  DEFAULT_GEMINI_CHART_MODEL,
+  GEMINI_CHART_MODELS,
+  GeminiChartModelId,
+  normalizeGeminiChartModelId,
+} from '../geminiModels';
+import type {
+  SharedWorkspaceEnvelope,
+  SharedWorkspaceProfile,
+  SharedWorkspaceSettings,
+} from './workspaceSettings';
 
 const DEFAULT_PANEL_HEIGHT = 840;
 const DEFAULT_SIDEBAR_WIDTH = 420;
@@ -54,6 +91,7 @@ const WATCHLIST_TARGET_SEPARATOR = '::section::';
 const INDICATOR_LINE_STYLES: IndicatorLineStyle[] = ['solid', 'dashed', 'dotted', 'dashdot'];
 
 type SidebarView = 'watchlist' | 'indicators' | 'settings';
+type MobileSheetView = SidebarView | 'image-export' | 'video-export';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
 type WatchlistImportMode = 'new-tab' | 'active-tab';
@@ -62,6 +100,12 @@ type WatchlistQuoteFetchMode = 'manual' | 'auto';
 type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
 type AppView = 'charts' | 'value-chain' | 'macro-flow';
+type WorkspacePersistenceMode = 'checking' | 'local' | 'shared';
+type DisplayTickerStat = TickerInfo & {
+  currentPrice: number | null;
+  computedChange: number | null;
+  marketCap?: number;
+};
 
 const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
@@ -74,12 +118,14 @@ const CANDLES_CACHE_INDEXED_DB_META_KEY = 'meta';
 const QUOTE_CACHE_INDEXED_DB_CACHE_KEY = 'quotes';
 const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
-const KLINE_FETCH_BATCH_LIMIT = 60;
+const KLINE_FETCH_BATCH_LIMIT = 20;
 const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
-const WATCHLIST_QUOTE_BATCH_LIMIT = 200;
-const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 10_000;
+const WATCHLIST_QUOTE_BATCH_LIMIT = 80;
+const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_AUTO_QUOTE_REFRESH_INTERVAL_MS = 30_000;
+const JAPAN_US_FETCH_PAUSE_START_MINUTES = 9 * 60;
+const JAPAN_US_FETCH_PAUSE_END_MINUTES = 22 * 60 + 30;
 const HEADER_TICKER_SYMBOLS_STORAGE_KEY = 'mooview_header_ticker_symbols_v1';
 const VALUE_CHAIN_STORAGE_KEY = 'mooview_value_chain_map_v1';
 const CHAIN_HISTORY_STORAGE_KEY = 'mooview_value_chain_history_v1';
@@ -90,8 +136,61 @@ const WATCHLIST_NAME_OVERRIDES_STORAGE_KEY = 'mooview_watchlist_name_overrides_v
 const COMPARISON_LABEL_FONT_SIZE_STORAGE_KEY = 'mooview_comparison_label_font_size_v1';
 const COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY = 'mooview_comparison_label_layout_mode_v1';
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
+const CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_video_export_settings_v1';
+const CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_image_export_settings_v1';
+const CHART_AI_PROMPT_STORAGE_KEY = 'mooview_chart_ai_prompt_v1';
+const CHART_AI_MODEL_STORAGE_KEY = 'mooview_chart_ai_model_v1';
+const CHART_AI_SHARED_SETTING_KEYS = [
+  CHART_AI_PROMPT_STORAGE_KEY,
+  CHART_AI_MODEL_STORAGE_KEY,
+] as const;
+const SHARED_WORKSPACE_SETTINGS_ENDPOINT = '/api/workspace-settings';
+const DEFAULT_OCI_SHARED_WORKSPACE_URL = 'https://mooview-oci.taild87712.ts.net';
+const SHARED_WORKSPACE_SAVE_DELAY_MS = 800;
+const SHARED_BROWSER_SETTING_KEYS = [
+  'mooview_active_view',
+  'mooview_header_ticker_symbols_v1',
+  'mooview_value_chain_map_v1',
+  'mooview_value_chain_history_v1',
+  'mooview_value_chain_active_history_id',
+  'mooview_value_chain_chart_state_v1',
+  'mooview_value_chain_chart_panel_width',
+  'mooview_value_chain_stock_font_size',
+  'mooview_watchlist_name_overrides_v1',
+  'mooview_comparison_label_font_size_v1',
+  'mooview_comparison_label_layout_mode_v1',
+  'mooview_watchlist_quote_fetch_modes_v1',
+  'mooview_chart_video_export_settings_v1',
+  'mooview_chart_image_export_settings_v1',
+  ...CHART_AI_SHARED_SETTING_KEYS,
+  'moomoo_active',
+  'tv_dashboard_tickers',
+  'tv_dashboard_watchlist_tabs',
+  'tv_dashboard_active_watchlist_tab',
+  'tv_dashboard_panels',
+  'tv_dashboard_indicators',
+  'tv_dashboard_focused_symbol',
+  'tv_dashboard_panel_engines',
+  'tv_dashboard_layout_style',
+  'tv_dashboard_grid_rows',
+  'tv_dashboard_grid_cols',
+  'tv_dashboard_sidebar_open',
+  'tv_dashboard_sidebar_view',
+  'tv_dashboard_sidebar_width',
+  'tv_dashboard_column_widths',
+  'tv_dashboard_panel_heights',
+  'tv_dashboard_watchlist_column_widths',
+  'tv_dashboard_watchlist_show_name_column',
+  'tv_dashboard_watchlist_sort',
+] as const;
 const DAY_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '5m';
 const WEEK_RANGE_OVERVIEW_TIMEFRAME: Timeframe = '30m';
+const CHART_TIMEFRAME_OPTIONS: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
+const JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS: Partial<Record<Timeframe, string>> = {
+  '3m': '2m',
+  '10m': '15m',
+  '4h': '60m',
+};
 const DEFAULT_DISPLAY_RANGE: Exclude<ChartDisplayRange, null> = 'd';
 const DAY_RANGE_ZOOM_FACTOR = 6.5;
 const WEEK_RANGE_ZOOM_FACTOR = 6.5;
@@ -262,6 +361,22 @@ function readStoredValue<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function toggleChartExportPanel(
+  selection: ChartExportSelection,
+  panelId: string,
+  availablePanelIds: string[],
+): ChartExportSelection {
+  const selectedPanelIds = resolveChartExportPanelIds(selection, availablePanelIds);
+  const panelIds = selectedPanelIds.includes(panelId)
+    ? selectedPanelIds.filter((currentPanelId) => currentPanelId !== panelId)
+    : [...selectedPanelIds, panelId];
+  return {
+    ...selection,
+    mode: 'custom',
+    panelIds: availablePanelIds.filter((currentPanelId) => panelIds.includes(currentPanelId)),
+  };
 }
 
 function normalizeWatchlistQuoteFetchModes(raw: unknown): Record<string, WatchlistQuoteFetchMode> {
@@ -673,8 +788,104 @@ function clampStoredNumber(value: unknown, fallback: number, min: number, max: n
     : fallback;
 }
 
+function normalizeNumberRecord(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([key, value]) => Boolean(key) && Number.isFinite(Number(value)))
+      .map(([key, value]) => [key, Number(value)]),
+  );
+}
+
+function normalizeBooleanRecord(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([key, value]) => Boolean(key) && typeof value === 'boolean'),
+  ) as Record<string, boolean>;
+}
+
 function normalizeComparisonLabelLayoutMode(value: unknown): ComparisonLabelLayoutMode {
   return value === 'rank' || value === 'stack' ? value : 'changePct';
+}
+
+function isSharedWorkspaceEnvelope(value: unknown): value is SharedWorkspaceEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const source = value as Partial<SharedWorkspaceEnvelope>;
+  return typeof source.enabled === 'boolean'
+    && (source.profile === 'desktop' || source.profile === 'mobile')
+    && typeof source.revision === 'number'
+    && (source.updatedAt === null || typeof source.updatedAt === 'string')
+    && (source.settings === null || typeof source.settings === 'object');
+}
+
+async function readWorkspaceEnvelope(response: Response): Promise<SharedWorkspaceEnvelope> {
+  const payload = await response.json() as unknown;
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && 'error' in payload
+      ? String((payload as { error?: unknown }).error)
+      : `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  if (!isSharedWorkspaceEnvelope(payload)) {
+    throw new Error('共有設定APIの応答形式が正しくありません。');
+  }
+  return payload;
+}
+
+function detectSharedWorkspaceProfile(): SharedWorkspaceProfile {
+  // チャート・ウォッチリストは端末種別で分離せず、全端末で同じクラウド設定を使用する。
+  return 'desktop';
+}
+
+function isAppleMobileDevice(): boolean {
+  return /iPad|iPhone|iPod/i.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function getSharedWorkspaceEndpoint(
+  profile: SharedWorkspaceProfile,
+  baseUrl = '',
+): string {
+  const endpoint = `${SHARED_WORKSPACE_SETTINGS_ENDPOINT}?profile=${profile}`;
+  return baseUrl ? `${baseUrl.replace(/\/+$/, '')}${endpoint}` : endpoint;
+}
+
+function readSharedBrowserSettings(): Record<string, string> {
+  return Object.fromEntries(
+    SHARED_BROWSER_SETTING_KEYS.flatMap((key) => {
+      const value = localStorage.getItem(key);
+      return value === null ? [] : [[key, value] as const];
+    }),
+  );
+}
+
+function areStringRecordsEqual(
+  first: Record<string, string>,
+  second: Record<string, string>,
+): boolean {
+  const firstKeys = Object.keys(first);
+  const secondKeys = Object.keys(second);
+  return firstKeys.length === secondKeys.length
+    && firstKeys.every((key) => first[key] === second[key]);
+}
+
+function applySharedBrowserSettings(settings: Record<string, string>): boolean {
+  let changed = false;
+  SHARED_BROWSER_SETTING_KEYS.forEach((key) => {
+    const nextValue = settings[key];
+    const currentValue = localStorage.getItem(key);
+    if (typeof nextValue === 'string') {
+      if (currentValue !== nextValue) {
+        localStorage.setItem(key, nextValue);
+        changed = true;
+      }
+    } else if (currentValue !== null) {
+      localStorage.removeItem(key);
+      changed = true;
+    }
+  });
+  return changed;
 }
 
 function normalizeWatchlistColumnWidths(raw: unknown): WatchlistColumnWidths {
@@ -957,6 +1168,92 @@ function getQuoteOperandSymbolsForWatchlistTabs(tabs: WatchlistTab[]): string[] 
   );
 }
 
+function getJapanMinutesOfDay(date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
+  return (hour % 24) * 60 + minute;
+}
+
+function shouldPauseUsFetchForJapanSession(date = new Date()): boolean {
+  const minutes = getJapanMinutesOfDay(date);
+  return minutes >= JAPAN_US_FETCH_PAUSE_START_MINUTES
+    && minutes < JAPAN_US_FETCH_PAUSE_END_MINUTES;
+}
+
+function isUsMarketSymbol(symbol: string): boolean {
+  const normalized = normalizeStoredSymbolValue(symbol);
+  return normalized.startsWith('US.');
+}
+
+function isJapaneseMarketSymbol(symbol: string): boolean {
+  return normalizeStoredSymbolValue(symbol).startsWith('JP.');
+}
+
+function isJapaneseMarketSymbolInput(symbol: string): boolean {
+  return getStoredSymbolOperands(symbol).some(isJapaneseMarketSymbol);
+}
+
+function formatTimeframeLabel(timeframe: Timeframe): string {
+  if (timeframe === '1mo') return '1M';
+  if (timeframe === '1d') return 'day';
+  if (timeframe === '1w') return 'Week';
+  return timeframe;
+}
+
+function formatChartTimeframeLabel(timeframe: Timeframe, usesJapanYahooFallback: boolean): string {
+  return usesJapanYahooFallback && JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    ? JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    : formatTimeframeLabel(timeframe);
+}
+
+function getChartTimeframeButtonTitle(
+  timeframe: Timeframe,
+  usesJapanYahooFallback: boolean,
+  displayRangeLocked: boolean,
+): string | undefined {
+  if (displayRangeLocked) return 'D/W表示中は時間足を固定しています';
+  const effectiveLabel = JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe];
+  if (!usesJapanYahooFallback || !effectiveLabel) return undefined;
+  return `JP銘柄はYahooの実効足種で取得します: ${formatTimeframeLabel(timeframe)} → ${effectiveLabel}`;
+}
+
+function getMarketFetchRank(symbol: string): number {
+  if (isJapaneseMarketSymbol(symbol)) return 0;
+  if (isUsMarketSymbol(symbol)) return 2;
+  return 1;
+}
+
+function orderMarketFetchSymbols(symbols: string[]): string[] {
+  const pauseUsFetch = shouldPauseUsFetchForJapanSession();
+  const uniqueSymbols = Array.from(new Set(symbols.map(normalizeStoredSymbolValue).filter(Boolean)));
+  return uniqueSymbols
+    .filter((symbol) => !(pauseUsFetch && isUsMarketSymbol(symbol)))
+    .sort((first, second) => {
+      const firstRank = getMarketFetchRank(first);
+      const secondRank = getMarketFetchRank(second);
+      return firstRank - secondRank || first.localeCompare(second);
+    });
+}
+
+function isPriorityJapaneseWatchlistTab(tab: WatchlistTab | null | undefined): boolean {
+  const name = (tab?.name || '').toUpperCase();
+  return name.includes('JPセクター') || name.includes('TPX') || name.includes('TOPIX');
+}
+
+function orderWatchlistTabsForQuoteFetch(tabs: WatchlistTab[], activeTabId: string): WatchlistTab[] {
+  return [...tabs].sort((first, second) => {
+    const firstRank = isPriorityJapaneseWatchlistTab(first) ? 0 : first.id === activeTabId ? 1 : 2;
+    const secondRank = isPriorityJapaneseWatchlistTab(second) ? 0 : second.id === activeTabId ? 1 : 2;
+    return firstRank - secondRank;
+  });
+}
+
 function getAutoWatchlistQuoteRefreshSignature(
   tabs: WatchlistTab[],
   modes: Record<string, WatchlistQuoteFetchMode>,
@@ -964,7 +1261,9 @@ function getAutoWatchlistQuoteRefreshSignature(
   return tabs
     .flatMap((tab) => {
       if (getWatchlistQuoteFetchMode(modes, tab.id) !== 'auto') return [];
-      const symbols = getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab));
+      const symbols = orderMarketFetchSymbols(
+        getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab)),
+      );
       return symbols.length > 0 ? [`${tab.id}:${symbols.join(',')}`] : [];
     })
     .join('|');
@@ -1180,6 +1479,36 @@ function filterCandlesForDisplayRange(
   }
 
   return candles;
+}
+
+function canUseQuoteFallbackCandles(symbol: string): boolean {
+  const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+  return Boolean(normalizedSymbol)
+    && !normalizedSymbol.startsWith('BASKET:')
+    && !normalizeSymbolExpressionForStorage(normalizedSymbol);
+}
+
+function selectLongestCandleSeriesSymbol(
+  symbols: string[],
+  candlesBySymbol: Record<string, Candle[]>,
+): string {
+  return symbols.reduce((bestSymbol, symbol) => {
+    const bestLength = bestSymbol ? candlesBySymbol[bestSymbol]?.length ?? 0 : 0;
+    const symbolLength = candlesBySymbol[symbol]?.length ?? 0;
+    return symbolLength > bestLength ? symbol : bestSymbol;
+  }, '');
+}
+
+function isIntradayTimeframe(timeframe: Timeframe): boolean {
+  return timeframe !== '1d' && timeframe !== '1w' && timeframe !== '1mo';
+}
+
+function hasUsableChartCandles(candles: Candle[], timeframe: Timeframe): boolean {
+  return candles.length >= (isIntradayTimeframe(timeframe) ? 3 : 1);
+}
+
+function getUsableChartCandles(candles: Candle[], timeframe: Timeframe): Candle[] {
+  return hasUsableChartCandles(candles, timeframe) ? candles : [];
 }
 
 function splitTickerInputList(rawInput: string): string[] {
@@ -1926,6 +2255,7 @@ export default function App() {
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
   const candleFetchPendingRef = useRef(false);
+  const candleFetchGenerationRef = useRef(0);
   const candleRetryTimerRef = useRef<number | null>(null);
   const forceCandleRefreshRef = useRef(false);
   const initialVisibleChartRefreshRef = useRef(true);
@@ -1941,10 +2271,63 @@ export default function App() {
   const candlesCacheIndexedDbHydratedRef = useRef(false);
   const quoteCacheIndexedDbHydratedRef = useRef(false);
   const watchlistSyncSignatureRef = useRef<string | null>(null);
+  const sharedWorkspaceHydratedRef = useRef(false);
+  const sharedWorkspaceRevisionRef = useRef(0);
+  const sharedWorkspaceSkipNextSaveRef = useRef(false);
+  const sharedWorkspaceSaveInFlightRef = useRef(false);
+  const sharedWorkspaceAutoMigrationAttemptedRef = useRef(false);
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [videoExportMenu, setVideoExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const [imageExportMenu, setImageExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const [chartAiPromptMenu, setChartAiPromptMenu] = useState<{ x: number; y: number } | null>(null);
+  const [chartVideoExportSettings, setChartVideoExportSettings] = useState<ChartVideoExportSettings>(
+    () => normalizeChartVideoExportSettings(
+      readStoredValue(CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_VIDEO_EXPORT_SETTINGS),
+    ),
+  );
+  const [chartImageExportSettings, setChartImageExportSettings] = useState<ChartImageExportSettings>(
+    () => normalizeChartImageExportSettings(
+      readStoredValue(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_IMAGE_EXPORT_SETTINGS),
+    ),
+  );
+  const [chartAiPrompt, setChartAiPrompt] = useState<string>(
+    () => readStoredValue(CHART_AI_PROMPT_STORAGE_KEY, DEFAULT_CHART_AI_PROMPT),
+  );
+  const [chartAiModel, setChartAiModel] = useState<GeminiChartModelId>(
+    () => normalizeGeminiChartModelId(
+      readStoredValue(CHART_AI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_CHART_MODEL),
+    ),
+  );
+  const [chartAiStatus, setChartAiStatus] = useState<{
+    stage: 'capturing' | 'requesting';
+    progress: number;
+  } | null>(null);
+  const [chartAiResult, setChartAiResult] = useState<ChartAiAnalysisResult | null>(null);
+  const [chartAiCopied, setChartAiCopied] = useState(false);
+  const [chartExportStatus, setChartExportStatus] = useState<{
+    kind: 'video' | 'image';
+    progress: number;
+  } | null>(null);
+  const chartVideoExportAbortControllerRef = useRef<AbortController | null>(null);
+  const [chartExportError, setChartExportError] = useState<string | null>(null);
+  const [pendingIosVideoFiles, setPendingIosVideoFiles] = useState<File[]>([]);
+  const [iosVideoShareInFlight, setIosVideoShareInFlight] = useState(false);
+  const [chartExportPlayback, setChartExportPlayback] = useState<{
+    panelIds: string[];
+    progress: number;
+  } | null>(null);
+  const [workspacePersistenceMode, setWorkspacePersistenceMode] =
+    useState<WorkspacePersistenceMode>('checking');
+  const sharedWorkspaceProfile = useMemo(detectSharedWorkspaceProfile, []);
+  const [sharedBrowserSettings, setSharedBrowserSettings] =
+    useState<Record<string, string>>(() => readSharedBrowserSettings());
+  const [sharedWorkspaceUpdatedAt, setSharedWorkspaceUpdatedAt] = useState<string | null>(null);
+  const [sharedWorkspaceError, setSharedWorkspaceError] = useState<string | null>(null);
+  const [workspaceMigrationMessage, setWorkspaceMigrationMessage] = useState<string | null>(null);
+  const [workspaceSeededFromLocal, setWorkspaceSeededFromLocal] = useState(false);
   const candleFetchTimestampsRef = useRef<Record<string, number>>(
     normalizeTimestampMap(readStoredValue<unknown>(CANDLES_CACHE_META_STORAGE_KEY, {}))
   );
@@ -2251,6 +2634,12 @@ export default function App() {
       860,
     )
   );
+  const [isMobileViewport, setIsMobileViewport] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+  ));
+  const [mobileSheetView, setMobileSheetView] = useState<MobileSheetView | null>(null);
+  const [mobileActivePanelIndex, setMobileActivePanelIndex] = useState(0);
+  const mobileChartSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Active panel ID currently displaying comparison symbol overlay selector
   const [activeComparisonPopoverPanelId, setActiveComparisonPopoverPanelId] = useState<string | null>(null);
@@ -2262,6 +2651,215 @@ export default function App() {
   const [panelHeights, setPanelHeights] = useState<Record<string, number>>(() =>
     readStoredValue('tv_dashboard_panel_heights', {})
   );
+
+  const sharedWorkspaceSettings = useMemo<SharedWorkspaceSettings>(() => ({
+    schemaVersion: 1,
+    seededFromLocal: workspaceSeededFromLocal,
+    panels,
+    tickers: compactTickersForStorage(tickers),
+    watchlistTabs,
+    activeWatchlistTabId,
+    watchlistQuoteFetchModes,
+    watchlistNameOverrides,
+    indicatorDatabase,
+    focusedSymbolIndex,
+    panelEngineToggle,
+    layoutStyle,
+    gridRows,
+    gridCols,
+    colWeights,
+    panelHeights,
+    comparisonLabelFontSize,
+    comparisonLabelLayoutMode,
+    browserSettings: sharedBrowserSettings,
+  }), [
+    activeWatchlistTabId,
+    colWeights,
+    comparisonLabelFontSize,
+    comparisonLabelLayoutMode,
+    focusedSymbolIndex,
+    gridCols,
+    gridRows,
+    indicatorDatabase,
+    layoutStyle,
+    panelEngineToggle,
+    panelHeights,
+    panels,
+    sharedBrowserSettings,
+    tickers,
+    watchlistNameOverrides,
+    watchlistQuoteFetchModes,
+    watchlistTabs,
+    workspaceSeededFromLocal,
+  ]);
+
+  const applySharedWorkspaceSettings = (settings: SharedWorkspaceSettings): boolean => {
+    const normalizedTickers = compactTickersForStorage(
+      Array.isArray(settings.tickers)
+        ? settings.tickers
+          .map(normalizeTickerInfo)
+          .filter((ticker): ticker is TickerInfo => Boolean(ticker))
+        : [],
+    );
+    const effectiveTickers = normalizedTickers.length > 0 ? normalizedTickers : DEFAULT_TICKERS;
+    const normalizedPanels = Array.isArray(settings.panels)
+      ? settings.panels.slice(0, 12).map(normalizePanel)
+      : [];
+    if (normalizedPanels.length === 0) {
+      throw new Error('共有設定に有効なチャートがありません。');
+    }
+    const normalizedWatchlistTabs = normalizeWatchlistTabs(settings.watchlistTabs, effectiveTickers);
+    const normalizedIndicatorDatabase = Object.fromEntries(
+      Object.entries(
+        settings.indicatorDatabase && typeof settings.indicatorDatabase === 'object'
+          ? settings.indicatorDatabase
+          : {},
+      ).map(([symbol, indicatorSettings]) => [
+        symbol.toUpperCase(),
+        normalizeIndicatorSettings(symbol, indicatorSettings),
+      ]),
+    );
+    const cloudBrowserSettings = Object.fromEntries(
+      Object.entries(
+        settings.browserSettings && typeof settings.browserSettings === 'object'
+          ? settings.browserSettings
+          : {},
+      ).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+    const missingChartAiBrowserSettings = Object.fromEntries(
+      CHART_AI_SHARED_SETTING_KEYS.flatMap((key) => {
+        if (typeof cloudBrowserSettings[key] === 'string') return [];
+        const localValue = localStorage.getItem(key);
+        return localValue === null ? [] : [[key, localValue] as const];
+      }),
+    );
+    const shouldSeedChartAiBrowserSettings =
+      Object.keys(missingChartAiBrowserSettings).length > 0;
+    const normalizedBrowserSettings = {
+      ...missingChartAiBrowserSettings,
+      ...cloudBrowserSettings,
+    };
+    const browserSettingsChanged = applySharedBrowserSettings(normalizedBrowserSettings);
+
+    // AI設定がクラウド未登録なら、ローカル値を削除せず次の保存でOCIへ初期登録する。
+    sharedWorkspaceSkipNextSaveRef.current = !shouldSeedChartAiBrowserSettings;
+    setTickers(effectiveTickers);
+    setPanels(normalizedPanels);
+    setWatchlistTabs(normalizedWatchlistTabs);
+    setActiveWatchlistTabId(
+      normalizedWatchlistTabs.some((tab) => tab.id === settings.activeWatchlistTabId)
+        ? settings.activeWatchlistTabId
+        : normalizedWatchlistTabs[0]?.id ?? DEFAULT_WATCHLIST_TAB_ID,
+    );
+    setWatchlistQuoteFetchModes(normalizeWatchlistQuoteFetchModes(settings.watchlistQuoteFetchModes));
+    setWatchlistNameOverrides(normalizeWatchlistNameOverrides(settings.watchlistNameOverrides));
+    setIndicatorDatabase(normalizedIndicatorDatabase);
+    setFocusedSymbolIndex(
+      typeof settings.focusedSymbolIndex === 'string' && settings.focusedSymbolIndex
+        ? settings.focusedSymbolIndex
+        : normalizedPanels[0]?.symbol || 'VOO',
+    );
+    setPanelEngineToggle(normalizeBooleanRecord(settings.panelEngineToggle));
+    setLayoutStyle(
+      settings.layoutStyle === 'columns' || settings.layoutStyle === 'rows'
+        ? settings.layoutStyle
+        : 'grid',
+    );
+    setGridRows(Math.round(clampStoredNumber(settings.gridRows, 2, 1, 9)));
+    setGridCols(Math.round(clampStoredNumber(settings.gridCols, 2, 1, 9)));
+    setColWeights(normalizeNumberRecord(settings.colWeights));
+    setPanelHeights(normalizeNumberRecord(settings.panelHeights));
+    setComparisonLabelFontSize(
+      Math.round(clampStoredNumber(settings.comparisonLabelFontSize, 10, 8, 18)),
+    );
+    setComparisonLabelLayoutMode(
+      normalizeComparisonLabelLayoutMode(settings.comparisonLabelLayoutMode),
+    );
+    setSharedBrowserSettings(normalizedBrowserSettings);
+    setWorkspaceSeededFromLocal(settings.seededFromLocal === true);
+    return browserSettingsChanged;
+  };
+
+  const fetchSharedWorkspaceSettings = async (
+    endpoint = getSharedWorkspaceEndpoint(sharedWorkspaceProfile),
+  ): Promise<SharedWorkspaceEnvelope> => {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    return readWorkspaceEnvelope(response);
+  };
+
+  const reloadForSharedBrowserSettings = (revision: number): boolean => {
+    const markerKey = `mooview_shared_workspace_applied_${sharedWorkspaceProfile}`;
+    const revisionValue = String(revision);
+    if (sessionStorage.getItem(markerKey) === revisionValue) {
+      return false;
+    }
+    sessionStorage.setItem(markerKey, revisionValue);
+    window.location.reload();
+    return true;
+  };
+
+  const refreshSharedWorkspaceSettings = async () => {
+    if (workspacePersistenceMode !== 'shared' || sharedWorkspaceSaveInFlightRef.current) {
+      return;
+    }
+    try {
+      const envelope = await fetchSharedWorkspaceSettings();
+      if (
+        envelope.enabled
+        && envelope.settings
+        && envelope.revision > sharedWorkspaceRevisionRef.current
+      ) {
+        const browserSettingsChanged = applySharedWorkspaceSettings(envelope.settings);
+        sharedWorkspaceRevisionRef.current = envelope.revision;
+        setSharedWorkspaceUpdatedAt(envelope.updatedAt);
+        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+          return;
+        }
+      }
+      setSharedWorkspaceError(null);
+    } catch (error) {
+      setSharedWorkspaceError(error instanceof Error ? error.message : '共有設定を再取得できませんでした。');
+    }
+  };
+
+  const handleCopyWorkspaceToOci = async () => {
+    if (!window.confirm(
+      '現在のローカルチャート・ウォッチリスト・インジケーター設定で、OCIの共有設定を上書きします。続行しますか？',
+    )) {
+      return;
+    }
+    setWorkspaceMigrationMessage('OCIへ設定をコピーしています…');
+    setSharedWorkspaceError(null);
+    try {
+      const response = await fetch(
+        getSharedWorkspaceEndpoint('desktop', DEFAULT_OCI_SHARED_WORKSPACE_URL),
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            settings: {
+              ...sharedWorkspaceSettings,
+              seededFromLocal: true,
+            },
+            force: true,
+          }),
+        },
+      );
+      const saved = await readWorkspaceEnvelope(response);
+      setWorkspaceMigrationMessage(
+        `OCIへ保存しました（チャート${saved.settings?.panels.length ?? panels.length}件）。`,
+      );
+    } catch (error) {
+      setWorkspaceMigrationMessage(null);
+      setSharedWorkspaceError(
+        error instanceof Error ? error.message : 'OCIへの設定コピーに失敗しました。',
+      );
+    }
+  };
 
   // Real-time ticker price update counter/trigger
   const [tickTrigger, setTickTrigger] = useState(0);
@@ -2355,6 +2953,172 @@ export default function App() {
   }, []);
 
   // --- PERSISTENCE EFFECT WRITERS ---
+  useEffect(() => {
+    const captureBrowserSettings = () => {
+      const nextSettings = readSharedBrowserSettings();
+      setSharedBrowserSettings((current) => (
+        areStringRecordsEqual(current, nextSettings) ? current : nextSettings
+      ));
+    };
+    captureBrowserSettings();
+    const interval = window.setInterval(captureBrowserSettings, 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!videoExportMenu && !imageExportMenu && !chartAiPromptMenu) return;
+    const closeExportMenus = () => {
+      setVideoExportMenu(null);
+      setImageExportMenu(null);
+      setChartAiPromptMenu(null);
+    };
+    window.addEventListener('click', closeExportMenus);
+    return () => window.removeEventListener('click', closeExportMenus);
+  }, [chartAiPromptMenu, imageExportMenu, videoExportMenu]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSharedWorkspace = async () => {
+      try {
+        const envelope = await fetchSharedWorkspaceSettings();
+        if (cancelled) return;
+        if (!envelope.enabled) {
+          setWorkspacePersistenceMode('local');
+          sharedWorkspaceHydratedRef.current = true;
+          return;
+        }
+
+        const browserSettingsChanged = envelope.settings
+          ? applySharedWorkspaceSettings(envelope.settings)
+          : false;
+        sharedWorkspaceRevisionRef.current = envelope.revision;
+        sharedWorkspaceHydratedRef.current = true;
+        setSharedWorkspaceUpdatedAt(envelope.updatedAt);
+        setSharedWorkspaceError(null);
+        setWorkspacePersistenceMode('shared');
+        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+          return;
+        }
+      } catch (error) {
+        if (cancelled) return;
+        sharedWorkspaceHydratedRef.current = true;
+        setWorkspacePersistenceMode('local');
+        setSharedWorkspaceError(
+          error instanceof Error ? error.message : '共有設定の確認に失敗しました。',
+        );
+      }
+    };
+
+    void hydrateSharedWorkspace();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      workspacePersistenceMode !== 'shared'
+      || !sharedWorkspaceHydratedRef.current
+    ) {
+      return;
+    }
+    if (sharedWorkspaceSkipNextSaveRef.current) {
+      sharedWorkspaceSkipNextSaveRef.current = false;
+      return;
+    }
+
+    const saveTimer = window.setTimeout(() => {
+      const saveSharedWorkspace = async () => {
+        sharedWorkspaceSaveInFlightRef.current = true;
+        try {
+          const response = await fetch(getSharedWorkspaceEndpoint(sharedWorkspaceProfile), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              settings: sharedWorkspaceSettings,
+              expectedRevision: sharedWorkspaceRevisionRef.current,
+            }),
+          });
+          if (response.status === 409) {
+            sharedWorkspaceSaveInFlightRef.current = false;
+            await refreshSharedWorkspaceSettings();
+            return;
+          }
+          const saved = await readWorkspaceEnvelope(response);
+          sharedWorkspaceRevisionRef.current = saved.revision;
+          sessionStorage.setItem(
+            `mooview_shared_workspace_applied_${sharedWorkspaceProfile}`,
+            String(saved.revision),
+          );
+          setSharedWorkspaceUpdatedAt(saved.updatedAt);
+          setSharedWorkspaceError(null);
+        } catch (error) {
+          setSharedWorkspaceError(
+            error instanceof Error ? error.message : '共有設定を保存できませんでした。',
+          );
+        } finally {
+          sharedWorkspaceSaveInFlightRef.current = false;
+        }
+      };
+      void saveSharedWorkspace();
+    }, SHARED_WORKSPACE_SAVE_DELAY_MS);
+
+    return () => window.clearTimeout(saveTimer);
+  }, [sharedWorkspaceSettings, workspacePersistenceMode]);
+
+  useEffect(() => {
+    if (workspacePersistenceMode !== 'shared') return;
+    const handleWindowFocus = () => {
+      void refreshSharedWorkspaceSettings();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [workspacePersistenceMode]);
+
+  useEffect(() => {
+    if (
+      workspacePersistenceMode !== 'local'
+      || sharedWorkspaceProfile !== 'desktop'
+      || sharedWorkspaceAutoMigrationAttemptedRef.current
+    ) {
+      return;
+    }
+    sharedWorkspaceAutoMigrationAttemptedRef.current = true;
+
+    const migrateIfOciIsEmpty = async () => {
+      try {
+        const endpoint = getSharedWorkspaceEndpoint('desktop', DEFAULT_OCI_SHARED_WORKSPACE_URL);
+        const existing = await fetchSharedWorkspaceSettings(endpoint);
+        if (existing.settings?.seededFromLocal === true) {
+          return;
+        }
+        setWorkspaceMigrationMessage('OCIの初期設定を作成しています…');
+        const response = await fetch(endpoint, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            settings: {
+              ...sharedWorkspaceSettings,
+              seededFromLocal: true,
+            },
+            force: true,
+          }),
+        });
+        const saved = await readWorkspaceEnvelope(response);
+        setWorkspaceMigrationMessage(
+          `現在の設定をOCIへ自動保存しました（チャート${saved.settings?.panels.length ?? panels.length}件）。`,
+        );
+      } catch (error) {
+        setSharedWorkspaceError(
+          error instanceof Error ? error.message : 'OCIへの初期設定コピーに失敗しました。',
+        );
+      }
+    };
+
+    void migrateIfOciIsEmpty();
+  }, [workspacePersistenceMode]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -2528,6 +3292,22 @@ export default function App() {
   }, [comparisonLabelLayoutMode]);
 
   useEffect(() => {
+    writeStoredJson(CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY, chartVideoExportSettings);
+  }, [chartVideoExportSettings]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, chartImageExportSettings);
+  }, [chartImageExportSettings]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_AI_PROMPT_STORAGE_KEY, chartAiPrompt);
+  }, [chartAiPrompt]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_AI_MODEL_STORAGE_KEY, chartAiModel);
+  }, [chartAiModel]);
+
+  useEffect(() => {
     const saveTimer = window.setTimeout(() => {
       if (!candlesCacheIndexedDbHydratedRef.current) return;
       void writeAndVerifyCandlesCacheIndexedDb(candlesCache, candleFetchTimestampsRef.current)
@@ -2622,6 +3402,26 @@ export default function App() {
   useEffect(() => {
     writeStoredJson('tv_dashboard_panel_heights', panelHeights);
   }, [panelHeights]);
+
+  useEffect(() => {
+    const mobileViewportQuery = window.matchMedia('(max-width: 767px)');
+    const syncMobileViewport = () => {
+      setIsMobileViewport(mobileViewportQuery.matches);
+      if (!mobileViewportQuery.matches) {
+        setMobileSheetView(null);
+      }
+    };
+
+    syncMobileViewport();
+    mobileViewportQuery.addEventListener('change', syncMobileViewport);
+    return () => mobileViewportQuery.removeEventListener('change', syncMobileViewport);
+  }, []);
+
+  useEffect(() => {
+    setMobileActivePanelIndex((currentIndex) => (
+      Math.max(0, Math.min(currentIndex, panels.length - 1))
+    ));
+  }, [panels.length]);
 
   useEffect(() => {
     writeStoredJson('tv_dashboard_watchlist_column_widths', watchlistColumnWidths);
@@ -2736,11 +3536,11 @@ export default function App() {
   };
 
   const getWatchlistTabQuoteOperands = (tab: WatchlistTab | null | undefined): string[] => {
-    return Array.from(new Set(
+    return orderMarketFetchSymbols(Array.from(new Set(
       getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab))
         .map((symbol) => normalizeStoredSymbolValue(symbol))
         .filter(Boolean),
-    ));
+    )));
   };
 
   const requestAutoWatchlistQuoteRefresh = (force = false): boolean => {
@@ -2885,6 +3685,8 @@ export default function App() {
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    const fetchGeneration = candleFetchGenerationRef.current + 1;
+    candleFetchGenerationRef.current = fetchGeneration;
     if (candleFetchInFlightRef.current) {
       candleFetchPendingRef.current = true;
       return;
@@ -2916,9 +3718,10 @@ export default function App() {
         }
 
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
-          const key = `${symbol}-${timeframe}`;
-          const existing = requests.get(key);
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
+          if (shouldPauseUsFetchForJapanSession() && isUsMarketSymbol(normalizedSymbol)) return;
+          const key = `${normalizedSymbol}-${timeframe}`;
+          const existing = requests.get(key);
           const activePriority = activeWatchlistSymbolSet.has(normalizedSymbol)
             ? requestPriority - 1_000
             : requestPriority;
@@ -2928,7 +3731,7 @@ export default function App() {
             symbol,
           ].map((query) => query.trim()).filter(Boolean)));
           requests.set(key, {
-            symbol,
+            symbol: normalizedSymbol,
             timeframe,
             lookupQueries,
             priority: Math.min(existing?.priority ?? activePriority, activePriority),
@@ -2939,31 +3742,39 @@ export default function App() {
       const panelPriorityOffset = appView === 'charts' ? 0 : 5_000;
       const valueChainPriorityOffset = appView === 'charts' ? 10_000 : 0;
 
-      panels.forEach((panel, panelIndex) => {
+      const mobilePanelIndex = Math.max(0, Math.min(mobileActivePanelIndex, panels.length - 1));
+      const panelsToFetch = isMobileViewport
+        ? appView === 'charts' && panels[mobilePanelIndex]
+          ? [panels[mobilePanelIndex]]
+          : []
+        : panels;
+
+      panelsToFetch.forEach((panel, panelIndex) => {
         const chartSymbols = [panel.symbol, ...(panel.comparisonSymbols || [])];
         const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
-        chartSymbols.forEach((symbol) => {
-          addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, panelPriorityBase);
-        });
-        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
-        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
-          chartSymbols.forEach((symbol) => {
-            addCandleRequest(symbol, displayRangeTimeframe, panelPriorityBase + 1);
-          });
-        }
-        chartSymbols.forEach((symbol) => {
-          addCandleRequest(symbol, panel.timeframe, panelPriorityBase + 2);
+        chartSymbols.forEach((symbol, symbolIndex) => {
+          // スマホは主銘柄を比較銘柄より先に描画できるよう、最優先で取得する。
+          const symbolPriority = panelPriorityBase
+            + (isMobileViewport && symbolIndex === 0 ? -2_000 : symbolIndex);
+          addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriority);
+          const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
+          if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+            addCandleRequest(symbol, displayRangeTimeframe, symbolPriority + 1);
+          }
+          addCandleRequest(symbol, panel.timeframe, symbolPriority + 2);
         });
       });
-      valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
-        const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
-        addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
-        const displayRangeTimeframe = getDisplayRangeSeedTimeframe(valueChainChartState.displayRange);
-        if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
-          addCandleRequest(chartSymbol, displayRangeTimeframe, symbolPriorityBase + 1);
-        }
-        addCandleRequest(chartSymbol, valueChainChartState.timeframe, symbolPriorityBase + 2);
-      });
+      if (!isMobileViewport || appView !== 'charts') {
+        valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
+          const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
+          addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
+          const displayRangeTimeframe = getDisplayRangeSeedTimeframe(valueChainChartState.displayRange);
+          if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
+            addCandleRequest(chartSymbol, displayRangeTimeframe, symbolPriorityBase + 1);
+          }
+          addCandleRequest(chartSymbol, valueChainChartState.timeframe, symbolPriorityBase + 2);
+        });
+      }
 
       const requestsToFetch = Array.from(requests.entries()).filter(([key]) => {
         const cachedCandles = candlesCache[key];
@@ -2973,7 +3784,11 @@ export default function App() {
           return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
         }
         return now - lastFetchedAt > CANDLES_CACHE_TTL_MS;
-      }).sort((first, second) => first[1].priority - second[1].priority);
+      }).sort((first, second) =>
+        first[1].priority - second[1].priority
+        || getMarketFetchRank(first[1].symbol) - getMarketFetchRank(second[1].symbol)
+        || first[1].symbol.localeCompare(second[1].symbol),
+      );
 
       if (requestsToFetch.length === 0) {
         forceCandleRefreshRef.current = false;
@@ -2990,6 +3805,20 @@ export default function App() {
       const retryableFailedKeys = new Set<string>();
       let firstError: string | null = null;
       let klineRequestCount = 0;
+      const commitFetchedCandles = (entries: Record<string, Candle[]>) => {
+        const fetchedAt = Date.now();
+        Object.keys(entries).forEach((key) => {
+          candleFetchTimestampsRef.current[key] = fetchedAt;
+        });
+        Object.assign(updatedCache, entries);
+        setCandlesCache((currentCache) => compactCandlesCache({
+          ...currentCache,
+          ...entries,
+        }));
+        // 接続確認APIが一時的に失敗しても、実データ取得成功を接続済みの根拠とする。
+        setMoomooStatus('connected');
+        setMoomooError(null);
+      };
       const waitForKlineSlot = async () => {
         if (klineRequestCount > 0 && klineRequestCount % KLINE_FETCH_BATCH_LIMIT === 0) {
           setMoomooStatus('connecting');
@@ -3009,11 +3838,21 @@ export default function App() {
               timeframe,
               reqNum: 150
             })
-          }, 25_000);
+          }, 90_000);
           const candles = Array.isArray(data.candles) ? data.candles as Candle[] : [];
-          const errorMessage = data.error ? String(data.error) : response.ok ? null : `HTTP ${response.status}`;
+          const source = typeof data.source === 'string' ? data.source : '';
+          const fallbackSourceError = source === 'quote-fallback'
+            ? 'quote fallbackはチャート用KLineとして保存しません'
+            : null;
+          const usableCandles = getUsableChartCandles(candles, timeframe);
+          const errorMessage = data.error
+            ? String(data.error)
+            : fallbackSourceError
+            ?? (response.ok
+              ? usableCandles.length > 0 ? null : '有効なKLineが不足しています'
+              : `HTTP ${response.status}`);
           return {
-            candles: response.ok && data.success && candles.length > 0 ? candles : [],
+            candles: response.ok && data.success && !fallbackSourceError && usableCandles.length > 0 ? usableCandles : [],
             error: errorMessage,
             retryable: response.status === 429 || isMoomooRateLimitMessage(errorMessage),
           };
@@ -3049,12 +3888,15 @@ export default function App() {
 
       try {
         for (const [key, request] of requestsToFetch) {
-          if (!moomooRealTimeActiveRef.current) break;
+          if (
+            !moomooRealTimeActiveRef.current
+            || candleFetchGenerationRef.current !== fetchGeneration
+          ) break;
           try {
             const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
             if (directResult.candles.length > 0) {
-              updatedCache[key] = directResult.candles;
               successfulKeys.add(key);
+              commitFetchedCandles({ [key]: directResult.candles });
               continue;
             }
 
@@ -3064,10 +3906,12 @@ export default function App() {
               const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
               if (fallbackResult.candles.length > 0) {
                 const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
-                updatedCache[key] = fallbackResult.candles;
-                updatedCache[fallbackKey] = fallbackResult.candles;
                 successfulKeys.add(key);
                 successfulKeys.add(fallbackKey);
+                commitFetchedCandles({
+                  [key]: fallbackResult.candles,
+                  [fallbackKey]: fallbackResult.candles,
+                });
                 continue;
               }
               shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
@@ -3084,7 +3928,10 @@ export default function App() {
           }
         }
 
-        if (!moomooRealTimeActiveRef.current) return;
+        if (
+          !moomooRealTimeActiveRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration
+        ) return;
 
         const attemptedAt = Date.now();
         Object.keys(failedErrors).forEach((key) => {
@@ -3098,13 +3945,6 @@ export default function App() {
         }
 
         if (Object.keys(updatedCache).length > 0) {
-          Object.keys(updatedCache).forEach((key) => {
-            candleFetchTimestampsRef.current[key] = attemptedAt;
-          });
-          setCandlesCache((currentCache) => compactCandlesCache({
-            ...currentCache,
-            ...updatedCache,
-          }));
           setMoomooStatus('connected');
           setMoomooError(null);
         } else if (firstError) {
@@ -3121,7 +3961,8 @@ export default function App() {
         });
       } finally {
         candleFetchInFlightRef.current = false;
-        const shouldRefetch = candleFetchPendingRef.current;
+        const shouldRefetch = candleFetchPendingRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration;
         candleFetchPendingRef.current = false;
         forceCandleRefreshRef.current = false;
         initialVisibleChartRefreshRef.current = false;
@@ -3132,7 +3973,7 @@ export default function App() {
     };
 
     fetchMoomooCandles();
-  }, [activeWatchlistTabId, appView, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, appView, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
     if (!moomooRealTimeActive) {
@@ -3173,10 +4014,7 @@ export default function App() {
       source: WatchlistQuoteFetchSource;
     } | null => {
       if (!quoteFetchAutoSweepRequestedRef.current) return null;
-      const orderedTabs = [
-        ...watchlistTabs.filter((tab) => tab.id === activeWatchlistTabId),
-        ...watchlistTabs.filter((tab) => tab.id !== activeWatchlistTabId),
-      ];
+      const orderedTabs = orderWatchlistTabsForQuoteFetch(watchlistTabs, activeWatchlistTabId);
       for (const tab of orderedTabs) {
         if (getWatchlistQuoteFetchMode(watchlistQuoteFetchModes, tab.id) !== 'auto') continue;
         if (quoteFetchAutoAttemptedTabIdsRef.current.has(tab.id)) continue;
@@ -3224,7 +4062,7 @@ export default function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ symbols }),
-            }, 35_000);
+            }, 90_000);
             const errorMessage = data.error ? String(data.error) : response.ok ? '' : `HTTP ${response.status}`;
             if (!response.ok || !data.success || !data.quotes) {
               if (retryAllowed && (response.status === 429 || isMoomooRateLimitMessage(errorMessage))) {
@@ -3304,7 +4142,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbols: quoteSymbols }),
-        }, 35_000);
+        }, 90_000);
         if (!response.ok || !data.success || !data.quotes) {
           throw new Error(data.error || 'Moomoo価格一覧を取得できません。');
         }
@@ -3473,6 +4311,41 @@ export default function App() {
     });
     return cols.filter(col => col.length > 0);
   }, [panels, layoutStyle, gridCols]);
+
+  const activeMobilePanelIndex = Math.max(
+    0,
+    Math.min(mobileActivePanelIndex, panels.length - 1),
+  );
+  const visibleColGroups = useMemo(() => {
+    if (!isMobileViewport) return colGroups;
+    const activePanel = panels[activeMobilePanelIndex];
+    return activePanel ? [[activePanel]] : [];
+  }, [activeMobilePanelIndex, colGroups, isMobileViewport, panels]);
+
+  const handleMobileChartHeaderTouchStart = (event: React.TouchEvent) => {
+    if (!isMobileViewport || event.touches.length !== 1) return;
+    mobileChartSwipeStartRef.current = {
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY,
+    };
+  };
+
+  const handleMobileChartHeaderTouchEnd = (event: React.TouchEvent) => {
+    const swipeStart = mobileChartSwipeStartRef.current;
+    mobileChartSwipeStartRef.current = null;
+    if (!isMobileViewport || !swipeStart || event.changedTouches.length !== 1) return;
+
+    const deltaX = event.changedTouches[0].clientX - swipeStart.x;
+    const deltaY = event.changedTouches[0].clientY - swipeStart.y;
+    if (Math.abs(deltaX) < 48 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.15) return;
+
+    setMobileActivePanelIndex((currentIndex) => {
+      const lastPanelIndex = Math.max(0, panels.length - 1);
+      return deltaX < 0
+        ? Math.min(lastPanelIndex, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+    });
+  };
 
   // Handle column width dragging
   const handleColResizeMouseDown = (
@@ -4217,6 +5090,27 @@ export default function App() {
     setSidebarOpen(true);
   };
 
+  const handleMobileSheetNavClick = (view: MobileSheetView) => {
+    setAppView('charts');
+    if (view === 'watchlist' || view === 'indicators' || view === 'settings') {
+      setSidebarView(view);
+    }
+    const activePanel = panels[activeMobilePanelIndex];
+    if (activePanel && view === 'image-export') {
+      setChartImageExportSettings((current) => ({
+        ...current,
+        selection: { ...current.selection, mode: 'custom', panelIds: [activePanel.id] },
+      }));
+    }
+    if (activePanel && view === 'video-export') {
+      setChartVideoExportSettings((current) => ({
+        ...current,
+        selection: { ...current.selection, mode: 'custom', panelIds: [activePanel.id] },
+      }));
+    }
+    setMobileSheetView((currentView) => currentView === view ? null : view);
+  };
+
   const addSymbolToActiveWatchlist = (symbol: string) => {
     addSymbolsToActiveWatchlist([symbol]);
   };
@@ -4299,28 +5193,41 @@ export default function App() {
     ));
     setFocusedSymbolIndex(symbolKey);
     setSidebarView('indicators');
-    setSidebarOpen(true);
+    if (isMobileViewport) {
+      setMobileSheetView('indicators');
+    } else {
+      setSidebarOpen(true);
+    }
   };
 
   const selectTickerForPrimaryChart = (symbol: string) => {
-    setFocusedSymbolIndex(symbol);
+    const chartSymbol = normalizeStoredSymbolValue(symbol) || symbol;
+    setFocusedSymbolIndex(chartSymbol);
+    chartMissingDataRefreshRef.current = { signature: '', requestedAt: 0 };
+    forceCandleRefreshRef.current = true;
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    queuePriorityQuoteRefreshForChartSymbols([chartSymbol]);
+    setMobileActivePanelIndex(0);
     setPanels((currentPanels) =>
       currentPanels.map((panel, index) =>
         index === 0
           ? {
               ...panel,
-              symbol,
+              symbol: chartSymbol,
               comparisonOnly: undefined,
               showVolume: true,
               watchlistTabId: undefined,
               watchlistSectionId: undefined,
               comparisonSymbols: (panel.comparisonSymbols || []).filter(
-                (comparisonSymbol) => comparisonSymbol !== symbol
+                (comparisonSymbol) => comparisonSymbol !== chartSymbol
               ),
             }
           : panel
       )
     );
+    setTickTrigger((current) => current + 1);
   };
 
   const registerTickerExpression = async (
@@ -5094,6 +6001,9 @@ export default function App() {
       : basePanel;
 
     setPanels(prev => [...prev, newPanel]);
+    if (isMobileViewport) {
+      setMobileActivePanelIndex(panels.length);
+    }
     setPanelEngineToggle(prev => ({ ...prev, [newId]: false }));
   };
 
@@ -5125,6 +6035,9 @@ export default function App() {
     };
 
     setPanels((currentPanels) => [...currentPanels, emptyPanel]);
+    if (isMobileViewport) {
+      setMobileActivePanelIndex(panels.length);
+    }
     setPanelEngineToggle((current) => ({ ...current, [newId]: false }));
     setWatchlistTargetMenu(null);
   };
@@ -5317,7 +6230,7 @@ export default function App() {
 
   // --- VOLATILITY METRIC CALCULATION DISPLAY ---
   // Evaluates live visual statistics of active cached charts
-  const liveTickerStats = useMemo(() => {
+  const liveTickerStats = useMemo<DisplayTickerStat[]>(() => {
     return tickers.map(t => {
       const normalizedTicker = normalizeTickerInfo(t) || {
         symbol: normalizeStoredSymbolValue(t.symbol || ''),
@@ -5370,9 +6283,54 @@ export default function App() {
     });
   }, [tickers, candlesCache, quoteCache, moomooRealTimeActive, watchlistNameOverrides]);
 
-  const tickerStatsBySymbol = useMemo(() => {
+  const tickerStatsBySymbol = useMemo<Map<string, DisplayTickerStat>>(() => {
     return new Map(liveTickerStats.map((ticker) => [ticker.symbol, ticker]));
   }, [liveTickerStats]);
+
+  const resolveDisplayTickerStat = (rawSymbol: string): DisplayTickerStat | null => {
+    const normalizedSymbol = normalizeStoredSymbolValue(rawSymbol);
+    if (!normalizedSymbol) return null;
+
+    const registeredTicker = tickerStatsBySymbol.get(normalizedSymbol);
+    if (registeredTicker) return registeredTicker;
+
+    const expression = normalizeSymbolExpressionForStorage(normalizedSymbol);
+    if (expression) {
+      const leftQuote = quoteCache[expression.left];
+      const rightQuote = quoteCache[expression.right];
+      const expressionQuote = leftQuote && rightQuote
+        ? calculateExpressionQuote(expression, leftQuote, rightQuote)
+        : null;
+      const expressionPrice = Number(expressionQuote?.price);
+      const expressionChange = Number(expressionQuote?.changePct);
+      return {
+        symbol: normalizedSymbol,
+        name: watchlistNameOverrides[normalizedSymbol]
+          || `${leftQuote?.name || formatWatchlistSymbol(expression.left)} ${expression.operator} ${rightQuote?.name || formatWatchlistSymbol(expression.right)}`,
+        basePrice: Number.isFinite(expressionPrice) ? expressionPrice : 0,
+        dailyChangePct: Number.isFinite(expressionChange) ? expressionChange : 0,
+        currentPrice: Number.isFinite(expressionPrice) ? expressionPrice : null,
+        computedChange: Number.isFinite(expressionChange) ? expressionChange : null,
+      };
+    }
+
+    const quote = quoteCache[normalizedSymbol];
+    const quotePrice = Number(quote?.price);
+    const quoteChange = Number(quote?.changePct);
+    if (Number.isFinite(quotePrice) && quotePrice > 0) {
+      return {
+        symbol: normalizedSymbol,
+        name: watchlistNameOverrides[normalizedSymbol] || quote?.name || formatWatchlistSymbol(normalizedSymbol),
+        basePrice: quotePrice,
+        dailyChangePct: Number.isFinite(quoteChange) ? quoteChange : 0,
+        currentPrice: quotePrice,
+        computedChange: Number.isFinite(quoteChange) ? quoteChange : null,
+        marketCap: quote?.marketCap,
+      };
+    }
+
+    return null;
+  };
 
   const getDefaultWatchlistName = (symbol: string): string => {
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
@@ -5389,6 +6347,7 @@ export default function App() {
     }
     const normalizedSymbol = normalizeStoredSymbolValue(symbol);
     return watchlistNameOverrides[normalizedSymbol]
+      || resolveDisplayTickerStat(normalizedSymbol)?.name
       || tickerStatsBySymbol.get(normalizedSymbol)?.name
       || getDefaultWatchlistName(normalizedSymbol);
   };
@@ -5579,6 +6538,7 @@ export default function App() {
     timeframe: Timeframe,
     displayRange: ChartDisplayRange | undefined,
     useDemoFallback = false,
+    allowQuoteFallback = true,
   ): Candle[] => {
     const normalizedChartSymbol = normalizeStoredSymbolValue(rawSymbol);
     if (!normalizedChartSymbol) return [];
@@ -5589,13 +6549,24 @@ export default function App() {
     ].filter((seedTimeframe): seedTimeframe is Timeframe => Boolean(seedTimeframe))));
 
     const options = { tickerStatsBySymbol, watchlistTabs };
-    let chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, timeframe, candlesCache, options);
+    let chartCandles = getUsableChartCandles(
+      resolveCandlesForSymbol(normalizedChartSymbol, timeframe, candlesCache, options),
+      timeframe,
+    );
     for (const seedTimeframe of seedTimeframes) {
       if (chartCandles.length > 0 || seedTimeframe === timeframe) continue;
-      chartCandles = resolveCandlesForSymbol(normalizedChartSymbol, seedTimeframe, candlesCache, options);
+      chartCandles = getUsableChartCandles(
+        resolveCandlesForSymbol(normalizedChartSymbol, seedTimeframe, candlesCache, options),
+        seedTimeframe,
+      );
     }
 
-    if (chartCandles.length === 0) {
+    if (
+      chartCandles.length === 0
+      && allowQuoteFallback
+      && !isIntradayTimeframe(timeframe)
+      && canUseQuoteFallbackCandles(normalizedChartSymbol)
+    ) {
       chartCandles = createQuoteFallbackCandlesForSymbol(normalizedChartSymbol);
     }
 
@@ -5617,7 +6588,7 @@ export default function App() {
         ...(panel.comparisonSymbols || []),
       ].map((symbol) => normalizeStoredSymbolValue(symbol)).filter(Boolean)));
       chartSymbols.forEach((symbol) => {
-        const candles = resolveChartCandlesForSymbol(symbol, panel.timeframe, panel.displayRange, false);
+        const candles = resolveChartCandlesForSymbol(symbol, panel.timeframe, panel.displayRange, false, false);
         if (candles.length > 0) return;
         missingSymbols.add(symbol);
         missingRequests.push(`${symbol}-${panel.timeframe}-${panel.displayRange || 'normal'}`);
@@ -5631,6 +6602,7 @@ export default function App() {
         normalizedSymbol,
         valueChainChartState.timeframe,
         valueChainChartState.displayRange,
+        false,
         false,
       );
       if (candles.length > 0) return;
@@ -5740,7 +6712,7 @@ export default function App() {
       ? watchlistTabs.find((tab) => tab.id === quoteFetchTarget.tabId) ?? activeWatchlistTab
       : activeWatchlistTab;
     const isQuoteResolved = (symbol: string) => {
-      const ticker = tickerStatsBySymbol.get(symbol);
+      const ticker = resolveDisplayTickerStat(symbol);
       const quote = quoteCache[symbol];
       const currentPrice = Number(ticker?.currentPrice ?? quote?.price);
       const computedChange = Number(ticker?.computedChange ?? quote?.changePct);
@@ -5908,7 +6880,7 @@ export default function App() {
         .map((symbol) => {
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
           if (!normalizedSymbol) return null;
-          return tickerStatsBySymbol.get(normalizedSymbol) || {
+          return resolveDisplayTickerStat(normalizedSymbol) || {
             symbol: normalizedSymbol,
             name: watchlistNameOverrides[normalizedSymbol] || formatWatchlistSymbol(normalizedSymbol),
             basePrice: 0,
@@ -5923,7 +6895,7 @@ export default function App() {
         rows: watchlistSort.column ? [...rows].sort(compareRows) : rows,
       };
     });
-  }, [activeWatchlistTab, tickerStatsBySymbol, watchlistNameOverrides, watchlistSort]);
+  }, [activeWatchlistTab, quoteCache, tickerStatsBySymbol, watchlistNameOverrides, watchlistSort]);
 
   const getComparableSymbolsForPanel = (
     panel: ChartPanel,
@@ -5936,7 +6908,7 @@ export default function App() {
       // BASKET:xxxx シンボルは特別扱い（tickerStats不要）
       if (symbol.startsWith('BASKET:')) return true;
       if (options.allowMissingData) return true;
-      const ticker = tickerStatsBySymbol.get(symbol);
+      const ticker = resolveDisplayTickerStat(symbol);
       const currentPrice = Number(ticker?.currentPrice);
       return !moomooRealTimeActive
         || (ticker?.currentPrice !== null && Number.isFinite(currentPrice) && currentPrice > 0);
@@ -6030,6 +7002,217 @@ export default function App() {
       || null;
   };
 
+  const getSelectedChartExportPanelIds = (selection: ChartExportSelection): string[] => {
+    return resolveChartExportPanelIds(
+      selection,
+      panels.map((panel) => panel.id),
+    );
+  };
+
+  const handleChartVideoExport = async () => {
+    if (chartVideoExportAbortControllerRef.current) {
+      chartVideoExportAbortControllerRef.current.abort();
+      return;
+    }
+    if (chartExportStatus || chartAiStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartAiPromptMenu(null);
+    setChartExportError(null);
+    const resolution = CHART_EXPORT_RESOLUTIONS.find(
+      (candidate) => candidate.id === chartVideoExportSettings.resolutionId,
+    ) ?? CHART_EXPORT_RESOLUTIONS[0];
+    const panelIds = getSelectedChartExportPanelIds(chartVideoExportSettings.selection);
+    if (panelIds.length === 0) {
+      setChartExportError('ダウンロードするチャートを1つ以上選択してください。');
+      return;
+    }
+    const abortController = new AbortController();
+    chartVideoExportAbortControllerRef.current = abortController;
+    setChartExportStatus({ kind: 'video', progress: 0 });
+    const iosPhotoSaveEnabled = isAppleMobileDevice();
+    const exportedIosVideoFiles: File[] = [];
+
+    try {
+      for (let index = 0; index < panelIds.length; index += 1) {
+        const panelId = panelIds[index];
+        const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
+        const exportedVideoFile = await exportChartVideo({
+          width: resolution.width,
+          height: resolution.height,
+          panelIds: [panelId],
+          durationSeconds: chartVideoExportSettings.durationSeconds,
+          frameRate: chartVideoExportSettings.frameRate,
+          signal: abortController.signal,
+          fileNumber: panelNumber > 0 ? panelNumber : index + 1,
+          beforeFrame: async (progress) => {
+            setChartExportPlayback({ panelIds: [panelId], progress });
+            await new Promise<void>((resolve) => {
+              window.requestAnimationFrame(() => resolve());
+            });
+          },
+          onProgress: (progress) => {
+            setChartExportStatus({
+              kind: 'video',
+              progress: (index + progress) / panelIds.length,
+            });
+          },
+          ...(iosPhotoSaveEnabled ? {
+            download: false,
+            iosCompatible: true,
+          } : {}),
+        });
+        if (iosPhotoSaveEnabled) {
+          exportedIosVideoFiles.push(exportedVideoFile);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === 'AbortError')) {
+        setChartExportError(
+          error instanceof Error ? error.message : 'MP4動画の作成に失敗しました。',
+        );
+      }
+    } finally {
+      if (iosPhotoSaveEnabled && exportedIosVideoFiles.length > 0) {
+        setPendingIosVideoFiles(exportedIosVideoFiles);
+      }
+      if (chartVideoExportAbortControllerRef.current === abortController) {
+        chartVideoExportAbortControllerRef.current = null;
+      }
+      setChartExportPlayback(null);
+      setChartExportStatus(null);
+    }
+  };
+
+  const handleShareIosVideoFiles = () => {
+    const files = [...pendingIosVideoFiles];
+    if (files.length === 0 || iosVideoShareInFlight) return;
+    if (
+      typeof navigator.share !== 'function'
+      || typeof navigator.canShare !== 'function'
+      || !navigator.canShare({ files })
+    ) {
+      setChartExportError('このiOSでは動画共有を利用できません。「ファイルへ保存」を使用してください。');
+      return;
+    }
+
+    let sharePromise: Promise<void>;
+    try {
+      // ファイル以外を渡すとiOSで添付が外れる場合があるため、MP4だけを共有する。
+      sharePromise = navigator.share({ files });
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'iOSの共有シートを開けませんでした。',
+      );
+      return;
+    }
+
+    setIosVideoShareInFlight(true);
+    void sharePromise
+      .then(() => {
+        setPendingIosVideoFiles([]);
+        setChartExportError(null);
+      })
+      .catch((error) => {
+        if (!(error instanceof Error && error.name === 'AbortError')) {
+          setChartExportError(
+            error instanceof Error ? error.message : 'iOSの共有シートを開けませんでした。',
+          );
+        }
+      })
+      .finally(() => setIosVideoShareInFlight(false));
+  };
+
+  const handleDownloadIosVideoFiles = () => {
+    pendingIosVideoFiles.forEach((file) => downloadChartVideoFile(file));
+    setPendingIosVideoFiles([]);
+  };
+
+  const handleChartImageExport = async () => {
+    if (chartExportStatus || chartAiStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartAiPromptMenu(null);
+    setChartExportError(null);
+    setChartExportStatus({ kind: 'image', progress: 0.25 });
+
+    try {
+      const panelIds = getSelectedChartExportPanelIds(chartImageExportSettings.selection);
+      if (panelIds.length === 0) {
+        throw new Error('ダウンロードするチャートを1つ以上選択してください。');
+      }
+      await exportChartImage(panelIds, (progress) => {
+        setChartExportStatus({ kind: 'image', progress });
+      });
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'PNG画像の作成に失敗しました。',
+      );
+    } finally {
+      setChartExportStatus(null);
+    }
+  };
+
+  const handleChartAiAnalysis = async () => {
+    if (chartExportStatus || chartAiStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartAiPromptMenu(null);
+    setChartExportError(null);
+    setChartAiResult(null);
+    setChartAiCopied(false);
+
+    try {
+      const prompt = chartAiPrompt.trim();
+      if (!prompt) {
+        throw new Error('AIプロンプトを入力してください。');
+      }
+      const panelIds = getSelectedChartExportPanelIds(chartImageExportSettings.selection);
+      if (panelIds.length === 0) {
+        throw new Error('AIで分析するチャートを1つ以上選択してください。');
+      }
+
+      setChartAiStatus({ stage: 'capturing', progress: 0 });
+      const imageFiles = await exportChartImage(panelIds, (progress) => {
+        setChartAiStatus({ stage: 'capturing', progress });
+      });
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const result = await requestChartAiAnalysis(prompt, imageFiles, chartAiModel);
+      setChartAiResult(result);
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'AIによるチャート分析に失敗しました。',
+      );
+    } finally {
+      setChartAiStatus(null);
+    }
+  };
+
+  const handleCopyChartAiResult = async () => {
+    if (!chartAiResult?.text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(chartAiResult.text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = chartAiResult.text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (!copied) {
+          throw new Error('コピーできませんでした。');
+        }
+      }
+      setChartAiCopied(true);
+      window.setTimeout(() => setChartAiCopied(false), 2_000);
+    } catch {
+      setChartExportError('クリップボードへコピーできませんでした。');
+    }
+  };
+
   const renderValueChainTickerChart = ({
     symbol,
     comparisonSymbols = [],
@@ -6102,6 +7285,7 @@ export default function App() {
               valueChainChartState.timeframe,
               valueChainChartState.displayRange,
               !moomooRealTimeActive,
+              false,
             );
             if (moomooRealTimeActive) {
               if (candles.length > 0) acc[comparisonSymbol] = candles;
@@ -6181,7 +7365,7 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25"
+      className="h-[100dvh] min-h-0 overflow-hidden bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25 md:h-auto md:min-h-screen md:overflow-visible"
       style={{ fontFamily: '"Trebuchet MS", "Segoe UI", sans-serif' }}
     >
       <style>
@@ -6194,7 +7378,7 @@ export default function App() {
       </style>
       
       {/* Dynamic Upper Banner with real-time quote ticks */}
-      <div className="bg-[#080808] border-b border-[#202020] py-2 px-4 shrink-0 overflow-hidden whitespace-nowrap flex items-center gap-4 text-xs">
+      <div className="bg-[#080808] border-b border-[#202020] py-1.5 px-2 shrink-0 overflow-hidden whitespace-nowrap flex items-center gap-2 text-xs md:py-2 md:px-4 md:gap-4">
         <div className="flex items-center space-x-2 shrink-0">
             <button
               type="button"
@@ -6301,7 +7485,7 @@ export default function App() {
         </div>
         
         {/* Right header actions */}
-        <div className="flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
+        <div className="hidden sm:flex items-center space-x-4 shrink-0 text-xs text-[#848e9c] select-none">
           <div className="flex flex-col items-end leading-tight font-mono">
             <span className="text-[#d1d4dc]">{currentClockTime}</span>
             <span className="text-[9px] text-[#848e9c]">更新 {lastApiSyncTime}</span>
@@ -6390,13 +7574,13 @@ export default function App() {
           onChartSymbolsChange={setValueChainChartSymbols}
         />
       ) : (
-      <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+      <div className="relative flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
         
         {/* Workspace Panels container */}
-        <div className="flex-1 flex flex-col min-h-0 p-3 bg-[#050505] overflow-y-auto">
+        <div className="flex-1 flex flex-col min-h-0 p-1 bg-[#050505] overflow-hidden md:p-3 md:overflow-y-auto">
           
-          <div className="flex-1 min-h-0 w-full flex flex-row select-none">
-            {colGroups.map((col, colIdx) => (
+          <div className="flex-1 min-h-0 w-full flex flex-row select-none overflow-hidden">
+            {visibleColGroups.map((col, colIdx) => (
               <React.Fragment key={colIdx}>
                 <div
                   id={`col-group-${colIdx}`}
@@ -6405,7 +7589,7 @@ export default function App() {
                     flexShrink: 1,
                     flexBasis: 0,
                   }}
-                  className="flex flex-col min-h-0 min-w-[120px]"
+                  className="flex flex-col min-h-0 min-w-[120px] h-full"
                 >
                   {col.map((panel, pIdx) => {
                     const panelSymbol = normalizeStoredSymbolValue(panel.symbol);
@@ -6418,6 +7602,7 @@ export default function App() {
                         panel.timeframe,
                         panel.displayRange,
                         !moomooRealTimeActive,
+                        false,
                       );
                       if (candles.length > 0) {
                         acc[compSym] = candles;
@@ -6425,7 +7610,7 @@ export default function App() {
                       return acc;
                     }, {} as Record<string, Candle[]>);
                     const comparisonAnchorSymbol = panelComparisonOnly
-                      ? panelComparisonSymbols.find((symbol) => (panelComparisonCandles[symbol]?.length ?? 0) > 0)
+                      ? selectLongestCandleSeriesSymbol(panelComparisonSymbols, panelComparisonCandles)
                         || panelComparisonSymbols[0]
                         || ''
                       : '';
@@ -6458,13 +7643,17 @@ export default function App() {
                         ...panelComparisonSymbols,
                       ].filter(Boolean),
                     ));
+                    const panelUsesJapanYahooFallback = chartDisplaySymbols.some(isJapaneseMarketSymbolInput);
 
                     return (
                       <React.Fragment key={panel.id}>
                         <div
                           id={`chart-panel-container-${panel.id}`}
+                          data-chart-export-panel-id={panel.id}
                           style={{
-                            height: `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
+                            height: isMobileViewport
+                              ? '100%'
+                              : `${panelHeights[panel.id] ?? DEFAULT_PANEL_HEIGHT}px`,
                           }}
                           onDragOver={(event) => {
                             if (event.dataTransfer.types.includes('application/x-mooview-panel')) {
@@ -6501,7 +7690,7 @@ export default function App() {
                             setDraggedBasket(null);
                             setDraggedSectionId(null);
                           }}
-                          className="w-full flex flex-col shrink-0"
+                          className="w-full flex flex-col shrink-0 min-h-0"
                         >
                           <div className="flex-1 flex flex-col min-h-0 bg-[#0d0d0d] border border-[#242424] rounded-lg overflow-hidden relative focus-within:border-emerald-500 transition-colors shadow-lg">
                             {/* Active Comparison (Add Overlaid Symbol) Custom Popover */}
@@ -6568,7 +7757,12 @@ export default function App() {
                             )}
 
                             {/* Panel Toolbar Header */}
-                            <div className="h-10 border-b border-[#242424] bg-[#111111] px-3 flex items-center justify-between shrink-0 select-none">
+                            <div
+                              className="h-10 border-b border-[#242424] bg-[#111111] px-2 flex items-center justify-between shrink-0 select-none md:px-3"
+                              data-chart-export-panel-header="true"
+                              onTouchStart={handleMobileChartHeaderTouchStart}
+                              onTouchEnd={handleMobileChartHeaderTouchEnd}
+                            >
                               <div className="flex items-center space-x-2 overflow-x-auto whitespace-nowrap scrollbar-none scroll-smooth pr-2">
                                 
                                 {/* タブ選択で、そのリスト内の銘柄を比較表示に展開する */}
@@ -6844,7 +8038,7 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-                                  {(['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'] as Timeframe[]).map((tf) => (
+                                  {CHART_TIMEFRAME_OPTIONS.map((tf) => (
                                     <button
                                       key={tf}
                                       disabled={Boolean(panel.displayRange)}
@@ -6856,9 +8050,9 @@ export default function App() {
                                           ? 'bg-emerald-500 text-black'
                                           : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                                       }`}
-                                      title={panel.displayRange ? 'D/W表示中は時間足を固定しています' : undefined}
+                                      title={getChartTimeframeButtonTitle(tf, panelUsesJapanYahooFallback, Boolean(panel.displayRange))}
                                     >
-                                      {tf === '1mo' ? '1M' : tf === '1d' ? 'day' : tf === '1w' ? 'Week' : tf}
+                                      {formatChartTimeframeLabel(tf, panelUsesJapanYahooFallback)}
                                     </button>
                                   ))}
                                 </div>
@@ -6889,6 +8083,14 @@ export default function App() {
 
                               {/* ACTIONS AND PANEL REMOVAL (MINUS BUTTON) */}
                               <div className="flex items-center space-x-2 shrink-0">
+                                {isMobileViewport && panels.length > 1 && (
+                                  <span
+                                    className="rounded border border-[#303030] bg-[#171717] px-1.5 py-0.5 text-[9px] font-bold text-gray-300"
+                                    title="ヘッダーを左右にスワイプしてチャートを切り替え"
+                                  >
+                                    {activeMobilePanelIndex + 1}/{panels.length}
+                                  </span>
+                                )}
                                 
                                 {/* Quick setting indicators toggles */}
                                 {false && !isTvEmbed && (
@@ -6960,7 +8162,9 @@ export default function App() {
                             </div>
 
                             {/* Rendering workspace */}
-                            <div className="flex-1 flex flex-col min-h-0 bg-[#090909]">
+                            <div
+                              className="flex-1 flex flex-col min-h-0 bg-[#090909]"
+                            >
                               {isTvEmbed ? (
                                 <TradingViewWidget 
                                   symbol={panelSymbol}
@@ -7025,6 +8229,11 @@ export default function App() {
                                   onTogglePrimaryCandles={!panelComparisonOnly ? () => handleUpdatePanel(panel.id, { showPrimaryCandles: panelShowPrimaryCandles ? false : undefined }) : undefined}
                                   allowNegativeValues={Boolean(panelExpression)}
                                   valuePrecision={panelExpression ? 4 : 2}
+                                  exportPlaybackProgress={
+                                    chartExportPlayback?.panelIds.includes(panel.id)
+                                      ? chartExportPlayback.progress
+                                      : null
+                                  }
                                 />
                               )}
                             </div>
@@ -7033,7 +8242,7 @@ export default function App() {
 
                         {/* Drag splitter to change absolute height for every panel */}
                         <div
-                          className="h-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded"
+                          className="hidden h-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-row-resize transition-colors shrink-0 self-stretch mt-1 mb-2.5 rounded md:block"
                           onMouseDown={(e) => handlePanelHeightResizeMouseDown(e, panel.id)}
                           title="上下にドラッグして高さを変更"
                         />
@@ -7043,7 +8252,7 @@ export default function App() {
                 </div>
 
                 {/* Drag splitter between adjacent column groups */}
-                {colIdx < colGroups.length - 1 && (
+                {!isMobileViewport && colIdx < visibleColGroups.length - 1 && (
                   <div
                     className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch mx-1 rounded"
                     onMouseDown={(e) => handleColResizeMouseDown(e, colIdx, colIdx + 1)}
@@ -7055,7 +8264,7 @@ export default function App() {
           </div>
         </div>
 
-        {sidebarOpen && (
+        {sidebarOpen && !isMobileViewport && (
           <div
             className="w-1.5 bg-[#191919]/80 hover:bg-emerald-500 active:bg-emerald-600 cursor-col-resize transition-colors shrink-0 self-stretch"
             onMouseDown={handleSidebarResizeMouseDown}
@@ -7063,18 +8272,73 @@ export default function App() {
           />
         )}
 
-        {/* Right-hand Sidebar - 常設アイコンと開閉式パネル */}
+        {isMobileViewport && mobileSheetView && (
+          <button
+            type="button"
+            className="fixed inset-x-0 top-0 z-[80] bg-black/55 md:hidden"
+            style={{ bottom: 'calc(4rem + env(safe-area-inset-bottom))' }}
+            onClick={() => setMobileSheetView(null)}
+            aria-label="下部パネルを閉じる"
+          />
+        )}
+
+        {/* PC右サイドバー／スマホ下部ボトムシート */}
         <div
-          className="shrink-0 border-l border-[#202020] bg-[#080808] flex overflow-hidden transition-[width] duration-150 ease-out"
-          style={{ width: sidebarOpen ? `${sidebarWidth + SIDEBAR_NAV_WIDTH}px` : `${SIDEBAR_NAV_WIDTH}px` }}
+          data-mobile-bottom-sheet={isMobileViewport ? mobileSheetView ?? 'closed' : undefined}
+          className={`bg-[#080808] flex overflow-hidden ease-out ${
+            isMobileViewport
+              ? `fixed inset-x-0 z-[90] rounded-t-2xl border-t border-[#343434] shadow-[0_-18px_50px_rgba(0,0,0,0.65)] transition-transform duration-300 ${
+                  mobileSheetView ? 'translate-y-0' : 'translate-y-full pointer-events-none'
+                }`
+              : 'shrink-0 border-l border-[#202020] transition-[width] duration-150'
+          }`}
+          style={isMobileViewport
+            ? {
+                bottom: 'calc(4rem + env(safe-area-inset-bottom))',
+                height: 'min(76dvh, 720px)',
+                width: '100%',
+              }
+            : { width: sidebarOpen ? `${sidebarWidth + SIDEBAR_NAV_WIDTH}px` : `${SIDEBAR_NAV_WIDTH}px` }}
+          aria-hidden={isMobileViewport ? !mobileSheetView : undefined}
         >
           <div
-            className={`min-w-0 flex flex-col overflow-hidden transition-[width] duration-150 ease-out ${sidebarOpen ? '' : 'pointer-events-none'}`}
-            style={{ width: sidebarOpen ? `${sidebarWidth}px` : '0px' }}
+            className={`min-w-0 flex flex-col overflow-hidden ease-out ${
+              isMobileViewport
+                ? 'w-full'
+                : `transition-[width] duration-150 ${sidebarOpen ? '' : 'pointer-events-none'}`
+            }`}
+            style={isMobileViewport
+              ? { width: '100%' }
+              : { width: sidebarOpen ? `${sidebarWidth}px` : '0px' }}
           >
 
+          {isMobileViewport && (
+            <div className="relative flex h-11 shrink-0 items-center justify-center border-b border-[#242424] bg-[#0b0b0b] px-12">
+              <span className="absolute top-1.5 h-1 w-10 rounded-full bg-gray-600" />
+              <span className="mt-1 truncate text-xs font-bold text-gray-100">
+                {mobileSheetView === 'watchlist'
+                  ? 'ウォッチリスト'
+                  : mobileSheetView === 'indicators'
+                    ? 'インジケーター設定'
+                    : mobileSheetView === 'settings'
+                      ? '接続・保存設定'
+                      : mobileSheetView === 'image-export'
+                        ? 'チャート画像'
+                        : 'チャート動画'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileSheetView(null)}
+                className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full text-gray-400 hover:bg-[#202020] hover:text-white"
+                aria-label="下部パネルを閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           {/* 1. LAYOUT SCREEN SUBDIVISION CONFIG */}
-          <div className="shrink-0 p-2 border-b border-[#242424] relative">
+          <div className={`shrink-0 p-2 border-b border-[#242424] relative ${isMobileViewport ? 'hidden' : ''}`}>
             <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] font-bold">
               <span
                 className={`min-w-0 truncate ${
@@ -7199,7 +8463,7 @@ export default function App() {
           </div>
 
           {/* 2. TRADINGVIEW-LIKE WATCHLIST */}
-          {sidebarView === 'watchlist' && (
+          {(!isMobileViewport || mobileSheetView === 'watchlist') && sidebarView === 'watchlist' && (
           <div
             className="flex-1 min-h-0 bg-[#0b0b0b] overflow-hidden flex flex-col relative"
             onContextMenu={openWatchlistEmptyMenu}
@@ -8280,7 +9544,7 @@ export default function App() {
           )}
 
           {/* 3. INDICATOR PARAMETERS */}
-          {sidebarView === 'indicators' && (
+          {(!isMobileViewport || mobileSheetView === 'indicators') && sidebarView === 'indicators' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2">
             {focusedSymbolIndex && indicatorDatabase[focusedSymbolIndex] ? (
               <div className="flex flex-col min-h-full">
@@ -8300,8 +9564,57 @@ export default function App() {
           )}
 
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
-          {sidebarView === 'settings' && (
+          {(!isMobileViewport || mobileSheetView === 'settings') && sidebarView === 'settings' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+          <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                ワークスペース保存先
+              </span>
+              <span className={`px-1.5 py-0.5 border text-[9px] font-bold ${
+                workspacePersistenceMode === 'shared'
+                  ? 'border-emerald-800 bg-emerald-950/70 text-emerald-300'
+                  : workspacePersistenceMode === 'local'
+                    ? 'border-amber-800 bg-amber-950/60 text-amber-300'
+                    : 'border-gray-700 bg-gray-900 text-gray-400'
+              }`}>
+                {workspacePersistenceMode === 'shared'
+                  ? 'OCIクラウド・全端末共通'
+                  : workspacePersistenceMode === 'local'
+                    ? 'このブラウザ'
+                    : '確認中'}
+              </span>
+            </div>
+            <div className="text-[10px] text-gray-400">
+              {workspacePersistenceMode === 'shared'
+                ? '変更はOCIへ保存され、PC・Mac・スマホで共通表示されます。'
+                : '現在の設定はこのブラウザに保存されています。'}
+            </div>
+            {workspacePersistenceMode === 'shared' && sharedWorkspaceUpdatedAt && (
+              <div className="text-[9px] font-mono text-gray-500">
+                最終保存: {new Date(sharedWorkspaceUpdatedAt).toLocaleString('ja-JP')}
+              </div>
+            )}
+            {workspacePersistenceMode === 'local' && (
+              <button
+                type="button"
+                onClick={() => void handleCopyWorkspaceToOci()}
+                className="bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-2 font-bold text-[11px] transition"
+              >
+                現在の設定をOCIへコピー
+              </button>
+            )}
+            {workspaceMigrationMessage && (
+              <div className="border border-emerald-900/70 bg-emerald-950/35 p-2 text-[10px] text-emerald-300">
+                {workspaceMigrationMessage}
+              </div>
+            )}
+            {sharedWorkspaceError && (
+              <div className="border border-red-900/70 bg-red-950/35 p-2 text-[10px] text-red-300">
+                {sharedWorkspaceError}
+              </div>
+            )}
+          </div>
           <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">接続ステータス</span>
@@ -8375,9 +9688,172 @@ export default function App() {
           </div>
           )}
 
+          {isMobileViewport && mobileSheetView === 'image-export' && (
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 text-xs">
+              <div className="mb-3 border border-[#2d2d2d] bg-[#101010] p-3 text-gray-300">
+                スマホ画面に現在表示している1つのチャートをPNG画像として保存します。
+              </div>
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">対象チャートを切り替える</div>
+                <div className="mt-2 border border-[#242424]">
+                  {panels.map((panel, index) => {
+                    const selected = index === activeMobilePanelIndex;
+                    return (
+                      <button
+                        key={panel.id}
+                        type="button"
+                        onClick={() => {
+                          setMobileActivePanelIndex(index);
+                          setChartImageExportSettings((current) => ({
+                            ...current,
+                            selection: { ...current.selection, mode: 'custom', panelIds: [panel.id] },
+                          }));
+                        }}
+                        className={`flex h-10 w-full items-center gap-2 border-b border-[#202020] px-3 text-left last:border-b-0 ${
+                          selected ? 'bg-emerald-950/30 text-emerald-100' : 'text-gray-400'
+                        }`}
+                      >
+                        <span className={`flex h-4 w-4 items-center justify-center border ${
+                          selected ? 'border-emerald-500 bg-emerald-800 text-white' : 'border-gray-600'
+                        }`}>
+                          {selected && <Check className="h-3 w-3" />}
+                        </span>
+                        <span className="truncate">
+                          {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleChartImageExport()}
+                disabled={Boolean(chartExportStatus)
+                  || (chartImageExportSettings.selection.mode === 'custom'
+                    && chartImageExportSettings.selection.panelIds.length === 0)}
+                className="flex h-11 w-full items-center justify-center gap-2 border border-emerald-700 bg-emerald-950/60 font-bold text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {chartExportStatus?.kind === 'image' ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                PNG画像を作成
+              </button>
+            </div>
+          )}
+
+          {isMobileViewport && mobileSheetView === 'video-export' && (
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 text-xs">
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">チャート移動時間</div>
+                <div className="grid grid-cols-5 gap-1">
+                  {[3, 5, 8, 10, 15].map((seconds) => (
+                    <button
+                      key={seconds}
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        durationSeconds: seconds,
+                      }))}
+                      className={`h-9 border font-mono ${
+                        chartVideoExportSettings.durationSeconds === seconds
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400'
+                      }`}
+                    >
+                      {seconds}秒
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1.5 text-[10px] text-gray-500">
+                  最終画面の静止 {CHART_EXPORT_FINAL_HOLD_SECONDS}秒を追加します。
+                </div>
+              </div>
+
+              <div className="mb-3 grid grid-cols-2 gap-3">
+                <div>
+                  <div className="mb-1.5 font-bold text-gray-300">フレームレート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    {([30, 60] as const).map((frameRate) => (
+                      <button
+                        key={frameRate}
+                        type="button"
+                        onClick={() => setChartVideoExportSettings((current) => ({
+                          ...current,
+                          frameRate,
+                        }))}
+                        className={`h-9 border ${
+                          chartVideoExportSettings.frameRate === frameRate
+                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                            : 'border-[#303030] text-gray-400'
+                        }`}
+                      >
+                        {frameRate} fps
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 font-bold text-gray-300">解像度</div>
+                  <select
+                    value={chartVideoExportSettings.resolutionId}
+                    onChange={(event) => setChartVideoExportSettings((current) => ({
+                      ...current,
+                      resolutionId: event.target.value,
+                    }))}
+                    className="h-9 w-full border border-[#303030] bg-[#101010] px-2 text-gray-200 outline-none"
+                  >
+                    {CHART_EXPORT_RESOLUTIONS.map((resolution) => (
+                      <option key={resolution.id} value={resolution.id}>
+                        {resolution.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                <div className="border border-[#303030] bg-[#101010] px-3 py-2 text-cyan-100">
+                  {activeMobilePanelIndex + 1}番目: {' '}
+                  {panels[activeMobilePanelIndex]?.name
+                    || normalizeStoredSymbolValue(panels[activeMobilePanelIndex]?.symbol || '')
+                    || '空のチャート'}
+                </div>
+                <div className="mt-1.5 text-[10px] text-gray-500">
+                  対象を変更する場合は、チャート画面へ戻ってヘッダーを左右にスワイプしてください。
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleChartVideoExport()}
+                disabled={chartExportStatus?.kind === 'image'
+                  || (chartVideoExportSettings.selection.mode === 'custom'
+                    && chartVideoExportSettings.selection.panelIds.length === 0)}
+                className={`flex h-11 w-full items-center justify-center gap-2 border font-bold disabled:cursor-not-allowed disabled:opacity-40 ${
+                  chartExportStatus?.kind === 'video'
+                    ? 'border-red-700 bg-red-950/60 text-red-100'
+                    : 'border-cyan-700 bg-cyan-950/60 text-cyan-100'
+                }`}
+              >
+                {chartExportStatus?.kind === 'video' ? (
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                ) : (
+                  <Video className="h-4 w-4" />
+                )}
+                {chartExportStatus?.kind === 'video'
+                  ? `動画作成を停止（${Math.round(chartExportStatus.progress * 100)}%）`
+                  : 'MP4動画を作成'}
+              </button>
+            </div>
+          )}
+
           </div>
 
-          <nav className="w-11 shrink-0 border-l border-[#242424] bg-[#070707] flex flex-col items-center py-2 gap-1">
+          <nav className="hidden w-11 shrink-0 border-l border-[#242424] bg-[#070707] flex-col items-center py-2 gap-1 md:flex">
             <button
               type="button"
               onClick={() => handleSidebarNavClick('watchlist')}
@@ -8417,14 +9893,608 @@ export default function App() {
             >
               <Settings className="w-5 h-5" />
             </button>
+            <button
+              type="button"
+              onClick={() => void handleChartImageExport()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setVideoExportMenu(null);
+                setChartAiPromptMenu(null);
+                setImageExportMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={Boolean(chartExportStatus || chartAiStatus)}
+              className="w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-emerald-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
+              title="チャート画像をPNGでダウンロード（右クリックで対象を設定）"
+              aria-label="チャート画像をダウンロード"
+            >
+              {chartExportStatus?.kind === 'image' ? (
+                <LoaderCircle className="w-5 h-5 animate-spin text-emerald-300" />
+              ) : (
+                <Camera className="w-5 h-5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleChartVideoExport()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setImageExportMenu(null);
+                setChartAiPromptMenu(null);
+                setVideoExportMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={chartExportStatus?.kind === 'image' || Boolean(chartAiStatus)}
+              className={`relative w-9 h-10 flex items-center justify-center border border-transparent transition disabled:cursor-wait disabled:opacity-70 ${
+                chartExportStatus?.kind === 'video'
+                  ? 'bg-red-950/70 text-red-300 hover:bg-red-900/80 hover:text-white'
+                  : 'text-gray-400 hover:text-cyan-200 hover:bg-[#161616]'
+              }`}
+              title={chartExportStatus?.kind === 'video'
+                ? '動画作成を停止'
+                : 'チャート動画をMP4でダウンロード（右クリックで時間・fps・解像度・対象を設定）'}
+              aria-label={chartExportStatus?.kind === 'video'
+                ? '動画作成を停止'
+                : 'チャート動画をダウンロード'}
+            >
+              {chartExportStatus?.kind === 'video' ? (
+                <Square className="w-4 h-4 fill-current" />
+              ) : (
+                <Video className="w-5 h-5" />
+              )}
+              {chartExportStatus?.kind === 'video' && (
+                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-cyan-200">
+                  {Math.round(chartExportStatus.progress * 100)}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleChartAiAnalysis()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setVideoExportMenu(null);
+                setImageExportMenu(null);
+                setChartAiPromptMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={Boolean(chartExportStatus || chartAiStatus)}
+              className="relative w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-violet-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
+              title={`チャート画像をダウンロードしてAI分析（${GEMINI_CHART_MODELS.find((model) => model.id === chartAiModel)?.label || chartAiModel}、右クリックで設定）`}
+              aria-label="チャート画像をダウンロードしてAI分析"
+            >
+              {chartAiStatus ? (
+                <LoaderCircle className="h-5 w-5 animate-spin text-violet-300" />
+              ) : (
+                <span className="text-[11px] font-black tracking-tight">AI</span>
+              )}
+              {chartAiStatus?.stage === 'capturing' && (
+                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-violet-200">
+                  {Math.round(chartAiStatus.progress * 100)}
+                </span>
+              )}
+            </button>
+
+            {videoExportMenu && (
+              <div
+                className="fixed z-[110] w-72 max-h-[calc(100vh-16px)] overflow-y-auto border border-[#3a3a3a] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(videoExportMenu.x - 288, window.innerWidth - 296)),
+                  top: Math.max(8, Math.min(videoExportMenu.y, window.innerHeight - 608)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#242424] px-3 py-2">
+                  <div className="font-bold text-cyan-200">チャート動画の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">左クリック時もこの設定を使用します</div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="font-bold text-gray-300">チャート移動時間</span>
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        step={1}
+                        value={chartVideoExportSettings.durationSeconds}
+                        onChange={(event) => {
+                          const durationSeconds = Math.max(
+                            1,
+                            Math.min(30, Number(event.target.value) || 5),
+                          );
+                          setChartVideoExportSettings((current) => ({
+                            ...current,
+                            durationSeconds,
+                          }));
+                        }}
+                        className="h-6 w-14 border border-[#343434] bg-[#111111] px-1.5 text-right font-mono text-white outline-none focus:border-cyan-600"
+                        aria-label="チャート移動時間"
+                      />
+                      <span className="text-gray-500">秒</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1">
+                    {[3, 5, 8, 10, 15].map((seconds) => (
+                      <button
+                        key={seconds}
+                        type="button"
+                        onClick={() => setChartVideoExportSettings((current) => ({
+                          ...current,
+                          durationSeconds: seconds,
+                        }))}
+                        className={`h-6 border font-mono transition ${
+                          chartVideoExportSettings.durationSeconds === seconds
+                            ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                            : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                        }`}
+                      >
+                        {seconds}秒
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1.5 border border-[#2d2d2d] bg-[#101010] px-2 py-1 text-[9px] text-gray-400">
+                    移動 {chartVideoExportSettings.durationSeconds}秒
+                    {' + '}
+                    最終画面 {CHART_EXPORT_FINAL_HOLD_SECONDS}秒
+                    {' = '}
+                    <span className="font-bold text-cyan-200">
+                      合計 {chartVideoExportSettings.durationSeconds + CHART_EXPORT_FINAL_HOLD_SECONDS}秒
+                    </span>
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">フレームレート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    {([30, 60] as const).map((frameRate) => {
+                      const selected = chartVideoExportSettings.frameRate === frameRate;
+                      return (
+                        <button
+                          key={frameRate}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            frameRate,
+                          }))}
+                          className={`flex h-7 items-center justify-center gap-1.5 border font-mono transition ${
+                            selected
+                              ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                              : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                          }`}
+                        >
+                          {selected && <Check className="h-3 w-3" />}
+                          {frameRate}fps
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 text-[9px] text-gray-500">
+                    30fpsは書き出しが速く、60fpsはより滑らかな動画になります
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">解像度</div>
+                  <div className="space-y-1">
+                    {CHART_EXPORT_RESOLUTIONS.map((resolution) => {
+                      const selected = chartVideoExportSettings.resolutionId === resolution.id;
+                      return (
+                        <button
+                          key={resolution.id}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            resolutionId: resolution.id,
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border px-2 text-left transition ${
+                            selected
+                              ? 'border-cyan-700 bg-cyan-950/50 text-cyan-100'
+                              : 'border-[#303030] text-gray-400 hover:bg-[#171717] hover:text-white'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 items-center justify-center border ${
+                            selected ? 'border-cyan-400 text-cyan-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          {resolution.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        selection: { ...current.selection, mode: 'all' },
+                      }))}
+                      className={`h-7 border ${
+                        chartVideoExportSettings.selection.mode === 'all'
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      全て選択
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChartVideoExportSettings((current) => ({
+                        ...current,
+                        selection: {
+                          ...current.selection,
+                          mode: 'custom',
+                          panelIds: [],
+                        },
+                      }))}
+                      className={`h-7 border ${
+                        chartVideoExportSettings.selection.mode === 'custom'
+                        && chartVideoExportSettings.selection.panelIds.length === 0
+                          ? 'border-cyan-600 bg-cyan-950/60 text-cyan-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      選択解除
+                    </button>
+                  </div>
+                  <div className="mt-2 max-h-36 overflow-y-auto border border-[#242424]">
+                    {panels.map((panel, index) => {
+                      const selected = getSelectedChartExportPanelIds(
+                        chartVideoExportSettings.selection,
+                      ).includes(panel.id);
+                      return (
+                        <button
+                          key={panel.id}
+                          type="button"
+                          onClick={() => setChartVideoExportSettings((current) => ({
+                            ...current,
+                            selection: toggleChartExportPanel(
+                              current.selection,
+                              panel.id,
+                              panels.map((currentPanel) => currentPanel.id),
+                            ),
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
+                            selected ? 'bg-cyan-950/30 text-cyan-100' : 'text-gray-400'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
+                            selected ? 'border-cyan-400 text-cyan-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          <span className="truncate">
+                            {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleChartVideoExport()}
+                    disabled={
+                      chartVideoExportSettings.selection.mode === 'custom'
+                      && chartVideoExportSettings.selection.panelIds.length === 0
+                    }
+                    className="flex h-8 w-full items-center justify-center gap-2 border border-cyan-700 bg-cyan-950/50 font-bold text-cyan-100 hover:bg-cyan-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Download className="h-4 w-4" />
+                    選択したチャートを個別MP4で作成
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {imageExportMenu && (
+              <div
+                className="fixed z-[110] w-64 max-h-[calc(100vh-16px)] overflow-y-auto border border-[#3a3a3a] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(imageExportMenu.x - 256, window.innerWidth - 264)),
+                  top: Math.max(8, Math.min(imageExportMenu.y, window.innerHeight - 416)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#242424] px-3 py-2">
+                  <div className="font-bold text-emerald-200">チャート画像の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">左クリック時もこの設定を使用します</div>
+                </div>
+                <div className="border-b border-[#242424] p-2.5">
+                  <div className="mb-1.5 font-bold text-gray-300">対象チャート</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setChartImageExportSettings((current) => ({
+                        ...current,
+                        selection: { ...current.selection, mode: 'all' },
+                      }))}
+                      className={`h-7 border ${
+                        chartImageExportSettings.selection.mode === 'all'
+                          ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      全て選択
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChartImageExportSettings((current) => ({
+                        ...current,
+                        selection: {
+                          ...current.selection,
+                          mode: 'custom',
+                          panelIds: [],
+                        },
+                      }))}
+                      className={`h-7 border ${
+                        chartImageExportSettings.selection.mode === 'custom'
+                        && chartImageExportSettings.selection.panelIds.length === 0
+                          ? 'border-emerald-600 bg-emerald-950/60 text-emerald-200'
+                          : 'border-[#303030] text-gray-400 hover:bg-[#171717]'
+                      }`}
+                    >
+                      選択解除
+                    </button>
+                  </div>
+                  <div className="mt-2 max-h-40 overflow-y-auto border border-[#242424]">
+                    {panels.map((panel, index) => {
+                      const selected = getSelectedChartExportPanelIds(
+                        chartImageExportSettings.selection,
+                      ).includes(panel.id);
+                      return (
+                        <button
+                          key={panel.id}
+                          type="button"
+                          onClick={() => setChartImageExportSettings((current) => ({
+                            ...current,
+                            selection: toggleChartExportPanel(
+                              current.selection,
+                              panel.id,
+                              panels.map((currentPanel) => currentPanel.id),
+                            ),
+                          }))}
+                          className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left last:border-b-0 hover:bg-[#171717] ${
+                            selected ? 'bg-emerald-950/30 text-emerald-100' : 'text-gray-400'
+                          }`}
+                        >
+                          <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
+                            selected ? 'border-emerald-400 text-emerald-200' : 'border-gray-600'
+                          }`}>
+                            {selected && <Check className="h-3 w-3" />}
+                          </span>
+                          <span className="truncate">
+                            {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleChartImageExport()}
+                    disabled={
+                      chartImageExportSettings.selection.mode === 'custom'
+                      && chartImageExportSettings.selection.panelIds.length === 0
+                    }
+                    className="flex h-8 w-full items-center justify-center gap-2 border border-emerald-700 bg-emerald-950/50 font-bold text-emerald-100 hover:bg-emerald-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Download className="h-4 w-4" />
+                    選択したチャートを個別PNGで作成
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {chartAiPromptMenu && (
+              <div
+                className="fixed z-[110] flex w-[min(36rem,calc(100vw-16px))] max-h-[calc(100vh-16px)] flex-col border border-[#493b66] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(chartAiPromptMenu.x - 576, window.innerWidth - 584)),
+                  top: Math.max(8, Math.min(chartAiPromptMenu.y, window.innerHeight - 584)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#2d2540] px-3 py-2">
+                  <div className="font-bold text-violet-200">AI分析の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">
+                    左クリック時はカメラと同じ対象チャートをダウンロードし、この文章と画像をGeminiへ送ります
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 p-2.5">
+                  <label className="mb-2.5 block">
+                    <span className="mb-1 block font-bold text-gray-300">使用モデル</span>
+                    <select
+                      value={chartAiModel}
+                      onChange={(event) => setChartAiModel(
+                        normalizeGeminiChartModelId(event.target.value),
+                      )}
+                      className="h-9 w-full border border-[#493b66] bg-[#101010] px-2 text-[11px] font-bold text-violet-100 outline-none focus:border-violet-500"
+                      aria-label="Geminiモデル"
+                    >
+                      {GEMINI_CHART_MODELS.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}{model.id === 'gemini-3.6-flash' ? '（推奨）' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="mt-1 block text-[9px] text-gray-500">
+                      {GEMINI_CHART_MODELS.find((model) => model.id === chartAiModel)?.description}
+                    </span>
+                  </label>
+                  <textarea
+                    value={chartAiPrompt}
+                    onChange={(event) => setChartAiPrompt(event.target.value)}
+                    maxLength={30_000}
+                    spellCheck={false}
+                    className="h-[min(23rem,calc(100vh-242px))] min-h-40 w-full resize-none border border-[#34303d] bg-[#101010] p-2 font-mono text-[11px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
+                    aria-label="AI分析プロンプト"
+                  />
+                  <div className="mt-1 flex items-center justify-between text-[9px] text-gray-500">
+                    <span>変更内容は自動保存されます</span>
+                    <span>{chartAiPrompt.length.toLocaleString('ja-JP')} / 30,000</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-t border-[#2d2540] p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setChartAiPrompt(DEFAULT_CHART_AI_PROMPT)}
+                    className="flex h-8 items-center justify-center gap-1.5 border border-[#3a3a3a] text-gray-300 hover:bg-[#171717] hover:text-white"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    初期プロンプトへ戻す
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleChartAiAnalysis()}
+                    disabled={!chartAiPrompt.trim()}
+                    className="flex h-8 items-center justify-center gap-2 border border-violet-700 bg-violet-950/50 font-bold text-violet-100 hover:bg-violet-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <span className="text-[10px] font-black">AI</span>
+                    画像を保存して分析
+                  </button>
+                </div>
+              </div>
+            )}
           </nav>
         </div>
 
       </div>
       )}
 
+      {chartAiResult && (
+        <div
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-black/75 p-3 md:p-8"
+          onClick={() => setChartAiResult(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="chart-ai-result-title"
+            className="flex max-h-[calc(100dvh-24px)] w-full max-w-3xl flex-col border border-[#493b66] bg-[#080808] shadow-2xl md:max-h-[calc(100vh-64px)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex items-center gap-3 border-b border-[#2d2540] px-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <h2 id="chart-ai-result-title" className="font-bold text-violet-100">
+                  AIチャート分析
+                </h2>
+                <div className="mt-0.5 text-[10px] text-gray-500">
+                  分析対象のPNG画像はダウンロード済みです
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleCopyChartAiResult()}
+                className="flex h-8 shrink-0 items-center gap-1.5 border border-violet-700 bg-violet-950/50 px-3 text-[11px] font-bold text-violet-100 hover:bg-violet-900/60"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {chartAiCopied ? 'コピー済み' : 'コピー'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartAiResult(null)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center text-gray-400 hover:bg-[#171717] hover:text-white"
+                aria-label="AI分析結果を閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-7 text-gray-100">
+                {chartAiResult.text}
+              </pre>
+            </div>
+            <footer className="border-t border-[#242424] px-4 py-2 text-[9px] text-gray-500">
+              使用モデル: {chartAiResult.model}
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {chartExportError && (
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[140] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl md:bottom-12 md:right-14">
+          <span className="min-w-0 flex-1 leading-relaxed">{chartExportError}</span>
+          <button
+            type="button"
+            onClick={() => setChartExportError(null)}
+            className="shrink-0 text-red-300 hover:text-white"
+            aria-label="エラーを閉じる"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {pendingIosVideoFiles.length > 0 && (
+        <div
+          className="fixed inset-0 z-[140] flex items-end justify-center bg-black/70 px-3 pb-[calc(4.75rem+env(safe-area-inset-bottom))] pt-8 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="iOS写真への動画保存"
+          data-ios-video-save-dialog="true"
+        >
+          <div className="w-full max-w-md border border-cyan-700 bg-[#090909] p-4 text-gray-100 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-cyan-200">動画の作成が完了しました</div>
+                <div className="mt-1 text-[11px] leading-relaxed text-gray-400">
+                  下のボタンをタップし、iOS共有シートで「ビデオを保存」を選ぶと「写真」へ追加できます。
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingIosVideoFiles([])}
+                disabled={iosVideoShareInFlight}
+                className="shrink-0 text-gray-400 hover:text-white disabled:opacity-40"
+                aria-label="動画保存画面を閉じる"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-3 border border-[#303030] bg-black/40 px-3 py-2 text-[10px] text-gray-400">
+              {pendingIosVideoFiles.length}本・
+              {(pendingIosVideoFiles.reduce((total, file) => total + file.size, 0) / 1024 / 1024).toFixed(1)}MB
+              ・iOS互換MP4
+            </div>
+            <button
+              type="button"
+              onClick={handleShareIosVideoFiles}
+              disabled={iosVideoShareInFlight}
+              className="mt-3 flex h-12 w-full items-center justify-center gap-2 bg-cyan-700 text-sm font-bold text-white transition hover:bg-cyan-600 disabled:cursor-wait disabled:opacity-60"
+            >
+              {iosVideoShareInFlight ? (
+                <LoaderCircle className="h-5 w-5 animate-spin" />
+              ) : (
+                <Upload className="h-5 w-5" />
+              )}
+              iOS「写真」へ保存
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadIosVideoFiles}
+              disabled={iosVideoShareInFlight}
+              className="mt-2 flex h-9 w-full items-center justify-center gap-2 border border-gray-700 text-[11px] font-bold text-gray-300 hover:bg-gray-900 disabled:opacity-40"
+            >
+              <Download className="h-4 w-4" />
+              従来どおり「ファイル」へ保存
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Footer information panel */}
-      <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 flex items-center justify-between px-4 text-[10px] text-[#848e9c]">
+      <footer className="h-8 border-t border-[#202020] bg-[#080808] shrink-0 hidden items-center justify-between px-4 text-[10px] text-[#848e9c] md:flex">
         <div className="flex items-center space-x-3">
           <span className="flex items-center space-x-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-[#009b87]"></span>
@@ -8438,6 +10508,114 @@ export default function App() {
           <span>© {new Date().getFullYear()} trading multi dashboard workspace</span>
         </div>
       </footer>
+
+      <div
+        className="shrink-0 md:hidden"
+        style={{ height: 'calc(4rem + env(safe-area-inset-bottom))' }}
+        aria-hidden="true"
+      />
+
+      <nav
+        data-mobile-bottom-navigation="true"
+        className="fixed inset-x-0 bottom-0 z-[100] grid grid-cols-6 border-t border-[#303030] bg-[#080808]/98 shadow-[0_-8px_28px_rgba(0,0,0,0.55)] backdrop-blur md:hidden"
+        style={{
+          height: 'calc(4rem + env(safe-area-inset-bottom))',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}
+        aria-label="スマホ用メインナビゲーション"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setAppView('charts');
+            setMobileSheetView(null);
+          }}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            appView === 'charts' && !mobileSheetView
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="チャートを表示"
+        >
+          <LayoutGrid className="h-5 w-5" />
+          <span>チャート</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('watchlist')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'watchlist'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="ウォッチリストを表示"
+        >
+          <List className="h-5 w-5" />
+          <span>リスト</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('indicators')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'indicators'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="インジケーター設定を表示"
+        >
+          <ChartNoAxesCombined className="h-5 w-5" />
+          <span>指標</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('settings')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'settings'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="接続・保存設定を表示"
+        >
+          <Settings className="h-5 w-5" />
+          <span>設定</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('image-export')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'image-export'
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'text-gray-400'
+          }`}
+          aria-label="チャート画像の設定を表示"
+        >
+          {chartExportStatus?.kind === 'image' ? (
+            <LoaderCircle className="h-5 w-5 animate-spin" />
+          ) : (
+            <Camera className="h-5 w-5" />
+          )}
+          <span>画像</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('video-export')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'video-export'
+              ? 'bg-cyan-950/70 text-cyan-300'
+              : chartExportStatus?.kind === 'video'
+                ? 'bg-red-950/70 text-red-300'
+                : 'text-gray-400'
+          }`}
+          aria-label="チャート動画の設定を表示"
+        >
+          {chartExportStatus?.kind === 'video' ? (
+            <Square className="h-4 w-4 fill-current" />
+          ) : (
+            <Video className="h-5 w-5" />
+          )}
+          <span>動画</span>
+        </button>
+      </nav>
 
     </div>
   );

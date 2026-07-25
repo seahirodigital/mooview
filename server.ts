@@ -10,12 +10,97 @@ import { createServer as createViteServer } from 'vite';
 
 import { handleMoomooRequest } from './server/moomooHandler.js';
 import { resolveMoomooGatewayKey } from './server/moomooClient.js';
+import { handleGeminiChartAnalysis } from './server/geminiHandler.js';
+import {
+  normalizeSharedWorkspaceProfile,
+  readSharedWorkspaceSettings,
+  sharedWorkspaceSettingsEnabled,
+  writeSharedWorkspaceSettings,
+} from './server/workspaceSettingsStore.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+const host = process.env.HOST?.trim() || '0.0.0.0';
 let gatewayProcess: ChildProcess | null = null;
 
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '20mb' }));
+
+function workspaceSettingsOriginAllowed(origin: string, requestHost: string): boolean {
+  try {
+    const originUrl = new URL(origin);
+    if (originUrl.host === requestHost) {
+      return true;
+    }
+    return ['localhost', '127.0.0.1', '::1'].includes(originUrl.hostname);
+  } catch {
+    return false;
+  }
+}
+
+app.use('/api/workspace-settings', (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin) {
+    if (!workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+      response.status(403).json({ error: '許可されていないオリジンです。' });
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,PUT,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (request.method === 'OPTIONS') {
+    response.status(204).end();
+    return;
+  }
+  next();
+});
+
+app.get('/api/workspace-settings', async (request, response) => {
+  try {
+    const profile = normalizeSharedWorkspaceProfile(request.query.profile);
+    response.json(await readSharedWorkspaceSettings(profile));
+  } catch (error) {
+    console.error('共有設定の読み込みに失敗しました。', error);
+    response.status(500).json({ error: '共有設定の読み込みに失敗しました。' });
+  }
+});
+
+app.put('/api/workspace-settings', async (request, response) => {
+  if (!sharedWorkspaceSettingsEnabled()) {
+    response.status(404).json({ error: '共有設定保存は無効です。' });
+    return;
+  }
+  try {
+    const profile = normalizeSharedWorkspaceProfile(request.query.profile);
+    const saved = await writeSharedWorkspaceSettings(
+      profile,
+      request.body?.settings,
+      request.body?.expectedRevision,
+      request.body?.force === true,
+    );
+    response.json(saved);
+  } catch (error) {
+    const isConflict = error instanceof Error
+      && (error as Error & { code?: string }).code === 'REVISION_CONFLICT';
+    response.status(isConflict ? 409 : 400).json({
+      error: error instanceof Error ? error.message : '共有設定の保存に失敗しました。',
+    });
+  }
+});
+
+app.use('/api/ai', (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin && !workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+    response.status(403).json({ error: '許可されていないオリジンです。' });
+    return;
+  }
+  next();
+});
+
+app.post('/api/ai/chart-analysis', (request, response) => {
+  void handleGeminiChartAnalysis(request, response);
+});
 
 app.post('/api/moomoo/status', (request, response) =>
   handleMoomooRequest('status', request, response),
@@ -210,8 +295,8 @@ async function startServer(): Promise<void> {
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`MooViewサーバー起動: http://127.0.0.1:${port}`);
+  app.listen(port, host, () => {
+    console.log(`MooViewサーバー起動: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`);
   });
 }
 

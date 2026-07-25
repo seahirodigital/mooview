@@ -53,11 +53,13 @@ interface InteractiveCustomChartProps {
   focusDateActive?: boolean;
   allowNegativeValues?: boolean;
   valuePrecision?: number;
+  exportPlaybackProgress?: number | null;
 }
 
 const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
 const CHART_BULL_COLOR = '#009b87';
 const CHART_BEAR_COLOR = '#ff4057';
+const EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS = 0.9;
 
 function findAlignedOrNearestCandle(
   candles: Candle[],
@@ -157,6 +159,17 @@ function calculateChangePct(latest: number, base: number): number {
   return ((latest - base) / denominator) * 100;
 }
 
+function calculatePreviousCloseFromChangePct(latest: number, changePct: number): number | null {
+  const changeFactor = 1 + changePct / 100;
+  if (!Number.isFinite(latest) || !Number.isFinite(changeFactor) || Math.abs(changeFactor) <= 0.0000001) {
+    return null;
+  }
+  const previousClose = latest / changeFactor;
+  return Number.isFinite(previousClose) && Math.abs(previousClose) > 0.0000001
+    ? previousClose
+    : null;
+}
+
 function formatSignedPercent(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
@@ -220,6 +233,22 @@ interface ComparisonSeriesPoint {
   globalIndex: number;
 }
 
+function interpolateNumber(start: number, end: number, progress: number): number {
+  return start + (end - start) * progress;
+}
+
+function interpolateCandle(start: Candle, end: Candle, progress: number): Candle {
+  return {
+    time: interpolateNumber(start.time, end.time, progress),
+    timeStr: progress < 0.5 ? start.timeStr : end.timeStr,
+    open: interpolateNumber(start.open, end.open, progress),
+    high: interpolateNumber(start.high, end.high, progress),
+    low: interpolateNumber(start.low, end.low, progress),
+    close: interpolateNumber(start.close, end.close, progress),
+    volume: interpolateNumber(start.volume, end.volume, progress),
+  };
+}
+
 export function InteractiveCustomChart({
   symbol,
   candles,
@@ -263,6 +292,7 @@ export function InteractiveCustomChart({
   focusDateActive = false,
   allowNegativeValues = false,
   valuePrecision = 2,
+  exportPlaybackProgress = null,
 }: InteractiveCustomChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -446,6 +476,44 @@ export function InteractiveCustomChart({
   const visibleCandles = useMemo(() => {
     return candles.slice(startIndex, endIndex + 1);
   }, [candles, startIndex, endIndex]);
+  const exportPlaybackActive = typeof exportPlaybackProgress === 'number';
+  const normalizedExportPlaybackProgress = exportPlaybackActive
+    ? Math.max(0, Math.min(1, exportPlaybackProgress))
+    : 1;
+  const exportPlaybackPosition = visibleCandles.length > 1
+    ? normalizedExportPlaybackProgress * (visibleCandles.length - 1)
+    : 0;
+  const exportPlaybackBaseSliceIndex = Math.max(
+    0,
+    Math.min(visibleCandles.length - 1, Math.floor(exportPlaybackPosition)),
+  );
+  const exportPlaybackFraction = exportPlaybackActive
+    ? exportPlaybackPosition - exportPlaybackBaseSliceIndex
+    : 0;
+  const playbackVisibleCandles = useMemo(
+    () => {
+      if (visibleCandles.length === 0) return [];
+      const completedCandles = visibleCandles.slice(0, exportPlaybackBaseSliceIndex + 1);
+      const nextCandle = visibleCandles[exportPlaybackBaseSliceIndex + 1];
+      if (!exportPlaybackActive || exportPlaybackFraction <= 0 || !nextCandle) {
+        return completedCandles;
+      }
+      return [
+        ...completedCandles,
+        interpolateCandle(
+          visibleCandles[exportPlaybackBaseSliceIndex],
+          nextCandle,
+          exportPlaybackFraction,
+        ),
+      ];
+    },
+    [
+      exportPlaybackActive,
+      exportPlaybackBaseSliceIndex,
+      exportPlaybackFraction,
+      visibleCandles,
+    ],
+  );
   const focusSliceIndex = focusCandleIndex !== null && focusCandleIndex >= startIndex && focusCandleIndex <= endIndex
     ? focusCandleIndex - startIndex
     : null;
@@ -562,23 +630,40 @@ export function InteractiveCustomChart({
     return result;
   }, [comparisonSymbols, comparisonCandles]);
 
-  // 表示範囲の主銘柄と同じ時刻にある比較銘柄の最初の価格を基準にする
+  // 日次表示では前日終値、それ以外では表示範囲の最初の価格を比較基準にする
   const compStartPrice = useMemo(() => {
     const result: Record<string, number> = {};
     comparisonSymbols.forEach((symbol) => {
       const candleMap = comparisonCandleMaps[symbol];
+      const candleSeries = comparisonCandleSeries[symbol] || [];
       const firstAlignedCandle = visibleCandles
         .map((mainCandle) => findAlignedOrPreviousCandle(
-          comparisonCandleSeries[symbol] || [],
+          candleSeries,
           candleMap,
           mainCandle,
           timeframe,
         ))
         .find((candle): candle is Candle => Boolean(candle));
-      result[symbol] = firstAlignedCandle?.close || 1;
+      const fallbackStartPrice = firstAlignedCandle?.close || 1;
+      const lastMainCandle = visibleCandles[visibleCandles.length - 1];
+      const lastAlignedCandle = lastMainCandle
+        ? findAlignedOrNearestCandle(candleSeries, candleMap, lastMainCandle, timeframe)
+        : null;
+      const overrideChangePct = getChangePctOverride(symbol);
+      const previousClose = lastAlignedCandle && overrideChangePct !== null
+        ? calculatePreviousCloseFromChangePct(lastAlignedCandle.close, overrideChangePct)
+        : null;
+      result[symbol] = previousClose ?? fallbackStartPrice;
     });
     return result;
-  }, [comparisonSymbols, comparisonCandleMaps, comparisonCandleSeries, timeframe, visibleCandles]);
+  }, [
+    comparisonSymbols,
+    comparisonCandleMaps,
+    comparisonCandleSeries,
+    timeframe,
+    visibleCandles,
+    changePctOverrides,
+  ]);
 
   // Calculate high and low price ranges for scale bounds of visible candles
   const priceMinMax = useMemo(() => {
@@ -659,6 +744,17 @@ export function InteractiveCustomChart({
     if (visibleCandles.length <= 1) return 0;
     return (sliceIdx / (visibleCandles.length - 1)) * plotWidth;
   };
+  const getPlaybackSlicePosition = (playbackIndex: number) => {
+    const partialCandleIndex = playbackVisibleCandles.length - 1;
+    if (
+      exportPlaybackActive
+      && exportPlaybackFraction > 0
+      && playbackIndex === partialCandleIndex
+    ) {
+      return exportPlaybackPosition;
+    }
+    return playbackIndex;
+  };
 
   const getY = (price: number) => {
     const bottomLabelPadding = 25;
@@ -694,7 +790,9 @@ export function InteractiveCustomChart({
           y: getY(scaledPrice),
           close: compCandle.close,
           scaledPrice,
-          changePct: getChangePctOverride(compSym) ?? calculateChangePct(compCandle.close, startPrice),
+          changePct: sliceIndex === visibleCandles.length - 1 && getChangePctOverride(compSym) !== null
+            ? getChangePctOverride(compSym)!
+            : calculateChangePct(compCandle.close, startPrice),
           sliceIndex,
           globalIndex: startIndex + sliceIndex,
         });
@@ -719,22 +817,90 @@ export function InteractiveCustomChart({
     startIndex,
     changePctOverrides,
   ]);
+  const playbackComparisonSeriesData = useMemo<Record<string, ComparisonSeriesPoint[]>>(
+    () => Object.fromEntries(
+      comparisonSymbols.map((compSym) => {
+        const fullSeries = comparisonSeriesData[compSym] || [];
+        const visiblePoints = fullSeries.filter(
+          (point) => point.sliceIndex <= exportPlaybackPosition,
+        );
+        if (!exportPlaybackActive) {
+          return [compSym, visiblePoints];
+        }
+
+        const previousPoint = [...fullSeries]
+          .reverse()
+          .find((point) => point.sliceIndex <= exportPlaybackPosition);
+        const nextPoint = fullSeries.find(
+          (point) => point.sliceIndex > exportPlaybackPosition,
+        );
+        if (!previousPoint || !nextPoint || nextPoint.sliceIndex === previousPoint.sliceIndex) {
+          return [compSym, visiblePoints];
+        }
+
+        const pointProgress = Math.max(
+          0,
+          Math.min(
+            1,
+            (exportPlaybackPosition - previousPoint.sliceIndex)
+              / (nextPoint.sliceIndex - previousPoint.sliceIndex),
+          ),
+        );
+        if (pointProgress <= 0) {
+          return [compSym, visiblePoints];
+        }
+        const interpolatedPoint: ComparisonSeriesPoint = {
+          x: getX(exportPlaybackPosition),
+          y: interpolateNumber(previousPoint.y, nextPoint.y, pointProgress),
+          close: interpolateNumber(previousPoint.close, nextPoint.close, pointProgress),
+          scaledPrice: interpolateNumber(
+            previousPoint.scaledPrice,
+            nextPoint.scaledPrice,
+            pointProgress,
+          ),
+          changePct: interpolateNumber(
+            previousPoint.changePct,
+            nextPoint.changePct,
+            pointProgress,
+          ),
+          sliceIndex: exportPlaybackPosition,
+          globalIndex: startIndex + exportPlaybackPosition,
+        };
+        return [compSym, [...visiblePoints, interpolatedPoint]];
+      }),
+    ),
+    [
+      comparisonSeriesData,
+      comparisonSymbols,
+      exportPlaybackActive,
+      exportPlaybackFraction,
+      exportPlaybackPosition,
+      plotWidth,
+      startIndex,
+      visibleCandles.length,
+    ],
+  );
 
   const rightAxisLabels = useMemo(() => {
-    if (comparisonSymbols.length === 0 || visibleCandles.length === 0) return [];
+    if (comparisonSymbols.length === 0 || playbackVisibleCandles.length === 0) return [];
 
     const firstMainCandle = visibleCandles[0];
-    const lastMainCandle = visibleCandles[visibleCandles.length - 1];
+    const lastMainCandle = playbackVisibleCandles[playbackVisibleCandles.length - 1];
+    const primaryChangePctOverride = !exportPlaybackActive
+      || exportPlaybackPosition >= visibleCandles.length - 1
+      ? getChangePctOverride(symbol)
+      : null;
     const rawLabels = [
       ...(renderPrimarySeries ? [{
         key: symbol,
         symbol,
         color: '#475569',
         y: getY(lastMainCandle.close),
-        changePct: getChangePctOverride(symbol) ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
+        rankPrice: lastMainCandle.close,
+        changePct: primaryChangePctOverride ?? calculateChangePct(lastMainCandle.close, firstMainCandle.close),
       }] : []),
       ...comparisonSymbols.flatMap((compSym, index) => {
-        const points = comparisonSeriesData[compSym] || [];
+        const points = playbackComparisonSeriesData[compSym] || [];
         const lastPoint = points[points.length - 1];
         if (!lastPoint) return [];
         return [{
@@ -742,12 +908,13 @@ export function InteractiveCustomChart({
           symbol: compSym,
           color: getSeriesColor(compSym, index),
           y: lastPoint.y,
+          rankPrice: lastPoint.scaledPrice,
           changePct: lastPoint.changePct,
         }];
       }),
     ].sort((first, second) => {
-      const changeDiff = second.changePct - first.changePct;
-      return changeDiff !== 0 ? changeDiff : first.y - second.y;
+      const rankDiff = second.rankPrice - first.rankPrice;
+      return rankDiff !== 0 ? rankDiff : first.y - second.y;
     });
     if (rawLabels.length === 0) return [];
 
@@ -807,48 +974,96 @@ export function InteractiveCustomChart({
       return adjusted;
     };
 
-    if (comparisonLabelLayoutMode === 'stack') {
+    const createSmoothRankedLabels = (labels: typeof rawLabels) => {
+      if (labels.length === 0) return [];
+      if (labels.length === 1) {
+        return [{
+          ...labels[0],
+          adjustedY: minCenterY + (maxCenterY - minCenterY) / 2,
+        }];
+      }
+
       const availableHeight = Math.max(1, maxCenterY - minCenterY);
-      const slotHeight = availableHeight / Math.max(1, rawLabels.length);
+      const rankSpacingScale = Math.max(0.5, Math.min(2, comparisonLabelRankSpacingScale));
+      const maxRankGap = Math.max(18, Math.min(30, comparisonLabelFontSize + 20))
+        * rankSpacingScale;
+      const rankGap = Math.min(maxRankGap, availableHeight / (labels.length - 1));
+      const rankedHeight = rankGap * (labels.length - 1);
+      const rankStartY = minCenterY + (availableHeight - rankedHeight) / 2;
+      const rankChanges = labels.map((label) => label.changePct);
+      const changeRange = Math.max(...rankChanges) - Math.min(...rankChanges);
+      const transitionWidth = Math.max(changeRange * 0.015, 0.05);
+
+      return labels.map((label) => {
+        const smoothRank = labels.reduce((rank, otherLabel) => {
+          if (otherLabel.key === label.key) return rank;
+          const exponent = Math.max(
+            -60,
+            Math.min(60, (label.changePct - otherLabel.changePct) / transitionWidth),
+          );
+          return rank + 1 / (1 + Math.exp(exponent));
+        }, 0);
+        return {
+          ...label,
+          adjustedY: rankStartY + smoothRank * rankGap,
+        };
+      }).sort((first, second) => first.adjustedY - second.adjustedY);
+    };
+
+    const createStackedLabels = (labels: typeof rawLabels) => {
+      const availableHeight = Math.max(1, maxCenterY - minCenterY);
+      const slotHeight = availableHeight / Math.max(1, labels.length);
       const labelHeight = Math.max(2, Math.min(
         Math.max(17, comparisonLabelFontSize + 8),
         slotHeight * 0.88,
       ));
       const fontSize = Math.max(3, Math.min(comparisonLabelFontSize, labelHeight - 1));
-      return rawLabels.map((label, index) => ({
+      return labels.map((label, index) => ({
         ...label,
         adjustedY: minCenterY + slotHeight * (index + 0.5),
         labelHeight,
         fontSize,
       }));
+    };
+
+    if (exportPlaybackActive) {
+      const smoothLabels = createSmoothRankedLabels(rawLabels);
+      const stackedLabelsByKey = new Map(
+        createStackedLabels(rawLabels).map((label) => [label.key, label]),
+      );
+      const settleProgress = Math.max(
+        0,
+        Math.min(
+          1,
+          (normalizedExportPlaybackProgress - EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS)
+            / (1 - EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS),
+        ),
+      );
+      if (settleProgress <= 0) return smoothLabels;
+
+      // 最終10%で既存の整列位置へ移動し、3秒停止へ渡す時点では重なりをなくす
+      return smoothLabels.map((label) => {
+        const stackedLabel = stackedLabelsByKey.get(label.key);
+        if (!stackedLabel) return label;
+        return {
+          ...label,
+          adjustedY: interpolateNumber(
+            label.adjustedY,
+            stackedLabel.adjustedY,
+            settleProgress,
+          ),
+          labelHeight: stackedLabel.labelHeight,
+          fontSize: stackedLabel.fontSize,
+        };
+      }).sort((first, second) => first.adjustedY - second.adjustedY);
     }
 
     if (comparisonLabelLayoutMode === 'rank') {
-      const rankSpacingScale = Math.max(0.5, Math.min(2, comparisonLabelRankSpacingScale));
-      const maxRankGap = Math.max(18, Math.min(30, comparisonLabelFontSize + 20)) * rankSpacingScale;
-      const fitRankGroup = (
-        labels: typeof rawLabels,
-        groupMinY: number,
-        groupMaxY: number,
-        direction: 'up' | 'down',
-      ) => {
-        if (labels.length === 0) return [];
-        const availableHeight = Math.max(1, groupMaxY - groupMinY);
-        const rankGap = labels.length > 1
-          ? Math.min(maxRankGap, availableHeight / (labels.length - 1))
-          : 0;
-        return labels.map((label, index) => ({
-          ...label,
-          adjustedY: direction === 'up'
-            ? Math.max(groupMinY, groupMaxY - (labels.length - 1 - index) * rankGap)
-            : Math.min(groupMaxY, groupMinY + index * rankGap),
-        }));
-      };
+      return createSmoothRankedLabels(rawLabels);
+    }
 
-      return [
-        ...fitRankGroup(positiveLabels, minCenterY, positiveMaxY, 'up'),
-        ...fitRankGroup(negativeLabels, negativeMinY, maxCenterY, 'down'),
-      ].sort((first, second) => first.adjustedY - second.adjustedY);
+    if (comparisonLabelLayoutMode === 'stack') {
+      return createStackedLabels(rawLabels);
     }
 
     const maxPositivePct = Math.max(0, ...positiveLabels.map((label) => label.changePct));
@@ -878,7 +1093,8 @@ export function InteractiveCustomChart({
       .sort((first, second) => first.adjustedY - second.adjustedY);
   }, [
     comparisonSymbols,
-    comparisonSeriesData,
+    playbackComparisonSeriesData,
+    playbackVisibleCandles,
     visibleCandles,
     symbol,
     mainHeight,
@@ -889,6 +1105,9 @@ export function InteractiveCustomChart({
     renderPrimarySeries,
     comparisonLabelLayoutMode,
     comparisonLabelRankSpacingScale,
+    exportPlaybackActive,
+    exportPlaybackPosition,
+    normalizedExportPlaybackProgress,
   ]);
 
   const hoveredComparisonSeries = useMemo(() => {
@@ -1126,24 +1345,73 @@ export function InteractiveCustomChart({
     return () => chartElement.removeEventListener('wheel', handleNativeWheel);
   }, [candles.length, plotWidth, priceAxisFocused, priceScale, zoomFactor]);
 
-  const currentCandle = hoverData ? candles[hoverData.candleIdx] : candles[candles.length - 1];
+  const currentCandle = hoverData
+    ? candles[hoverData.candleIdx]
+    : exportPlaybackActive
+      ? playbackVisibleCandles[playbackVisibleCandles.length - 1]
+      : candles[candles.length - 1];
 
-  // Map polylines paths
-  const getPolylinePoints = (valueArray: (number | null)[]) => {
-    const pts: string[] = [];
-    visibleCandles.forEach((_, i) => {
-      const globalIdx = startIndex + i;
-      const v = valueArray[globalIdx];
-      if (v !== null && v !== undefined) {
-        pts.push(`${getX(i)},${getY(v)}`);
+  const getPlaybackSeriesCoordinates = (
+    valueArray: (number | null)[],
+  ): Array<{ x: number; value: number }> => {
+    if (visibleCandles.length === 0) return [];
+    const points: Array<{ x: number; value: number }> = [];
+    for (let sliceIndex = 0; sliceIndex <= exportPlaybackBaseSliceIndex; sliceIndex += 1) {
+      const value = valueArray[startIndex + sliceIndex];
+      if (value !== null && value !== undefined && Number.isFinite(value)) {
+        points.push({ x: getX(sliceIndex), value });
       }
-    });
-    return pts.join(' ');
+    }
+
+    if (exportPlaybackActive && exportPlaybackFraction > 0) {
+      const currentValue = valueArray[startIndex + exportPlaybackBaseSliceIndex];
+      const nextValue = valueArray[startIndex + exportPlaybackBaseSliceIndex + 1];
+      if (
+        currentValue !== null
+        && currentValue !== undefined
+        && nextValue !== null
+        && nextValue !== undefined
+        && Number.isFinite(currentValue)
+        && Number.isFinite(nextValue)
+      ) {
+        points.push({
+          x: getX(exportPlaybackPosition),
+          value: interpolateNumber(currentValue, nextValue, exportPlaybackFraction),
+        });
+      }
+    }
+    return points;
+  };
+
+  const getPlaybackSeriesValue = (
+    valueArray: (number | null)[],
+  ): number | null => {
+    if (visibleCandles.length === 0) return null;
+    const currentValue = valueArray[startIndex + exportPlaybackBaseSliceIndex];
+    if (
+      exportPlaybackActive
+      && exportPlaybackFraction > 0
+      && currentValue !== null
+      && currentValue !== undefined
+    ) {
+      const nextValue = valueArray[startIndex + exportPlaybackBaseSliceIndex + 1];
+      if (nextValue !== null && nextValue !== undefined) {
+        return interpolateNumber(currentValue, nextValue, exportPlaybackFraction);
+      }
+    }
+    return currentValue ?? null;
+  };
+
+  // 時系列点の間を補間し、線端がフレームごとに連続して進むようにする
+  const getPolylinePoints = (valueArray: (number | null)[]) => {
+    return getPlaybackSeriesCoordinates(valueArray)
+      .map((point) => `${point.x},${getY(point.value)}`)
+      .join(' ');
   };
 
   // Map comparison lines paths
   const getComparisonPolylinePoints = (sym: string) => {
-    return (comparisonSeriesData[sym] || [])
+    return (playbackComparisonSeriesData[sym] || [])
       .map((point) => `${point.x},${point.y}`)
       .join(' ');
   };
@@ -1237,9 +1505,8 @@ export function InteractiveCustomChart({
                 )
                 : null;
               const startPrice = compStartPrice[compSym] || 1;
-              const overrideChangePct = getChangePctOverride(compSym);
               const changeText = compCandle
-                ? formatSignedPercent(overrideChangePct ?? calculateChangePct(compCandle.close, startPrice))
+                ? formatSignedPercent(calculateChangePct(compCandle.close, startPrice))
                 : 'N/A';
               return (
                 <div
@@ -1442,8 +1709,9 @@ export function InteractiveCustomChart({
             {emptyMessage}
           </div>
         ) : (
-          <svg 
+          <svg
             ref={svgRef}
+            data-chart-export-svg="true"
             width={width}
             height={height}
             onMouseDown={handleMouseDown}
@@ -1564,17 +1832,11 @@ export function InteractiveCustomChart({
                 <g>
                   {(() => {
                     const outerResult = bollResults[bollResults.length - 1].result;
-                    const up: string[] = [];
-                    const low: string[] = [];
-                    visibleCandles.forEach((_, i) => {
-                      const idx = startIndex + i;
-                      const uVal = outerResult.upper[idx];
-                      const lVal = outerResult.lower[idx];
-                      if (uVal !== null && lVal !== null) {
-                        up.push(`${getX(i)},${getY(uVal)}`);
-                        low.unshift(`${getX(i)},${getY(lVal)}`);
-                      }
-                    });
+                    const up = getPlaybackSeriesCoordinates(outerResult.upper)
+                      .map((point) => `${point.x},${getY(point.value)}`);
+                    const low = getPlaybackSeriesCoordinates(outerResult.lower)
+                      .reverse()
+                      .map((point) => `${point.x},${getY(point.value)}`);
                     if (up.length > 0) {
                       return (
                         <polygon 
@@ -1587,9 +1849,8 @@ export function InteractiveCustomChart({
                   })()}
 
                   {bollResults.map(({ level, result }, index) => {
-                    const lastIndex = startIndex + visibleCandles.length - 1;
-                    const upperValue = result.upper[lastIndex];
-                    const lowerValue = result.lower[lastIndex];
+                    const upperValue = getPlaybackSeriesValue(result.upper);
+                    const lowerValue = getPlaybackSeriesValue(result.lower);
                     const opacity = Math.max(0.45, 0.9 - index * 0.16);
                     const dashArray = getLineDasharray(indicators.boll.style);
                     return (
@@ -1687,8 +1948,8 @@ export function InteractiveCustomChart({
               })}
 
               {/* Render Candlesticks */}
-              {renderPrimarySeries && visibleCandles.map((c, i) => {
-                const xVal = getX(i);
+              {renderPrimarySeries && playbackVisibleCandles.map((c, i) => {
+                const xVal = getX(getPlaybackSlicePosition(i));
                 const w = Math.max(1.5, zoomFactor * 0.75);
                 const candleX = xVal - w / 2;
 
@@ -1751,8 +2012,8 @@ export function InteractiveCustomChart({
               {/* Subtle Volume Overlay at bottom */}
               {renderPrimarySeries && showVolume && (
                 <g opacity="0.35">
-                  {visibleCandles.map((c, i) => {
-                    const xVal = getX(i);
+                  {playbackVisibleCandles.map((c, i) => {
+                    const xVal = getX(getPlaybackSlicePosition(i));
                     const w = Math.max(1.0, zoomFactor * 0.75 - 1);
                     const barX = xVal - w / 2;
 
@@ -1919,12 +2180,11 @@ export function InteractiveCustomChart({
                 {rsiPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
-                        const idx = startIndex + i;
-                        const rsiV = rsi[idx];
-                        const rsiY = rsiV !== null ? rsiHeight - (rsiV / 100) * rsiHeight : rsiHeight / 2;
-                        return `${getX(i)},${rsiY}`;
-                      }).join(' ')
+                      getPlaybackSeriesCoordinates(rsi)
+                        .map((point) => (
+                          `${point.x},${rsiHeight - (point.value / 100) * rsiHeight}`
+                        ))
+                        .join(' ')
                     }
                     fill="none"
                     stroke={indicators.rsi.color}
@@ -1972,22 +2232,19 @@ export function InteractiveCustomChart({
                 )}
 
                 {/* Histogram Bars */}
-                {macdPlotActive && visibleCandles.map((_, i) => {
-                  const idx = startIndex + i;
-                  const val = macd.hist[idx];
-                  if (val === null || val === undefined) return null;
-
+                {macdPlotActive && getPlaybackSeriesCoordinates(macd.hist).map((point) => {
+                  const val = point.value;
                   // High auto rescaling for scale
                   const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
                   const barH = val * scaleFactor;
                   const isPos = val >= 0;
 
                   const w = Math.max(1, zoomFactor * 0.5);
-                  const xVal = getX(i);
+                  const xVal = point.x;
 
                   return (
-                    <rect 
-                      key={i}
+                    <rect
+                      key={point.x}
                       x={xVal - w / 2}
                       y={isPos ? (macdHeight / 2) - barH : macdHeight / 2}
                       width={w}
@@ -2002,13 +2259,13 @@ export function InteractiveCustomChart({
                 {macdPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
-                        const idx = startIndex + i;
-                        const val = macd.macd[idx];
-                        const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
-                        const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
-                        return `${getX(i)},${mY}`;
-                      }).join(' ')
+                      getPlaybackSeriesCoordinates(macd.macd)
+                        .map((point) => {
+                          const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
+                          const mY = (macdHeight / 2) - point.value * scaleFactor;
+                          return `${point.x},${mY}`;
+                        })
+                        .join(' ')
                     }
                     fill="none"
                     stroke={indicators.macd.colorMacd}
@@ -2021,13 +2278,13 @@ export function InteractiveCustomChart({
                 {macdPlotActive && (
                   <polyline
                     points={
-                      visibleCandles.map((_, i) => {
-                        const idx = startIndex + i;
-                        const val = macd.signal[idx];
-                        const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
-                        const mY = val !== null ? (macdHeight / 2) - val * scaleFactor : macdHeight / 2;
-                        return `${getX(i)},${mY}`;
-                      }).join(' ')
+                      getPlaybackSeriesCoordinates(macd.signal)
+                        .map((point) => {
+                          const scaleFactor = (macdHeight * 0.4) / (macdScaleBase * 0.04);
+                          const mY = (macdHeight / 2) - point.value * scaleFactor;
+                          return `${point.x},${mY}`;
+                        })
+                        .join(' ')
                     }
                     fill="none"
                     stroke={indicators.macd.colorSignal}

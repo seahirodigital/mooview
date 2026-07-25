@@ -409,6 +409,11 @@ const HEATMAP_MIN_WEIGHT_SHARE_TARGET = 0.7;
 const HEATMAP_MIN_WEIGHT_SHARE_MIN = 0.018;
 const HEATMAP_MIN_WEIGHT_SHARE_MAX = 0.08;
 const CHART_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
+const JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS: Partial<Record<Timeframe, string>> = {
+  '3m': '2m',
+  '10m': '15m',
+  '4h': '60m',
+};
 const todayString = () => new Date().toISOString().slice(0, 10);
 const CALENDAR_WEEK_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const SYMBOL_NAME_ALIASES: Record<string, string> = {
@@ -506,6 +511,21 @@ function formatTimeframeLabel(timeframe: Timeframe): string {
   return timeframe;
 }
 
+function formatChartTimeframeLabel(timeframe: Timeframe, usesJapanYahooFallback: boolean): string {
+  return usesJapanYahooFallback && JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    ? JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    : formatTimeframeLabel(timeframe);
+}
+
+function getChartTimeframeButtonTitle(
+  timeframe: Timeframe,
+  usesJapanYahooFallback: boolean,
+): string | undefined {
+  const effectiveLabel = JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe];
+  if (!usesJapanYahooFallback || !effectiveLabel) return undefined;
+  return `JP銘柄はYahooの実効足種で取得します: ${formatTimeframeLabel(timeframe)} → ${effectiveLabel}`;
+}
+
 function createValueChainId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -536,6 +556,10 @@ function normalizeSymbol(symbol: string): string {
   if (upper.endsWith('.T')) return `JP.${upper.slice(0, -2)}`;
   if (/^\d{3,5}[A-Z]?$/.test(upper)) return `JP.${upper}`;
   return upper;
+}
+
+function isJapanStock(symbol: string): boolean {
+  return normalizeSymbol(symbol).startsWith('JP.');
 }
 
 function findSegment(chain: ValueChainData, segmentId: string): Segment | null {
@@ -2752,6 +2776,7 @@ export function ValueChainMap({
       ...sidePanelComparisonSymbols,
     ].filter((symbol): symbol is string => Boolean(symbol))))
   ), [sidePanelComparisonSymbols.join('|'), sidePanelPrimarySymbol]);
+  const sidePanelUsesJapanYahooFallback = sidePanelChartSymbols.some(isJapanStock);
   const sidePanelSymbolOptions = useMemo(() => {
     const options = new Map<string, string>();
     chain.groups.forEach((group) => {
@@ -4274,13 +4299,14 @@ export function ValueChainMap({
                     key={timeframe}
                     type="button"
                     onClick={() => updateChartState({ timeframe })}
+                    title={getChartTimeframeButtonTitle(timeframe, sidePanelUsesJapanYahooFallback)}
                     className={`px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
                       chartState.timeframe === timeframe
                         ? 'bg-emerald-500 text-black'
                         : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                     }`}
                   >
-                    {formatTimeframeLabel(timeframe)}
+                    {formatChartTimeframeLabel(timeframe, sidePanelUsesJapanYahooFallback)}
                   </button>
                 ))}
               </div>

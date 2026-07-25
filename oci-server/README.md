@@ -225,6 +225,70 @@ OCIをTailscaleへ追加します。
 
 出力された `https://mooview-oci` で始まるURLを使用します。WindowsとMacにもTailscaleを導入し、同じTailscaleネットワークへログインしてください。
 
+## Gemini APIキーの保存
+
+Gemini APIキーはブラウザ、Git、OneDrive、MooViewのLocalStorageへ保存しません。MooViewのNode.jsサーバーだけが、OCI上の `/etc/mooview/mooview.env` から読み取ります。
+
+Macでユーザーが一度だけ行う作業は、APIキーの値だけを次のローカルファイルへ保存することです。このファイルはGit管理フォルダとOneDriveの外に置きます。
+
+```text
+/Users/user/.config/mooview/gemini-api-key
+```
+
+ファイルには `GEMINI_API_KEY=` を付けず、Google AI Studioで発行したキーだけを1行で保存します。保存後は所有者以外が読めない権限 `0600` にします。APIキーをチャットへ貼り付けないでください。
+
+Codexはユーザーの個別許可を得た後、ローカルファイルを標準入力として次のOCI用スクリプトへ渡します。キーはコマンド引数、標準出力、journalログへ出ません。
+
+```text
+/opt/mooview/app/oci-server/scripts/configure-gemini-key.py
+```
+
+OCI上では、スクリプトが次の値を `/etc/mooview/mooview.env` へ原子的に保存し、所有者 `root:mooview`、権限 `0640` を維持します。
+
+```dotenv
+GEMINI_API_KEY=保存された値
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+より厳格なローテーション、失効期限、監査が必要になった場合は、OCI Vaultを秘密情報の原本とし、インスタンス・プリンシパルで起動時に取得する構成へ移行します。個人用のTailscale限定MooViewでは、現在の `/etc/mooview/mooview.env` 方式が依存サービスを増やさず安全性と運用性を両立します。
+
+Geminiへの外向きHTTPS通信を許可する代わりに、MooView本体の待受は `/etc/systemd/system/mooview.service` の `HOST=127.0.0.1` でlocalhostへ限定します。外部からの閲覧経路は引き続きTailscale Serveだけです。
+
+## Discord自動通知
+
+AIボタンを右クリックし、「Discord自動通知の設定」を開くと、サーバーで実行する通知時刻を設定できます。設定画面の最上段にある「Discord通知」は既定でONです。ONの設定だけが、OCI上で日本時間に従い実行されます。
+
+初期設定は次のとおりです。
+
+| 通知設定 | 実行日 | 時刻 | 内容 |
+|---|---|---|---|
+| 日本市場フロー（11:30） | 平日 | 11:30 | 設定したGemini指示、動画、画像 |
+| 日本市場フロー（15:30） | 平日 | 15:30 | 設定したGemini指示、動画、画像 |
+| 米国市場セクター | 平日 | 07:00 | 設定したGemini指示、動画、画像 |
+
+各通知設定では、平日、土日、毎日、個別曜日、複数時刻、Geminiモデル、画像対象チャート、動画対象チャート、動画時間、FPS、解像度を変更できます。選択モデルでGemini処理に失敗した場合は、自動的に `gemini-2.5-flash` へ切り替えます。
+
+サーバー側は各実行で、チャート更新処理を開始してから必ず60秒待機します。その後、Gemini本文、MP4動画、PNG画像を作成し、Discordへ「Gemini本文 → 動画 → 画像」の順で通知します。Discord本文が2,000文字を超える場合だけ、本文を変更せず連続メッセージへ分割します。
+
+Webhook URLは、Git、ブラウザのLocalStorage、共有設定ファイルへ保存してはいけません。OCI上の `/etc/mooview/mooview.env` にだけ保存します。値をコマンド履歴へ残さないため、次のコマンドを実行してからWebhook URLだけを標準入力へ貼り付け、最後に `Ctrl-D` を入力してください。
+
+```bash
+/usr/bin/sudo /usr/bin/python3 /opt/mooview/app/oci-server/scripts/configure-discord-webhook.py
+```
+
+この機能はPlaywrightのChromiumを使い、画面と同じチャート出力処理をOCI上で実行します。初回または更新時は、明示的な許可の後で次のインストールスクリプトを実行してください。Chromium本体と依存ライブラリを追加するため、数百MB程度のディスク容量が必要です。
+
+```bash
+/usr/bin/sudo /bin/bash /opt/mooview/app/oci-server/scripts/install-mooview.sh
+/usr/bin/sudo /usr/bin/systemctl restart mooview.service
+```
+
+設定画面の「今すぐ実行」は実際のDiscord通知を開始します。実行結果は同じ画面の「直近のサーバー実行履歴」と次のログで確認できます。
+
+```bash
+/usr/bin/journalctl -u mooview.service -n 150 --no-pager
+```
+
 ## 運用コマンド
 
 状態確認:

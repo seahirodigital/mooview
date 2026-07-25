@@ -107,6 +107,10 @@ interface ExportChartVideoOptions extends RenderCompositeOptions {
   iosCompatible?: boolean;
 }
 
+interface ExportChartImageOptions {
+  download?: boolean;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -375,9 +379,11 @@ function normalizeChartExportSelection(raw: unknown): ChartExportSelection {
 export async function exportChartImage(
   panelIds: string[],
   onProgress?: (progress: number) => void,
-): Promise<void> {
+  options: ExportChartImageOptions = {},
+): Promise<File[]> {
   const timestamp = createTimestamp();
   const canvas = document.createElement('canvas');
+  const files: File[] = [];
   for (let index = 0; index < panelIds.length; index += 1) {
     const panelId = panelIds[index];
     const prepared = await prepareChartComposite([panelId]);
@@ -396,9 +402,18 @@ export async function exportChartImage(
       }, 'image/png');
     });
     const panelNumber = String(index + 1).padStart(2, '0');
-    downloadBlob(blob, `mooview-chart-${panelNumber}-${timestamp}.png`);
+    const filename = `mooview-chart-${panelNumber}-${timestamp}.png`;
+    const file = new File([blob], filename, {
+      type: 'image/png',
+      lastModified: Date.now(),
+    });
+    if (options.download !== false) {
+      downloadBlob(file, filename);
+    }
+    files.push(file);
     onProgress?.((index + 1) / panelIds.length);
   }
+  return files;
 }
 
 export async function exportChartVideo(

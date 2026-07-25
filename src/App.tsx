@@ -26,7 +26,10 @@ import {
   Video,
   Square,
   Check,
-  LoaderCircle
+  Copy,
+  LoaderCircle,
+  Bell,
+  Clock3
 } from 'lucide-react';
 
 import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle, ComparisonLabelLayoutMode } from './types';
@@ -63,6 +66,26 @@ import {
   normalizeChartVideoExportSettings,
   resolveChartExportPanelIds,
 } from './chartExport';
+import {
+  ChartAiAnalysisResult,
+  DEFAULT_CHART_AI_PROMPT,
+  requestChartAiAnalysis,
+} from './chartAi';
+import {
+  DEFAULT_GEMINI_CHART_MODEL,
+  GEMINI_CHART_MODELS,
+  GeminiChartModelId,
+  normalizeGeminiChartModelId,
+} from '../geminiModels';
+import {
+  createDefaultDiscordAutomationSettings,
+  normalizeDiscordAutomationSettings,
+  type DiscordAutomationJob,
+  type DiscordAutomationRunRecord,
+  type DiscordAutomationSelection,
+  type DiscordAutomationSettings,
+} from '../discordAutomation';
+import './discordAutomationBridge';
 import type {
   SharedWorkspaceEnvelope,
   SharedWorkspaceProfile,
@@ -126,6 +149,14 @@ const COMPARISON_LABEL_LAYOUT_MODE_STORAGE_KEY = 'mooview_comparison_label_layou
 const WATCHLIST_QUOTE_FETCH_MODES_STORAGE_KEY = 'mooview_watchlist_quote_fetch_modes_v1';
 const CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_video_export_settings_v1';
 const CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY = 'mooview_chart_image_export_settings_v1';
+const CHART_AI_PROMPT_STORAGE_KEY = 'mooview_chart_ai_prompt_v1';
+const CHART_AI_MODEL_STORAGE_KEY = 'mooview_chart_ai_model_v1';
+const CHART_AI_SHARED_SETTING_KEYS = [
+  CHART_AI_PROMPT_STORAGE_KEY,
+  CHART_AI_MODEL_STORAGE_KEY,
+] as const;
+const DISCORD_AUTOMATION_SETTINGS_ENDPOINT = '/api/discord-automation/settings';
+const DISCORD_AUTOMATION_RUNS_ENDPOINT = '/api/discord-automation/runs';
 const SHARED_WORKSPACE_SETTINGS_ENDPOINT = '/api/workspace-settings';
 const DEFAULT_OCI_SHARED_WORKSPACE_URL = 'https://mooview-oci.taild87712.ts.net';
 const SHARED_WORKSPACE_SAVE_DELAY_MS = 800;
@@ -144,6 +175,7 @@ const SHARED_BROWSER_SETTING_KEYS = [
   'mooview_watchlist_quote_fetch_modes_v1',
   'mooview_chart_video_export_settings_v1',
   'mooview_chart_image_export_settings_v1',
+  ...CHART_AI_SHARED_SETTING_KEYS,
   'moomoo_active',
   'tv_dashboard_tickers',
   'tv_dashboard_watchlist_tabs',
@@ -2263,6 +2295,7 @@ export default function App() {
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [videoExportMenu, setVideoExportMenu] = useState<{ x: number; y: number } | null>(null);
   const [imageExportMenu, setImageExportMenu] = useState<{ x: number; y: number } | null>(null);
+  const [chartAiPromptMenu, setChartAiPromptMenu] = useState<{ x: number; y: number } | null>(null);
   const [chartVideoExportSettings, setChartVideoExportSettings] = useState<ChartVideoExportSettings>(
     () => normalizeChartVideoExportSettings(
       readStoredValue(CHART_VIDEO_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_VIDEO_EXPORT_SETTINGS),
@@ -2273,6 +2306,28 @@ export default function App() {
       readStoredValue(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, DEFAULT_CHART_IMAGE_EXPORT_SETTINGS),
     ),
   );
+  const [chartAiPrompt, setChartAiPrompt] = useState<string>(
+    () => readStoredValue(CHART_AI_PROMPT_STORAGE_KEY, DEFAULT_CHART_AI_PROMPT),
+  );
+  const [chartAiModel, setChartAiModel] = useState<GeminiChartModelId>(
+    () => normalizeGeminiChartModelId(
+      readStoredValue(CHART_AI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_CHART_MODEL),
+    ),
+  );
+  const [chartAiStatus, setChartAiStatus] = useState<{
+    stage: 'capturing' | 'requesting';
+    progress: number;
+  } | null>(null);
+  const [chartAiResult, setChartAiResult] = useState<ChartAiAnalysisResult | null>(null);
+  const [chartAiCopied, setChartAiCopied] = useState(false);
+  const [discordAutomationSettingsOpen, setDiscordAutomationSettingsOpen] = useState(false);
+  const [discordAutomationSettings, setDiscordAutomationSettings] = useState<DiscordAutomationSettings>(
+    () => createDefaultDiscordAutomationSettings(),
+  );
+  const [discordAutomationRuns, setDiscordAutomationRuns] = useState<DiscordAutomationRunRecord[]>([]);
+  const [discordAutomationLoading, setDiscordAutomationLoading] = useState(false);
+  const [discordAutomationSaving, setDiscordAutomationSaving] = useState(false);
+  const [discordAutomationMessage, setDiscordAutomationMessage] = useState<string | null>(null);
   const [chartExportStatus, setChartExportStatus] = useState<{
     kind: 'video' | 'image';
     progress: number;
@@ -2685,16 +2740,30 @@ export default function App() {
         normalizeIndicatorSettings(symbol, indicatorSettings),
       ]),
     );
-    const normalizedBrowserSettings = Object.fromEntries(
+    const cloudBrowserSettings = Object.fromEntries(
       Object.entries(
         settings.browserSettings && typeof settings.browserSettings === 'object'
           ? settings.browserSettings
           : {},
       ).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
     );
+    const missingChartAiBrowserSettings = Object.fromEntries(
+      CHART_AI_SHARED_SETTING_KEYS.flatMap((key) => {
+        if (typeof cloudBrowserSettings[key] === 'string') return [];
+        const localValue = localStorage.getItem(key);
+        return localValue === null ? [] : [[key, localValue] as const];
+      }),
+    );
+    const shouldSeedChartAiBrowserSettings =
+      Object.keys(missingChartAiBrowserSettings).length > 0;
+    const normalizedBrowserSettings = {
+      ...missingChartAiBrowserSettings,
+      ...cloudBrowserSettings,
+    };
     const browserSettingsChanged = applySharedBrowserSettings(normalizedBrowserSettings);
 
-    sharedWorkspaceSkipNextSaveRef.current = true;
+    // AI設定がクラウド未登録なら、ローカル値を削除せず次の保存でOCIへ初期登録する。
+    sharedWorkspaceSkipNextSaveRef.current = !shouldSeedChartAiBrowserSettings;
     setTickers(effectiveTickers);
     setPanels(normalizedPanels);
     setWatchlistTabs(normalizedWatchlistTabs);
@@ -2918,14 +2987,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!videoExportMenu && !imageExportMenu) return;
+    if (!videoExportMenu && !imageExportMenu && !chartAiPromptMenu) return;
     const closeExportMenus = () => {
       setVideoExportMenu(null);
       setImageExportMenu(null);
+      setChartAiPromptMenu(null);
     };
     window.addEventListener('click', closeExportMenus);
     return () => window.removeEventListener('click', closeExportMenus);
-  }, [imageExportMenu, videoExportMenu]);
+  }, [chartAiPromptMenu, imageExportMenu, videoExportMenu]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3249,6 +3319,14 @@ export default function App() {
   useEffect(() => {
     writeStoredJson(CHART_IMAGE_EXPORT_SETTINGS_STORAGE_KEY, chartImageExportSettings);
   }, [chartImageExportSettings]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_AI_PROMPT_STORAGE_KEY, chartAiPrompt);
+  }, [chartAiPrompt]);
+
+  useEffect(() => {
+    writeStoredJson(CHART_AI_MODEL_STORAGE_KEY, chartAiModel);
+  }, [chartAiModel]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -6957,9 +7035,10 @@ export default function App() {
       chartVideoExportAbortControllerRef.current.abort();
       return;
     }
-    if (chartExportStatus) return;
+    if (chartExportStatus || chartAiStatus) return;
     setVideoExportMenu(null);
     setImageExportMenu(null);
+    setChartAiPromptMenu(null);
     setChartExportError(null);
     const resolution = CHART_EXPORT_RESOLUTIONS.find(
       (candidate) => candidate.id === chartVideoExportSettings.resolutionId,
@@ -7071,9 +7150,10 @@ export default function App() {
   };
 
   const handleChartImageExport = async () => {
-    if (chartExportStatus) return;
+    if (chartExportStatus || chartAiStatus) return;
     setVideoExportMenu(null);
     setImageExportMenu(null);
+    setChartAiPromptMenu(null);
     setChartExportError(null);
     setChartExportStatus({ kind: 'image', progress: 0.25 });
 
@@ -7091,6 +7171,320 @@ export default function App() {
       );
     } finally {
       setChartExportStatus(null);
+    }
+  };
+
+  const handleChartAiAnalysis = async () => {
+    if (chartExportStatus || chartAiStatus) return;
+    setVideoExportMenu(null);
+    setImageExportMenu(null);
+    setChartAiPromptMenu(null);
+    setChartExportError(null);
+    setChartAiResult(null);
+    setChartAiCopied(false);
+
+    try {
+      const prompt = chartAiPrompt.trim();
+      if (!prompt) {
+        throw new Error('AIプロンプトを入力してください。');
+      }
+      const panelIds = getSelectedChartExportPanelIds(chartImageExportSettings.selection);
+      if (panelIds.length === 0) {
+        throw new Error('AIで分析するチャートを1つ以上選択してください。');
+      }
+
+      setChartAiStatus({ stage: 'capturing', progress: 0 });
+      const imageFiles = await exportChartImage(panelIds, (progress) => {
+        setChartAiStatus({ stage: 'capturing', progress });
+      });
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const result = await requestChartAiAnalysis(prompt, imageFiles, chartAiModel);
+      setChartAiResult(result);
+    } catch (error) {
+      setChartExportError(
+        error instanceof Error ? error.message : 'AIによるチャート分析に失敗しました。',
+      );
+    } finally {
+      setChartAiStatus(null);
+    }
+  };
+
+  const refreshChartsForDiscordAutomation = () => {
+    // 画面の更新操作と同じく、ローソク足・ウォッチリスト価格を強制再取得する。
+    forceCandleRefreshRef.current = true;
+    if (candleFetchInFlightRef.current) {
+      candleFetchPendingRef.current = true;
+    }
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    requestAutoWatchlistQuoteRefresh(true);
+    setTickTrigger((current) => current + 1);
+  };
+
+  const fileToDiscordAutomationArtifact = async (file: File) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return {
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      base64: window.btoa(binary),
+    };
+  };
+
+  const runDiscordAutomationInBrowser = async (job: DiscordAutomationJob) => {
+    if (chartExportStatus || chartAiStatus) {
+      throw new Error('別のチャート出力またはAI分析が実行中です。');
+    }
+    const resolveAutomationPanelIds = (selection: DiscordAutomationSelection) => resolveChartExportPanelIds(
+      {
+        mode: selection.mode,
+        firstCount: 1,
+        panelIds: selection.panelIds,
+      },
+      panels.map((panel) => panel.id),
+    );
+    const imagePanelIds = resolveAutomationPanelIds(job.imageSelection);
+    const videoPanelIds = resolveAutomationPanelIds(job.videoSelection);
+    if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
+      throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
+    }
+    if (!job.prompt.trim()) {
+      throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
+    }
+
+    setChartAiStatus({ stage: 'capturing', progress: 0 });
+    setChartExportError(null);
+    try {
+      // 最新チャートを確定させるため、必ず更新処理を開始してから60秒待機する。
+      refreshChartsForDiscordAutomation();
+      await sleep(60_000);
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+      const imageFiles = await exportChartImage(
+        imagePanelIds,
+        (progress) => setChartAiStatus({ stage: 'capturing', progress }),
+        { download: false },
+      );
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const aiResult = await requestChartAiAnalysis(job.prompt, imageFiles, job.model);
+
+      const resolution = CHART_EXPORT_RESOLUTIONS.find(
+        (candidate) => candidate.id === job.videoResolutionId,
+      ) ?? CHART_EXPORT_RESOLUTIONS[0];
+      const videoFiles: File[] = [];
+      setChartAiStatus(null);
+      setChartExportStatus({ kind: 'video', progress: 0 });
+      for (let index = 0; index < videoPanelIds.length; index += 1) {
+        const panelId = videoPanelIds[index];
+        const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
+        const videoFile = await exportChartVideo({
+          width: resolution.width,
+          height: resolution.height,
+          panelIds: [panelId],
+          durationSeconds: job.videoDurationSeconds,
+          frameRate: job.videoFrameRate,
+          fileNumber: panelNumber > 0 ? panelNumber : index + 1,
+          download: false,
+          beforeFrame: async (progress) => {
+            setChartExportPlayback({ panelIds: [panelId], progress });
+            await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+          },
+          onProgress: (progress) => setChartExportStatus({
+            kind: 'video',
+            progress: (index + progress) / videoPanelIds.length,
+          }),
+        });
+        videoFiles.push(videoFile);
+      }
+
+      return {
+        text: aiResult.text,
+        model: aiResult.model,
+        videos: await Promise.all(videoFiles.map(fileToDiscordAutomationArtifact)),
+        images: await Promise.all(imageFiles.map(fileToDiscordAutomationArtifact)),
+      };
+    } finally {
+      setChartAiStatus(null);
+      setChartExportStatus(null);
+      setChartExportPlayback(null);
+    }
+  };
+
+  useEffect(() => {
+    if (workspacePersistenceMode === 'checking') {
+      delete window.mooviewDiscordAutomation;
+      return;
+    }
+    window.mooviewDiscordAutomation = {
+      run: runDiscordAutomationInBrowser,
+    };
+    return () => {
+      delete window.mooviewDiscordAutomation;
+    };
+  }, [
+    chartAiStatus,
+    chartExportStatus,
+    panels,
+    requestAutoWatchlistQuoteRefresh,
+    runDiscordAutomationInBrowser,
+    workspacePersistenceMode,
+  ]);
+
+  const loadDiscordAutomationSettings = async () => {
+    setDiscordAutomationLoading(true);
+    try {
+      const [settingsResponse, runsResponse] = await Promise.all([
+        fetch(DISCORD_AUTOMATION_SETTINGS_ENDPOINT),
+        fetch(DISCORD_AUTOMATION_RUNS_ENDPOINT),
+      ]);
+      const settingsPayload = await settingsResponse.json().catch(() => null) as unknown;
+      const runsPayload = await runsResponse.json().catch(() => null) as unknown;
+      if (!settingsResponse.ok) {
+        throw new Error(
+          (settingsPayload as { error?: string } | null)?.error
+          || 'Discord自動通知設定を読み込めませんでした。',
+        );
+      }
+      setDiscordAutomationSettings(normalizeDiscordAutomationSettings(settingsPayload));
+      if (runsResponse.ok && Array.isArray(runsPayload)) {
+        setDiscordAutomationRuns(runsPayload as DiscordAutomationRunRecord[]);
+      }
+      setDiscordAutomationMessage(null);
+    } catch (error) {
+      setDiscordAutomationMessage(
+        error instanceof Error ? error.message : 'Discord自動通知設定を読み込めませんでした。',
+      );
+    } finally {
+      setDiscordAutomationLoading(false);
+    }
+  };
+
+  const openDiscordAutomationSettings = () => {
+    setDiscordAutomationSettingsOpen(true);
+    void loadDiscordAutomationSettings();
+  };
+
+  const updateDiscordAutomationJob = (
+    jobId: string,
+    updater: (job: DiscordAutomationJob) => DiscordAutomationJob,
+  ) => {
+    setDiscordAutomationSettings((current) => ({
+      ...current,
+      jobs: current.jobs.map((job) => job.id === jobId ? updater(job) : job),
+    }));
+  };
+
+  const setDiscordAutomationSelection = (
+    jobId: string,
+    field: 'imageSelection' | 'videoSelection',
+    selection: DiscordAutomationSelection,
+  ) => {
+    updateDiscordAutomationJob(jobId, (job) => ({ ...job, [field]: selection }));
+  };
+
+  const saveDiscordAutomationSettings = async (): Promise<DiscordAutomationSettings> => {
+    const response = await fetch(DISCORD_AUTOMATION_SETTINGS_ENDPOINT, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: discordAutomationSettings }),
+    });
+    const payload = await response.json().catch(() => null) as unknown;
+    if (!response.ok) {
+      throw new Error(
+        (payload as { error?: string } | null)?.error
+        || 'Discord自動通知設定を保存できませんでした。',
+      );
+    }
+    const saved = normalizeDiscordAutomationSettings(payload);
+    setDiscordAutomationSettings(saved);
+    return saved;
+  };
+
+  const handleSaveDiscordAutomationSettings = async () => {
+    setDiscordAutomationSaving(true);
+    try {
+      await saveDiscordAutomationSettings();
+      setDiscordAutomationMessage('Discord自動通知設定をサーバーへ保存しました。');
+    } catch (error) {
+      setDiscordAutomationMessage(
+        error instanceof Error ? error.message : 'Discord自動通知設定を保存できませんでした。',
+      );
+    } finally {
+      setDiscordAutomationSaving(false);
+    }
+  };
+
+  const handleRunDiscordAutomationNow = async (job: DiscordAutomationJob) => {
+    setDiscordAutomationSaving(true);
+    try {
+      const saved = await saveDiscordAutomationSettings();
+      const target = saved.jobs.find((candidate) => candidate.id === job.id) || job;
+      const response = await fetch(`/api/discord-automation/jobs/${encodeURIComponent(target.id)}/run`, {
+        method: 'POST',
+      });
+      const payload = await response.json().catch(() => null) as { error?: string; message?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Discord自動通知を開始できませんでした。');
+      }
+      setDiscordAutomationMessage(payload?.message || 'Discord自動通知を開始しました。');
+      window.setTimeout(() => void loadDiscordAutomationSettings(), 1_000);
+    } catch (error) {
+      setDiscordAutomationMessage(
+        error instanceof Error ? error.message : 'Discord自動通知を開始できませんでした。',
+      );
+    } finally {
+      setDiscordAutomationSaving(false);
+    }
+  };
+
+  const addDiscordAutomationJob = () => {
+    const id = `custom-${Date.now().toString(36)}`;
+    setDiscordAutomationSettings((current) => ({
+      ...current,
+      jobs: [...current.jobs, {
+        id,
+        name: '新しいDiscord通知',
+        enabled: true,
+        days: { mode: 'weekdays', customDays: [] },
+        times: ['12:00'],
+        prompt: chartAiPrompt || DEFAULT_CHART_AI_PROMPT,
+        model: chartAiModel,
+        imageSelection: { mode: 'all', panelIds: [] },
+        videoSelection: { mode: 'all', panelIds: [] },
+        videoDurationSeconds: 5,
+        videoFrameRate: 30,
+        videoResolutionId: 'square-720',
+      }],
+    }));
+  };
+
+  const handleCopyChartAiResult = async () => {
+    if (!chartAiResult?.text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(chartAiResult.text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = chartAiResult.text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (!copied) {
+          throw new Error('コピーできませんでした。');
+        }
+      }
+      setChartAiCopied(true);
+      window.setTimeout(() => setChartAiCopied(false), 2_000);
+    } catch {
+      setChartExportError('クリップボードへコピーできませんでした。');
     }
   };
 
@@ -9781,9 +10175,10 @@ export default function App() {
                 event.preventDefault();
                 event.stopPropagation();
                 setVideoExportMenu(null);
+                setChartAiPromptMenu(null);
                 setImageExportMenu({ x: event.clientX, y: event.clientY });
               }}
-              disabled={Boolean(chartExportStatus)}
+              disabled={Boolean(chartExportStatus || chartAiStatus)}
               className="w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-emerald-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
               title="チャート画像をPNGでダウンロード（右クリックで対象を設定）"
               aria-label="チャート画像をダウンロード"
@@ -9801,9 +10196,10 @@ export default function App() {
                 event.preventDefault();
                 event.stopPropagation();
                 setImageExportMenu(null);
+                setChartAiPromptMenu(null);
                 setVideoExportMenu({ x: event.clientX, y: event.clientY });
               }}
-              disabled={chartExportStatus?.kind === 'image'}
+              disabled={chartExportStatus?.kind === 'image' || Boolean(chartAiStatus)}
               className={`relative w-9 h-10 flex items-center justify-center border border-transparent transition disabled:cursor-wait disabled:opacity-70 ${
                 chartExportStatus?.kind === 'video'
                   ? 'bg-red-950/70 text-red-300 hover:bg-red-900/80 hover:text-white'
@@ -9824,6 +10220,32 @@ export default function App() {
               {chartExportStatus?.kind === 'video' && (
                 <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-cyan-200">
                   {Math.round(chartExportStatus.progress * 100)}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleChartAiAnalysis()}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setVideoExportMenu(null);
+                setImageExportMenu(null);
+                setChartAiPromptMenu({ x: event.clientX, y: event.clientY });
+              }}
+              disabled={Boolean(chartExportStatus || chartAiStatus)}
+              className="relative w-9 h-10 flex items-center justify-center border border-transparent text-gray-400 hover:text-violet-200 hover:bg-[#161616] disabled:cursor-wait disabled:opacity-70 transition"
+              title={`チャート画像をダウンロードしてAI分析（${GEMINI_CHART_MODELS.find((model) => model.id === chartAiModel)?.label || chartAiModel}、右クリックで設定）`}
+              aria-label="チャート画像をダウンロードしてAI分析"
+            >
+              {chartAiStatus ? (
+                <LoaderCircle className="h-5 w-5 animate-spin text-violet-300" />
+              ) : (
+                <span className="text-[11px] font-black tracking-tight">AI</span>
+              )}
+              {chartAiStatus?.stage === 'capturing' && (
+                <span className="absolute bottom-0.5 right-0.5 text-[7px] font-mono text-violet-200">
+                  {Math.round(chartAiStatus.progress * 100)}
                 </span>
               )}
             </button>
@@ -10148,14 +10570,622 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {chartAiPromptMenu && (
+              <div
+                className="fixed z-[110] flex w-[min(36rem,calc(100vw-16px))] max-h-[calc(100vh-16px)] flex-col border border-[#493b66] bg-[#080808] text-[10px] text-gray-200 shadow-2xl"
+                style={{
+                  left: Math.max(8, Math.min(chartAiPromptMenu.x - 576, window.innerWidth - 584)),
+                  top: Math.max(8, Math.min(chartAiPromptMenu.y, window.innerHeight - 584)),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="border-b border-[#2d2540] px-3 py-2">
+                  <div className="font-bold text-violet-200">AI分析の設定</div>
+                  <div className="mt-0.5 text-[9px] text-gray-500">
+                    左クリック時はカメラと同じ対象チャートをダウンロードし、この文章と画像をGeminiへ送ります
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChartAiPromptMenu(null);
+                      openDiscordAutomationSettings();
+                    }}
+                    className="mt-2 flex h-8 w-full items-center justify-center gap-2 border border-violet-700 bg-violet-950/40 text-[10px] font-bold text-violet-100 hover:bg-violet-900/50"
+                  >
+                    <Bell className="h-3.5 w-3.5" />
+                    Discord自動通知の設定
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 p-2.5">
+                  <label className="mb-2.5 block">
+                    <span className="mb-1 block font-bold text-gray-300">使用モデル</span>
+                    <select
+                      value={chartAiModel}
+                      onChange={(event) => setChartAiModel(
+                        normalizeGeminiChartModelId(event.target.value),
+                      )}
+                      className="h-9 w-full border border-[#493b66] bg-[#101010] px-2 text-[11px] font-bold text-violet-100 outline-none focus:border-violet-500"
+                      aria-label="Geminiモデル"
+                    >
+                      {GEMINI_CHART_MODELS.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}{model.id === 'gemini-3.6-flash' ? '（推奨）' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="mt-1 block text-[9px] text-gray-500">
+                      {GEMINI_CHART_MODELS.find((model) => model.id === chartAiModel)?.description}
+                    </span>
+                  </label>
+                  <textarea
+                    value={chartAiPrompt}
+                    onChange={(event) => setChartAiPrompt(event.target.value)}
+                    maxLength={30_000}
+                    spellCheck={false}
+                    className="h-[min(23rem,calc(100vh-242px))] min-h-40 w-full resize-none border border-[#34303d] bg-[#101010] p-2 font-mono text-[11px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
+                    aria-label="AI分析プロンプト"
+                  />
+                  <div className="mt-1 flex items-center justify-between text-[9px] text-gray-500">
+                    <span>変更内容は自動保存されます</span>
+                    <span>{chartAiPrompt.length.toLocaleString('ja-JP')} / 30,000</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-t border-[#2d2540] p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setChartAiPrompt(DEFAULT_CHART_AI_PROMPT)}
+                    className="flex h-8 items-center justify-center gap-1.5 border border-[#3a3a3a] text-gray-300 hover:bg-[#171717] hover:text-white"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    初期プロンプトへ戻す
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleChartAiAnalysis()}
+                    disabled={!chartAiPrompt.trim()}
+                    className="flex h-8 items-center justify-center gap-2 border border-violet-700 bg-violet-950/50 font-bold text-violet-100 hover:bg-violet-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <span className="text-[10px] font-black">AI</span>
+                    画像を保存して分析
+                  </button>
+                </div>
+              </div>
+            )}
           </nav>
         </div>
 
       </div>
       )}
 
+      {discordAutomationSettingsOpen && (
+        <div
+          className="fixed inset-0 z-[135] flex items-center justify-center bg-black/80 p-2 md:p-6"
+          onClick={() => setDiscordAutomationSettingsOpen(false)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="discord-automation-title"
+            className="flex max-h-[calc(100dvh-16px)] w-full max-w-6xl flex-col border border-violet-700/70 bg-[#080808] shadow-2xl md:max-h-[calc(100vh-40px)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex items-center gap-3 border-b border-[#322645] px-3 py-3 md:px-4">
+              <Bell className="h-5 w-5 shrink-0 text-violet-300" />
+              <div className="min-w-0 flex-1">
+                <h2 id="discord-automation-title" className="font-bold text-violet-100">
+                  Discord自動通知の設定
+                </h2>
+                <p className="mt-0.5 text-[10px] leading-relaxed text-gray-500">
+                  更新後に60秒待機し、Gemini本文 → 動画 → 画像の順でサーバーから通知します。Webhookはこの画面に保存・表示しません。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationSettingsOpen(false)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center text-gray-400 hover:bg-[#171717] hover:text-white"
+                aria-label="Discord自動通知設定を閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
+              <div className="mb-4 flex flex-col gap-3 border border-violet-800/70 bg-violet-950/25 p-3 sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-violet-100">Discord通知</div>
+                  <div className="mt-0.5 text-[10px] text-gray-400">
+                    OFFにすると、全ての時刻設定をサーバー側で停止します。既定値はONです。
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  aria-pressed={discordAutomationSettings.discordEnabled}
+                  onClick={() => setDiscordAutomationSettings((current) => ({
+                    ...current,
+                    discordEnabled: !current.discordEnabled,
+                  }))}
+                  className={`flex h-10 min-w-28 items-center justify-center gap-2 border px-4 text-xs font-bold transition ${
+                    discordAutomationSettings.discordEnabled
+                      ? 'border-emerald-500 bg-emerald-950/70 text-emerald-100'
+                      : 'border-gray-600 bg-[#171717] text-gray-400'
+                  }`}
+                >
+                  <span className={`h-2.5 w-2.5 rounded-full ${
+                    discordAutomationSettings.discordEnabled ? 'bg-emerald-400' : 'bg-gray-600'
+                  }`} />
+                  {discordAutomationSettings.discordEnabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  サーバー時刻: 日本時間（Asia/Tokyo）
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadDiscordAutomationSettings()}
+                  disabled={discordAutomationLoading || discordAutomationSaving}
+                  className="h-7 border border-[#3d3d3d] px-2.5 text-[10px] text-gray-300 hover:bg-[#171717] disabled:opacity-40"
+                >
+                  {discordAutomationLoading ? '再読込中…' : '実行履歴を更新'}
+                </button>
+              </div>
+
+              {discordAutomationMessage && (
+                <div className="mb-3 border border-violet-800/60 bg-violet-950/30 px-3 py-2 text-[11px] text-violet-100">
+                  {discordAutomationMessage}
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {discordAutomationSettings.jobs.map((job, jobIndex) => {
+                  const updateTime = (timeIndex: number, value: string) => {
+                    updateDiscordAutomationJob(job.id, (current) => ({
+                      ...current,
+                      times: current.times.map((time, index) => index === timeIndex ? value : time),
+                    }));
+                  };
+                  const toggleSelectionPanel = (
+                    field: 'imageSelection' | 'videoSelection',
+                    panelId: string,
+                  ) => {
+                    const selection = job[field];
+                    const selectedIds = selection.mode === 'custom'
+                      ? selection.panelIds
+                      : panels.map((panel) => panel.id);
+                    const nextIds = selectedIds.includes(panelId)
+                      ? selectedIds.filter((id) => id !== panelId)
+                      : [...selectedIds, panelId];
+                    setDiscordAutomationSelection(job.id, field, {
+                      mode: 'custom',
+                      panelIds: nextIds,
+                    });
+                  };
+                  const selectionControls = (
+                    field: 'imageSelection' | 'videoSelection',
+                    label: string,
+                    color: 'emerald' | 'cyan',
+                  ) => {
+                    const selection = job[field];
+                    const selectedIds = selection.mode === 'all'
+                      ? panels.map((panel) => panel.id)
+                      : selection.panelIds;
+                    const activeClass = color === 'emerald'
+                      ? 'border-emerald-600 bg-emerald-950/60 text-emerald-100'
+                      : 'border-cyan-600 bg-cyan-950/60 text-cyan-100';
+                    return (
+                      <div className="border border-[#303030] bg-[#0d0d0d] p-2.5">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <span className="font-bold text-gray-200">{label}</span>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setDiscordAutomationSelection(job.id, field, {
+                                mode: 'all',
+                                panelIds: [],
+                              })}
+                              className={`h-6 border px-2 text-[9px] ${
+                                selection.mode === 'all' ? activeClass : 'border-[#3a3a3a] text-gray-400'
+                              }`}
+                            >
+                              全て
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDiscordAutomationSelection(job.id, field, {
+                                mode: 'custom',
+                                panelIds: selection.mode === 'custom' ? selection.panelIds : [],
+                              })}
+                              className={`h-6 border px-2 text-[9px] ${
+                                selection.mode === 'custom' ? activeClass : 'border-[#3a3a3a] text-gray-400'
+                              }`}
+                            >
+                              個別指定
+                            </button>
+                          </div>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto border border-[#252525]">
+                          {panels.map((panel, index) => {
+                            const selected = selectedIds.includes(panel.id);
+                            return (
+                              <button
+                                key={panel.id}
+                                type="button"
+                                onClick={() => toggleSelectionPanel(field, panel.id)}
+                                className={`flex h-7 w-full items-center gap-2 border-b border-[#202020] px-2 text-left text-[9px] last:border-b-0 ${
+                                  selected ? 'bg-white/5 text-gray-100' : 'text-gray-500'
+                                }`}
+                              >
+                                <span className={`flex h-3.5 w-3.5 items-center justify-center border ${
+                                  selected ? 'border-violet-400 text-violet-200' : 'border-gray-600'
+                                }`}>
+                                  {selected && <Check className="h-3 w-3" />}
+                                </span>
+                                <span className="truncate">
+                                  {index + 1}番目: {panel.name || normalizeStoredSymbolValue(panel.symbol) || '空のチャート'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  };
+                  return (
+                    <article key={job.id} className="border border-[#3a3347] bg-[#0b0b0b] p-3 md:p-4">
+                      <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-[#29242f] pb-3">
+                        <input
+                          value={job.name}
+                          onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                            ...current,
+                            name: event.target.value,
+                          }))}
+                          className="h-8 min-w-44 flex-1 border border-[#3f3a49] bg-[#121212] px-2 text-xs font-bold text-gray-100 outline-none focus:border-violet-500"
+                          aria-label="通知設定名"
+                        />
+                        <button
+                          type="button"
+                          aria-pressed={job.enabled}
+                          onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                            ...current,
+                            enabled: !current.enabled,
+                          }))}
+                          className={`h-8 border px-3 text-[10px] font-bold ${
+                            job.enabled
+                              ? 'border-emerald-700 bg-emerald-950/50 text-emerald-100'
+                              : 'border-gray-600 text-gray-500'
+                          }`}
+                        >
+                          {job.enabled ? 'この設定はON' : 'この設定はOFF'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleRunDiscordAutomationNow(job)}
+                          disabled={!discordAutomationSettings.discordEnabled || !job.enabled || discordAutomationSaving}
+                          className="h-8 border border-violet-700 bg-violet-950/50 px-3 text-[10px] font-bold text-violet-100 hover:bg-violet-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          今すぐ実行
+                        </button>
+                        {discordAutomationSettings.jobs.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setDiscordAutomationSettings((current) => ({
+                              ...current,
+                              jobs: current.jobs.filter((candidate) => candidate.id !== job.id),
+                            }))}
+                            className="h-8 border border-red-900/70 px-2 text-[10px] text-red-300 hover:bg-red-950/40"
+                            aria-label={`${job.name}を削除`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid gap-3 lg:grid-cols-[15rem_minmax(0,1fr)]">
+                        <div className="space-y-3">
+                          <label className="block text-[10px]">
+                            <span className="mb-1 block font-bold text-gray-300">実行日</span>
+                            <select
+                              value={job.days.mode}
+                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                ...current,
+                                days: {
+                                  ...current.days,
+                                  mode: event.target.value as DiscordAutomationJob['days']['mode'],
+                                },
+                              }))}
+                              className="h-8 w-full border border-[#3a3a3a] bg-[#111] px-2 text-gray-200 outline-none"
+                            >
+                              <option value="weekdays">平日のみ（月〜金）</option>
+                              <option value="weekends">休日のみ（土・日）</option>
+                              <option value="everyday">毎日</option>
+                              <option value="custom">曜日を指定</option>
+                            </select>
+                          </label>
+                          {job.days.mode === 'custom' && (
+                            <div className="grid grid-cols-7 gap-1">
+                              {['日', '月', '火', '水', '木', '金', '土'].map((label, day) => {
+                                const selected = job.days.customDays.includes(day);
+                                return (
+                                  <button
+                                    key={label}
+                                    type="button"
+                                    onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                                      ...current,
+                                      days: {
+                                        ...current.days,
+                                        customDays: selected
+                                          ? current.days.customDays.filter((candidate) => candidate !== day)
+                                          : [...current.days.customDays, day].sort(),
+                                      },
+                                    }))}
+                                    className={`h-7 border text-[9px] ${
+                                      selected
+                                        ? 'border-violet-600 bg-violet-950/70 text-violet-100'
+                                        : 'border-[#3a3a3a] text-gray-500'
+                                    }`}
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          <div>
+                            <div className="mb-1 flex items-center justify-between text-[10px]">
+                              <span className="font-bold text-gray-300">実行時刻</span>
+                              <button
+                                type="button"
+                                onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                                  ...current,
+                                  times: [...current.times, '12:00'],
+                                }))}
+                                className="text-violet-300 hover:text-violet-100"
+                              >
+                                + 時刻を追加
+                              </button>
+                            </div>
+                            <div className="space-y-1">
+                              {job.times.map((time, timeIndex) => (
+                                <div key={`${time}-${timeIndex}`} className="flex gap-1">
+                                  <input
+                                    type="time"
+                                    value={time}
+                                    onChange={(event) => updateTime(timeIndex, event.target.value)}
+                                    className="h-8 min-w-0 flex-1 border border-[#3a3a3a] bg-[#111] px-2 text-[11px] text-gray-200 outline-none"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                                      ...current,
+                                      times: current.times.filter((_, index) => index !== timeIndex),
+                                    }))}
+                                    className="h-8 w-8 border border-[#3a3a3a] text-gray-500 hover:text-red-300"
+                                    aria-label={`${time}を削除`}
+                                  >
+                                    <X className="mx-auto h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <label className="block text-[10px]">
+                            <span className="mb-1 block font-bold text-gray-300">Geminiモデル</span>
+                            <select
+                              value={job.model}
+                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                ...current,
+                                model: normalizeGeminiChartModelId(event.target.value),
+                              }))}
+                              className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none"
+                            >
+                              {GEMINI_CHART_MODELS.map((model) => (
+                                <option key={model.id} value={model.id}>{model.label}</option>
+                              ))}
+                            </select>
+                            <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
+                              選択モデルで失敗した場合はGemini 2.5 Flashへ自動切替します。
+                            </span>
+                          </label>
+                        </div>
+
+                        <div className="space-y-3">
+                          <label className="block">
+                            <span className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-gray-300">
+                              Geminiへの指示
+                              <button
+                                type="button"
+                                onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                                  ...current,
+                                  prompt: chartAiPrompt,
+                                  model: chartAiModel,
+                                }))}
+                                className="font-normal text-violet-300 hover:text-violet-100"
+                              >
+                                現在のAI設定を反映
+                              </button>
+                            </span>
+                            <textarea
+                              value={job.prompt}
+                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                ...current,
+                                prompt: event.target.value,
+                              }))}
+                              maxLength={30_000}
+                              spellCheck={false}
+                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
+                            />
+                          </label>
+                          <div className="grid gap-3 xl:grid-cols-2">
+                            {selectionControls('imageSelection', 'Discordへ添付する画像', 'emerald')}
+                            <div className="space-y-3">
+                              {selectionControls('videoSelection', 'Discordへ添付する動画', 'cyan')}
+                              <div className="grid grid-cols-3 gap-2 border border-[#303030] bg-[#0d0d0d] p-2.5 text-[9px]">
+                                <label>
+                                  <span className="mb-1 block text-gray-400">動画時間</span>
+                                  <select
+                                    value={job.videoDurationSeconds}
+                                    onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                      ...current,
+                                      videoDurationSeconds: Number(event.target.value),
+                                    }))}
+                                    className="h-7 w-full border border-[#3a3a3a] bg-[#111] px-1 text-gray-200"
+                                  >
+                                    {[3, 5, 8, 10, 15].map((seconds) => (
+                                      <option key={seconds} value={seconds}>{seconds}秒</option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  <span className="mb-1 block text-gray-400">FPS</span>
+                                  <select
+                                    value={job.videoFrameRate}
+                                    onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                      ...current,
+                                      videoFrameRate: Number(event.target.value) === 60 ? 60 : 30,
+                                    }))}
+                                    className="h-7 w-full border border-[#3a3a3a] bg-[#111] px-1 text-gray-200"
+                                  >
+                                    <option value={30}>30</option>
+                                    <option value={60}>60</option>
+                                  </select>
+                                </label>
+                                <label>
+                                  <span className="mb-1 block text-gray-400">解像度</span>
+                                  <select
+                                    value={job.videoResolutionId}
+                                    onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                      ...current,
+                                      videoResolutionId: event.target.value as DiscordAutomationJob['videoResolutionId'],
+                                    }))}
+                                    className="h-7 w-full border border-[#3a3a3a] bg-[#111] px-1 text-gray-200"
+                                  >
+                                    {CHART_EXPORT_RESOLUTIONS.map((resolution) => (
+                                      <option key={resolution.id} value={resolution.id}>{resolution.label}</option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={addDiscordAutomationJob}
+                className="mt-3 flex h-8 items-center gap-1.5 border border-[#4b3f60] px-3 text-[10px] text-violet-200 hover:bg-violet-950/40"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                通知設定を追加
+              </button>
+
+              {discordAutomationRuns.length > 0 && (
+                <div className="mt-5 border border-[#302b35] bg-[#0d0d0d]">
+                  <div className="border-b border-[#302b35] px-3 py-2 text-[10px] font-bold text-gray-300">
+                    直近のサーバー実行履歴
+                  </div>
+                  <div className="max-h-40 overflow-y-auto">
+                    {discordAutomationRuns.slice(0, 8).map((run) => (
+                      <div key={run.id} className="grid grid-cols-[5.5rem_1fr] gap-2 border-b border-[#242424] px-3 py-2 text-[9px] last:border-b-0">
+                        <span className={
+                          run.status === 'succeeded' ? 'text-emerald-300'
+                            : run.status === 'failed' ? 'text-red-300'
+                              : 'text-amber-300'
+                        }>
+                          {run.status === 'succeeded' ? '完了' : run.status === 'failed' ? '失敗' : '実行中'}
+                        </span>
+                        <span className="min-w-0 break-words text-gray-400">
+                          {run.scheduledFor} — {run.message}{run.model ? `（${run.model}）` : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[#322645] p-3">
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationSettingsOpen(false)}
+                className="h-9 border border-[#3a3a3a] px-4 text-[11px] text-gray-300 hover:bg-[#171717]"
+              >
+                閉じる
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveDiscordAutomationSettings()}
+                disabled={discordAutomationSaving || discordAutomationLoading}
+                className="h-9 border border-violet-700 bg-violet-950/60 px-4 text-[11px] font-bold text-violet-100 hover:bg-violet-900/60 disabled:cursor-wait disabled:opacity-50"
+              >
+                {discordAutomationSaving ? '保存中…' : 'サーバーへ保存'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {chartAiResult && (
+        <div
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-black/75 p-3 md:p-8"
+          onClick={() => setChartAiResult(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="chart-ai-result-title"
+            className="flex max-h-[calc(100dvh-24px)] w-full max-w-3xl flex-col border border-[#493b66] bg-[#080808] shadow-2xl md:max-h-[calc(100vh-64px)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex items-center gap-3 border-b border-[#2d2540] px-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <h2 id="chart-ai-result-title" className="font-bold text-violet-100">
+                  AIチャート分析
+                </h2>
+                <div className="mt-0.5 text-[10px] text-gray-500">
+                  分析対象のPNG画像はダウンロード済みです
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleCopyChartAiResult()}
+                className="flex h-8 shrink-0 items-center gap-1.5 border border-violet-700 bg-violet-950/50 px-3 text-[11px] font-bold text-violet-100 hover:bg-violet-900/60"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {chartAiCopied ? 'コピー済み' : 'コピー'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartAiResult(null)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center text-gray-400 hover:bg-[#171717] hover:text-white"
+                aria-label="AI分析結果を閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-7 text-gray-100">
+                {chartAiResult.text}
+              </pre>
+            </div>
+            <footer className="border-t border-[#242424] px-4 py-2 text-[9px] text-gray-500">
+              使用モデル: {chartAiResult.model}
+            </footer>
+          </section>
+        </div>
+      )}
+
       {chartExportError && (
-        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[120] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl md:bottom-12 md:right-14">
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[140] flex max-w-sm items-start gap-3 border border-red-800 bg-red-950/95 px-3 py-2 text-[11px] text-red-100 shadow-2xl md:bottom-12 md:right-14">
           <span className="min-w-0 flex-1 leading-relaxed">{chartExportError}</span>
           <button
             type="button"

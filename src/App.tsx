@@ -7248,9 +7248,9 @@ export default function App() {
       },
       panels.map((panel) => panel.id),
     );
-    const imagePanelIds = resolveAutomationPanelIds(job.imageSelection);
-    const videoPanelIds = resolveAutomationPanelIds(job.videoSelection);
-    if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
+    const requestedImagePanelIds = resolveAutomationPanelIds(job.imageSelection);
+    const requestedVideoPanelIds = resolveAutomationPanelIds(job.videoSelection);
+    if (requestedImagePanelIds.length === 0 || requestedVideoPanelIds.length === 0) {
       throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
     }
     if (!job.prompt.trim()) {
@@ -7264,6 +7264,36 @@ export default function App() {
       refreshChartsForDiscordAutomation();
       await sleep(60_000);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+      const collectExportablePanelIds = (requestedPanelIds: string[]) => {
+        const panelsById = new Map(
+          Array.from(document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'))
+            .map((element) => [element.dataset.chartExportPanelId, element] as const),
+        );
+        return requestedPanelIds.filter((panelId) => {
+          const panelElement = panelsById.get(panelId);
+          const svg = panelElement?.querySelector<SVGSVGElement>('svg[data-chart-export-svg="true"]');
+          const header = panelElement?.querySelector<HTMLElement>('[data-chart-export-panel-header="true"]');
+          if (!svg || !header) return false;
+          const svgRect = svg.getBoundingClientRect();
+          const headerRect = header.getBoundingClientRect();
+          return svgRect.width > 0 && svgRect.height > 0 && headerRect.width > 0 && headerRect.height > 0;
+        });
+      };
+      const waitForExportablePanelIds = async (requestedPanelIds: string[]) => {
+        const deadline = Date.now() + 60_000;
+        let exportablePanelIds = collectExportablePanelIds(requestedPanelIds);
+        while (exportablePanelIds.length === 0 && Date.now() < deadline) {
+          await sleep(1_000);
+          exportablePanelIds = collectExportablePanelIds(requestedPanelIds);
+        }
+        return exportablePanelIds;
+      };
+      const imagePanelIds = await waitForExportablePanelIds(requestedImagePanelIds);
+      const videoPanelIds = await waitForExportablePanelIds(requestedVideoPanelIds);
+      if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
+        throw new Error('更新後のチャート描画が完了しませんでした。データ接続を確認してから再実行してください。');
+      }
 
       const imageFiles = await exportChartImage(
         imagePanelIds,

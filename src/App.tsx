@@ -133,7 +133,8 @@ const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const KLINE_FETCH_BATCH_LIMIT = 20;
 const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
-const DISCORD_AUTOMATION_KLINE_CONCURRENCY = 4;
+const DISCORD_AUTOMATION_KLINE_CONCURRENCY = 8;
+const DISCORD_AUTOMATION_MIN_COMPARISON_READY_RATIO = 0.6;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_QUOTE_BATCH_LIMIT = 80;
 const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 30_000;
@@ -7352,7 +7353,7 @@ export default function App() {
       };
       const waitForFullyRenderedPanelIds = async (requestedPanelIds: string[]) => {
         // 比較銘柄が多いチャートでは、60秒の必須待機後にも取得が続く。
-        // 枠だけの画像を送るより、全選択系列を描画できるまで待つ。
+        // 枠だけの画像を送るより、全選択パネルで比較線が十分に描画されるまで待つ。
         const deadline = Date.now() + 5 * 60_000;
         let renderedPanelIds = collectFullyRenderedPanelIds(requestedPanelIds);
         while (renderedPanelIds.length < requestedPanelIds.length && Date.now() < deadline) {

@@ -60,6 +60,7 @@ const CHART_FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
 const CHART_BULL_COLOR = '#009b87';
 const CHART_BEAR_COLOR = '#ff4057';
 const EXPORT_FINAL_LABEL_SETTLE_START_PROGRESS = 0.9;
+const DISCORD_AUTOMATION_MIN_COMPARISON_READY_RATIO = 0.6;
 
 function findAlignedOrNearestCandle(
   candles: Candle[],
@@ -824,10 +825,18 @@ export function InteractiveCustomChart({
   const renderedPrimarySeriesCount = renderPrimarySeries && playbackVisibleCandles.length >= 2 ? 1 : 0;
   const renderedSeriesCount = renderedPrimarySeriesCount + loadedComparisonSeriesCount;
   const expectedSeriesCount = (renderPrimarySeries ? 1 : 0) + comparisonSymbols.length;
+  const requiredComparisonSeriesCount = comparisonSymbols.length === 0
+    ? 0
+    : Math.max(
+      1,
+      Math.ceil(comparisonSymbols.length * DISCORD_AUTOMATION_MIN_COMPARISON_READY_RATIO),
+    );
   // SVGの枠やグリッドだけができた状態を「出力可能」と誤認しないための明示的な完了印。
+  // キャッシュを持たない自動実行では一部銘柄のKLineが遅れることがあるため、比較線の
+  // 大半が表示済みなら実ブラウザと同じく意味のあるチャートとして撮影を進める。
   const chartExportReady = playbackVisibleCandles.length >= 2
     && renderedSeriesCount > 0
-    && loadedComparisonSeriesCount === comparisonSymbols.length;
+    && loadedComparisonSeriesCount >= requiredComparisonSeriesCount;
   const playbackComparisonSeriesData = useMemo<Record<string, ComparisonSeriesPoint[]>>(
     () => Object.fromEntries(
       comparisonSymbols.map((compSym) => {
@@ -1440,6 +1449,9 @@ export function InteractiveCustomChart({
       data-chart-export-ready={chartExportReady ? 'true' : 'false'}
       data-chart-export-series-count={renderedSeriesCount}
       data-chart-export-expected-series-count={expectedSeriesCount}
+      data-chart-export-required-series-count={
+        (renderPrimarySeries ? 1 : 0) + requiredComparisonSeriesCount
+      }
       className="flex-1 w-full h-full flex flex-col min-h-0 relative select-none"
       onContextMenu={openChartContextMenu}
     >

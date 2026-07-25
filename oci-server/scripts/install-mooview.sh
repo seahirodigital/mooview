@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # 理由: 共通ソースから本番ビルドとPython仮想環境を作成する。
-# リスク: /opt/mooview/appの依存関係と/etc/mooview/mooview.envを変更する。
+# リスク: /opt/mooview/appの依存関係、Chromium実行環境、/etc/mooview/mooview.envを変更する。
 if [[ "${EUID}" -ne 0 ]]; then
   echo "管理者権限が必要です。実行許可を得た後、rootとして実行してください。" >&2
   exit 1
@@ -44,6 +44,10 @@ fi
 
 /usr/sbin/runuser -u mooview -- \
   /usr/bin/npm --prefix "${app_root}" ci
+/usr/bin/npx --prefix "${app_root}" playwright install-deps chromium
+/usr/sbin/runuser -u mooview -- \
+  /usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/var/lib/mooview/ms-playwright \
+  /usr/bin/npx --prefix "${app_root}" playwright install chromium
 /usr/sbin/runuser -u mooview -- \
   /usr/bin/npm --prefix "${app_root}" run build
 
@@ -59,4 +63,3 @@ fi
 echo "MooViewの本番ビルドとPython環境を準備しました。"
 echo "秘密設定: ${env_path}"
 echo "MooViewはまだ起動していません。"
-

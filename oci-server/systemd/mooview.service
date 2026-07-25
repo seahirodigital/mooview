@@ -14,6 +14,7 @@ EnvironmentFile=/etc/mooview/mooview.env
 Environment=MOOVIEW_SHARED_SETTINGS=true
 Environment=MOOVIEW_DATA_DIR=/var/lib/mooview
 Environment=HOST=127.0.0.1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/mooview/ms-playwright
 ExecStart=/usr/bin/node /opt/mooview/app/dist/server.cjs
 Restart=on-failure
 RestartSec=5

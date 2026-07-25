@@ -107,6 +107,10 @@ interface ExportChartVideoOptions extends RenderCompositeOptions {
   iosCompatible?: boolean;
 }
 
+interface ExportChartImageOptions {
+  download?: boolean;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -375,6 +379,7 @@ function normalizeChartExportSelection(raw: unknown): ChartExportSelection {
 export async function exportChartImage(
   panelIds: string[],
   onProgress?: (progress: number) => void,
+  options: ExportChartImageOptions = {},
 ): Promise<File[]> {
   const timestamp = createTimestamp();
   const canvas = document.createElement('canvas');
@@ -402,7 +407,9 @@ export async function exportChartImage(
       type: 'image/png',
       lastModified: Date.now(),
     });
-    downloadBlob(file, filename);
+    if (options.download !== false) {
+      downloadBlob(file, filename);
+    }
     files.push(file);
     onProgress?.((index + 1) / panelIds.length);
   }

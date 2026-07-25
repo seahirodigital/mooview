@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI } from '@google/genai';
 import type { Request, Response } from 'express';
 import {
   DEFAULT_GEMINI_CHART_MODEL,
@@ -101,6 +101,34 @@ async function generateWithRetry(
   throw lastError;
 }
 
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  requestedModel: string,
+  prompt: string,
+  images: GeminiChartImage[],
+): Promise<{ text: string; model: string }> {
+  try {
+    return {
+      text: await generateWithRetry(ai, requestedModel, prompt, images),
+      model: requestedModel,
+    };
+  } catch (primaryError) {
+    // 選択中のモデルが利用できない、または一時的に処理できない場合でも、
+    // 自動通知を止めないよう指定どおりGemini 2.5 Flashへ切り替える。
+    if (requestedModel === DEFAULT_GEMINI_CHART_MODEL) {
+      throw primaryError;
+    }
+    console.warn('選択されたGeminiモデルでの分析に失敗したため、Gemini 2.5 Flashへ切り替えます。', {
+      requestedModel,
+      status: resolveErrorStatus(primaryError),
+    });
+    return {
+      text: await generateWithRetry(ai, DEFAULT_GEMINI_CHART_MODEL, prompt, images),
+      model: DEFAULT_GEMINI_CHART_MODEL,
+    };
+  }
+}
+
 function createPublicError(error: unknown): { status: number; message: string } {
   const upstreamStatus = resolveErrorStatus(error);
   if (upstreamStatus === 401 || upstreamStatus === 403) {
@@ -189,9 +217,11 @@ export async function handleGeminiChartAnalysis(
     const model = requestedModel === undefined
       ? normalizeGeminiChartModelId(configuredModel)
       : requestedModel.trim();
+    // サーバー起動時の認証モジュール読み込みを避け、AI実行時だけSDKを初期化する。
+    const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey });
-    const text = await generateWithRetry(ai, model, prompt, images);
-    response.json({ text, model });
+    const result = await generateWithFallback(ai, model, prompt, images);
+    response.json(result);
   } catch (error) {
     console.error('Geminiチャート分析に失敗しました。', {
       status: resolveErrorStatus(error),

@@ -12,6 +12,15 @@ import { handleMoomooRequest } from './server/moomooHandler.js';
 import { resolveMoomooGatewayKey } from './server/moomooClient.js';
 import { handleGeminiChartAnalysis } from './server/geminiHandler.js';
 import {
+  startDiscordAutomationScheduler,
+  triggerDiscordAutomationJob,
+} from './server/discordAutomation.js';
+import {
+  readDiscordAutomationRuns,
+  readDiscordAutomationSettings,
+  writeDiscordAutomationSettings,
+} from './server/discordAutomationStore.js';
+import {
   normalizeSharedWorkspaceProfile,
   readSharedWorkspaceSettings,
   sharedWorkspaceSettingsEnabled,
@@ -100,6 +109,77 @@ app.use('/api/ai', (request, response, next) => {
 
 app.post('/api/ai/chart-analysis', (request, response) => {
   void handleGeminiChartAnalysis(request, response);
+});
+
+app.use('/api/discord-automation', (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin) {
+    if (!workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+      response.status(403).json({ error: '許可されていないオリジンです。' });
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,PUT,POST,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (request.method === 'OPTIONS') {
+    response.status(204).end();
+    return;
+  }
+  next();
+});
+
+app.get('/api/discord-automation/settings', async (_request, response) => {
+  try {
+    response.json(await readDiscordAutomationSettings());
+  } catch (error) {
+    console.error('Discord自動通知設定の読み込みに失敗しました。', error);
+    response.status(500).json({ error: 'Discord自動通知設定の読み込みに失敗しました。' });
+  }
+});
+
+app.put('/api/discord-automation/settings', async (request, response) => {
+  try {
+    response.json(await writeDiscordAutomationSettings(request.body?.settings));
+  } catch (error) {
+    console.error('Discord自動通知設定の保存に失敗しました。', error);
+    response.status(400).json({
+      error: error instanceof Error ? error.message : 'Discord自動通知設定の保存に失敗しました。',
+    });
+  }
+});
+
+app.get('/api/discord-automation/runs', async (_request, response) => {
+  try {
+    response.json(await readDiscordAutomationRuns());
+  } catch (error) {
+    console.error('Discord自動通知履歴の読み込みに失敗しました。', error);
+    response.status(500).json({ error: 'Discord自動通知履歴の読み込みに失敗しました。' });
+  }
+});
+
+app.post('/api/discord-automation/jobs/:jobId/run', async (request, response) => {
+  try {
+    const settings = await readDiscordAutomationSettings();
+    const job = settings.jobs.find((candidate) => candidate.id === request.params.jobId);
+    if (!job) {
+      response.status(404).json({ error: '指定された自動通知設定が見つかりません。' });
+      return;
+    }
+    if (!settings.discordEnabled || !job.enabled) {
+      response.status(409).json({ error: 'Discord通知またはこの自動通知設定がOFFです。' });
+      return;
+    }
+    void triggerDiscordAutomationJob(port, job).catch((error) => {
+      console.error('Discord自動通知の手動実行に失敗しました。', error instanceof Error ? error.message : error);
+    });
+    response.status(202).json({ message: 'Discord自動通知を開始しました。実行履歴で結果を確認してください。' });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Discord自動通知を開始できませんでした。',
+    });
+  }
 });
 
 app.post('/api/moomoo/status', (request, response) =>
@@ -297,6 +377,7 @@ async function startServer(): Promise<void> {
 
   app.listen(port, host, () => {
     console.log(`MooViewサーバー起動: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`);
+    startDiscordAutomationScheduler({ port });
   });
 }
 

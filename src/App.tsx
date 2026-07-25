@@ -6662,6 +6662,10 @@ export default function App() {
 
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    // Discord自動通知は選択パネルだけを一度の取得世代で完走させる。
+    // 通常画面用の全パネル不足データ補完が並行すると、tickTriggerが更新されて
+    // 比較式・バスケットのKLine取得が途中でキャンセルされてしまう。
+    if (isDiscordAutomationPage) return;
 
     const missingRequests: string[] = [];
     const missingSymbols = new Set<string>();
@@ -6715,6 +6719,7 @@ export default function App() {
     candlesCache,
     quoteCache,
     moomooRealTimeActive,
+    isDiscordAutomationPage,
     watchlistTabs,
     activeWatchlistTabId,
   ]);

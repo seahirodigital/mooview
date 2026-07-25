@@ -25,6 +25,10 @@ for required_path in \
   fi
 done
 
+# runuserは呼び出し元の作業ディレクトリを引き継ぐため、mooviewユーザーが
+# 確実にアクセスできるアプリ配置先へ移動してから依存関係を導入する。
+cd "${app_root}"
+
 if ! /usr/bin/id mooview >/dev/null 2>&1; then
   echo "mooview実行ユーザーがありません。/opt/mooview/app/oci-server/scripts/prepare-host.shを先に実行してください。" >&2
   exit 1

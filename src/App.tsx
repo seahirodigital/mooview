@@ -3779,7 +3779,13 @@ export default function App() {
         : panels;
 
       panelsToFetch.forEach((panel, panelIndex) => {
-        const chartSymbols = [panel.symbol, ...(panel.comparisonSymbols || [])];
+        // 通常画面は比較銘柄もすべて更新する。一方Discord実行では、比較対象が数十銘柄に
+        // 及ぶパネルでも主系列を先に描画し、更新待機中に添付チャートを確定できるようにする。
+        const chartSymbols = isDiscordAutomationPage
+          ? panel.comparisonOnly
+            ? []
+            : [panel.symbol]
+          : [panel.symbol, ...(panel.comparisonSymbols || [])];
         const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
         chartSymbols.forEach((symbol, symbolIndex) => {
           // スマホは主銘柄を比較銘柄より先に描画できるよう、最優先で取得する。

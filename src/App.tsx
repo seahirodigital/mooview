@@ -3676,12 +3676,13 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     const signature = getAutoWatchlistQuoteRefreshSignature(watchlistTabs, watchlistQuoteFetchModes);
     if (watchlistAutoQuoteSignatureRef.current === signature) return;
     watchlistAutoQuoteSignatureRef.current = signature;
     if (!signature) return;
     requestAutoWatchlistQuoteRefresh(true);
-  }, [watchlistTabs, watchlistQuoteFetchModes]);
+  }, [isDiscordAutomationPage, watchlistTabs, watchlistQuoteFetchModes]);
 
   // OpenDへの接続状態はサーバー側ゲートウェイを通して確認する
   const checkMoomooStatus = async () => {
@@ -4059,6 +4060,7 @@ export default function App() {
   }, [activeWatchlistTabId, appView, discordAutomationTargetPanelIds, isDiscordAutomationPage, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     if (!moomooRealTimeActive) {
       quoteFetchManualTabQueueRef.current = [];
       quoteFetchAutoSweepRequestedRef.current = false;
@@ -4271,11 +4273,12 @@ export default function App() {
     };
 
     fetchMoomooQuotes();
-  }, [activeWatchlistTabId, watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger, isDiscordAutomationPage]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
   // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     const interval = setInterval(() => {
       setTickTrigger(prev => prev + 1);
       setNetworkLatency(moomooRealTimeActive ? 12 : Math.floor(15 + Math.random() * 20));
@@ -4325,7 +4328,7 @@ export default function App() {
     }, 3500);
 
     return () => clearInterval(interval);
-  }, [panels, moomooRealTimeActive, watchlistTabs, watchlistQuoteFetchModes]);
+  }, [panels, moomooRealTimeActive, watchlistTabs, watchlistQuoteFetchModes, isDiscordAutomationPage]);
 
   // --- HISTORICAL CANDLE GENERATOR RESOLVER ---
   // デモモードでのみ疑似ローソク足を生成する
@@ -7286,7 +7289,6 @@ export default function App() {
     if (!moomooRealTimeActiveRef.current) {
       setMoomooRealTimeActive(true);
     }
-    requestAutoWatchlistQuoteRefresh(true);
     setTickTrigger((current) => current + 1);
   };
 

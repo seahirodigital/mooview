@@ -25,10 +25,10 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 LockPersonality=true
 RestrictSUIDSGID=true
-IPAddressDeny=any
-IPAddressAllow=localhost
+# Yahoo Financeのフォールバックへ外向きHTTPS通信を許可する。
+# 待受はmoomoo_gateway.py側で127.0.0.1に限定する。
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-

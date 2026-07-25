@@ -133,6 +133,7 @@ const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const KLINE_FETCH_BATCH_LIMIT = 20;
 const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
+const DISCORD_AUTOMATION_KLINE_CONCURRENCY = 4;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_QUOTE_BATCH_LIMIT = 80;
 const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 30_000;
@@ -3863,9 +3864,15 @@ export default function App() {
         }
         klineRequestCount += 1;
       };
-      const fetchCandlesForSymbol = async (symbol: string, timeframe: Timeframe) => {
+      const fetchCandlesForSymbol = async (
+        symbol: string,
+        timeframe: Timeframe,
+        skipBatchSlotWait = false,
+      ) => {
         const requestCandles = async () => {
-          await waitForKlineSlot();
+          if (!skipBatchSlotWait) {
+            await waitForKlineSlot();
+          }
           const { response, data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3922,45 +3929,84 @@ export default function App() {
         return null;
       };
 
-      try {
-        for (const [key, request] of requestsToFetch) {
-          if (
-            !moomooRealTimeActiveRef.current
-            || candleFetchGenerationRef.current !== fetchGeneration
-          ) break;
-          try {
-            const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
-            if (directResult.candles.length > 0) {
+      const processCandleRequest = async (
+        [key, request]: [string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }],
+        skipBatchSlotWait = false,
+      ) => {
+        if (
+          !moomooRealTimeActiveRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration
+        ) return;
+        try {
+          const directResult = await fetchCandlesForSymbol(
+            request.symbol,
+            request.timeframe,
+            skipBatchSlotWait,
+          );
+          if (directResult.candles.length > 0) {
+            successfulKeys.add(key);
+            commitFetchedCandles({ [key]: directResult.candles });
+            return;
+          }
+
+          let shouldRetryKey = directResult.retryable;
+          const fallbackSymbol = await findFallbackSymbol(request);
+          if (fallbackSymbol) {
+            const fallbackResult = await fetchCandlesForSymbol(
+              fallbackSymbol,
+              request.timeframe,
+              skipBatchSlotWait,
+            );
+            if (fallbackResult.candles.length > 0) {
+              const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
               successfulKeys.add(key);
-              commitFetchedCandles({ [key]: directResult.candles });
-              continue;
+              successfulKeys.add(fallbackKey);
+              commitFetchedCandles({
+                [key]: fallbackResult.candles,
+                [fallbackKey]: fallbackResult.candles,
+              });
+              return;
             }
+            shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
+          }
 
-            let shouldRetryKey = directResult.retryable;
-            const fallbackSymbol = await findFallbackSymbol(request);
-            if (fallbackSymbol) {
-              const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
-              if (fallbackResult.candles.length > 0) {
-                const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
-                successfulKeys.add(key);
-                successfulKeys.add(fallbackKey);
-                commitFetchedCandles({
-                  [key]: fallbackResult.candles,
-                  [fallbackKey]: fallbackResult.candles,
-                });
-                continue;
-              }
-              shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
+          const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+          failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
+          if (shouldRetryKey) retryableFailedKeys.add(key);
+          firstError ||= failedErrors[key];
+        } catch (error) {
+          const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+          failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
+          firstError ||= failedErrors[key];
+        }
+      };
+
+      try {
+        if (isDiscordAutomationPage) {
+          // 選択した比較チャートだけを、20件ごとのAPI上限を守りつつ4並列で取得する。
+          // 通常画面は従来どおり逐次取得のままにして、利用中の表示挙動を変えない。
+          for (let offset = 0; offset < requestsToFetch.length; offset += KLINE_FETCH_BATCH_LIMIT) {
+            const batch = requestsToFetch.slice(offset, offset + KLINE_FETCH_BATCH_LIMIT);
+            let nextIndex = 0;
+            await Promise.all(Array.from(
+              { length: Math.min(DISCORD_AUTOMATION_KLINE_CONCURRENCY, batch.length) },
+              async () => {
+                while (nextIndex < batch.length) {
+                  const request = batch[nextIndex];
+                  nextIndex += 1;
+                  await processCandleRequest(request, true);
+                }
+              },
+            ));
+            if (offset + KLINE_FETCH_BATCH_LIMIT < requestsToFetch.length) {
+              setMoomooStatus('connecting');
+              setMoomooError(`KLine制限待機中: ${Math.ceil(KLINE_FETCH_BATCH_COOLDOWN_MS / 1000)}秒後に次の${KLINE_FETCH_BATCH_LIMIT}件を取得します。`);
+              await sleep(KLINE_FETCH_BATCH_COOLDOWN_MS);
             }
-
-            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
-            failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
-            if (shouldRetryKey) retryableFailedKeys.add(key);
-            firstError ||= failedErrors[key];
-          } catch (error) {
-            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
-            failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
-            firstError ||= failedErrors[key];
+          }
+        } else {
+          for (const request of requestsToFetch) {
+            await processCandleRequest(request);
           }
         }
 

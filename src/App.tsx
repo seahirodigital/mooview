@@ -2335,6 +2335,10 @@ export default function App() {
   const [discordAutomationLoading, setDiscordAutomationLoading] = useState(false);
   const [discordAutomationSaving, setDiscordAutomationSaving] = useState(false);
   const [discordAutomationMessage, setDiscordAutomationMessage] = useState<string | null>(null);
+  const [discordAutomationSaveFeedback, setDiscordAutomationSaveFeedback] = useState<
+    'success' | 'error' | null
+  >(null);
+  const discordAutomationSaveFeedbackTimerRef = useRef<number | null>(null);
   const [chartExportStatus, setChartExportStatus] = useState<{
     kind: 'video' | 'image';
     progress: number;
@@ -7554,14 +7558,25 @@ export default function App() {
   };
 
   const handleSaveDiscordAutomationSettings = async () => {
+    if (discordAutomationSaveFeedbackTimerRef.current !== null) {
+      window.clearTimeout(discordAutomationSaveFeedbackTimerRef.current);
+      discordAutomationSaveFeedbackTimerRef.current = null;
+    }
+    setDiscordAutomationSaveFeedback(null);
     setDiscordAutomationSaving(true);
     try {
       await saveDiscordAutomationSettings();
       setDiscordAutomationMessage('Discord自動通知設定をサーバーへ保存しました。');
+      setDiscordAutomationSaveFeedback('success');
+      discordAutomationSaveFeedbackTimerRef.current = window.setTimeout(() => {
+        setDiscordAutomationSaveFeedback(null);
+        discordAutomationSaveFeedbackTimerRef.current = null;
+      }, 5_000);
     } catch (error) {
       setDiscordAutomationMessage(
         error instanceof Error ? error.message : 'Discord自動通知設定を保存できませんでした。',
       );
+      setDiscordAutomationSaveFeedback('error');
     } finally {
       setDiscordAutomationSaving(false);
     }
@@ -11317,9 +11332,21 @@ export default function App() {
                 type="button"
                 onClick={() => void handleSaveDiscordAutomationSettings()}
                 disabled={discordAutomationSaving || discordAutomationLoading}
-                className="h-9 border border-violet-700 bg-violet-950/60 px-4 text-[11px] font-bold text-violet-100 hover:bg-violet-900/60 disabled:cursor-wait disabled:opacity-50"
+                className={`h-9 border px-4 text-[11px] font-bold disabled:cursor-wait disabled:opacity-50 ${
+                  discordAutomationSaveFeedback === 'success'
+                    ? 'border-emerald-600 bg-emerald-950/70 text-emerald-100'
+                    : discordAutomationSaveFeedback === 'error'
+                      ? 'border-red-700 bg-red-950/60 text-red-100'
+                      : 'border-violet-700 bg-violet-950/60 text-violet-100 hover:bg-violet-900/60'
+                }`}
               >
-                {discordAutomationSaving ? '保存中…' : 'サーバーへ保存'}
+                {discordAutomationSaving
+                  ? '保存中…'
+                  : discordAutomationSaveFeedback === 'success'
+                    ? '保存済み ✓'
+                    : discordAutomationSaveFeedback === 'error'
+                      ? '保存に失敗'
+                      : 'サーバーへ保存'}
               </button>
             </footer>
           </section>
@@ -11373,6 +11400,27 @@ export default function App() {
               使用モデル: {chartAiResult.model}
             </footer>
           </section>
+        </div>
+      )}
+
+      {discordAutomationSaveFeedback && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[140] flex max-w-sm items-start gap-2 border px-3 py-2 text-[11px] shadow-2xl md:bottom-12 md:right-14 ${
+            discordAutomationSaveFeedback === 'success'
+              ? 'border-emerald-700 bg-emerald-950/95 text-emerald-100'
+              : 'border-red-800 bg-red-950/95 text-red-100'
+          }`}
+        >
+          {discordAutomationSaveFeedback === 'success'
+            ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            : <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+          <span className="min-w-0 leading-relaxed">
+            {discordAutomationSaveFeedback === 'success'
+              ? 'Discord自動通知設定をサーバーへ保存しました。'
+              : discordAutomationMessage || 'Discord自動通知設定を保存できませんでした。'}
+          </span>
         </div>
       )}
 

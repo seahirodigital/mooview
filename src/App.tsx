@@ -11126,12 +11126,19 @@ export default function App() {
                             <span className="mb-1 block font-bold text-gray-300">Geminiモデル</span>
                             <select
                               value={job.useCurrentChartAiSettings ? chartAiModel : job.model}
-                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
-                                ...current,
-                                model: normalizeGeminiChartModelId(event.target.value),
-                              }))}
-                              disabled={job.useCurrentChartAiSettings}
-                              className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none"
+                              onChange={(event) => {
+                                const model = normalizeGeminiChartModelId(event.target.value);
+                                if (job.useCurrentChartAiSettings) {
+                                  // ON時は右クリックAI設定を直接更新し、通知実行時も同じモデルを使用する。
+                                  setChartAiModel(model);
+                                  return;
+                                }
+                                updateDiscordAutomationJob(job.id, (current) => ({
+                                  ...current,
+                                  model,
+                                }));
+                              }}
+                              className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none focus:border-violet-500"
                             >
                               {GEMINI_CHART_MODELS.map((model) => (
                                 <option key={model.id} value={model.id}>{model.label}</option>
@@ -11183,15 +11190,27 @@ export default function App() {
                             </span>
                             <textarea
                               value={job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt}
-                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
-                                ...current,
-                                prompt: event.target.value,
-                              }))}
-                              disabled={job.useCurrentChartAiSettings}
+                              onChange={(event) => {
+                                const prompt = event.target.value;
+                                if (job.useCurrentChartAiSettings) {
+                                  // ON時は右クリックAI設定を直接更新し、共有ワークスペースへ自動保存する。
+                                  setChartAiPrompt(prompt);
+                                  return;
+                                }
+                                updateDiscordAutomationJob(job.id, (current) => ({
+                                  ...current,
+                                  prompt,
+                                }));
+                              }}
                               maxLength={30_000}
                               spellCheck={false}
-                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600 disabled:cursor-not-allowed disabled:opacity-70"
+                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
                             />
+                            <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
+                              {job.useCurrentChartAiSettings
+                                ? 'ここでの編集は右クリックAI設定へ即時反映され、ONの通知設定で使用されます。'
+                                : 'この通知設定だけに使用するプロンプトです。'}
+                            </span>
                           </label>
                           <div className="grid gap-3 xl:grid-cols-2">
                             {selectionControls('imageSelection', 'Discordへ添付する画像', 'emerald')}

@@ -361,6 +361,24 @@ async function markStaleRunAsFailed(
   await saveRunRecord(record);
 }
 
+async function recoverStaleRunRecords(now: number): Promise<void> {
+  const records = await readDiscordAutomationRuns();
+  const staleRecords = records.filter((record) => {
+    if (record.status !== 'running') return false;
+    const startedAt = Date.parse(record.startedAt);
+    return !Number.isFinite(startedAt) || now - startedAt >= STALE_RUN_AFTER_MS;
+  });
+  if (staleRecords.length === 0) return;
+
+  const completedAt = new Date(now).toISOString();
+  staleRecords.forEach((record) => {
+    record.status = 'failed';
+    record.completedAt = completedAt;
+    record.message = 'サーバー再起動などで実行中のまま停止したため、失敗として確定しました。';
+  });
+  await writeDiscordAutomationRuns(records);
+}
+
 async function processScheduledJob(
   port: number,
   job: DiscordAutomationJob,
@@ -407,10 +425,11 @@ async function runSchedulerTick(port: number): Promise<void> {
   if (schedulerTickInFlight || activeRun || retryPreparationInFlight) return;
   schedulerTickInFlight = true;
   try {
+    const now = Date.now();
+    await recoverStaleRunRecords(now);
     const settings = await readDiscordAutomationSettings();
     if (!settings.discordEnabled) return;
     const clock = getJapanClock();
-    const now = Date.now();
     const dueJobs = settings.jobs.flatMap((job) => (
       job.enabled && isDiscordAutomationDaySelected(job.days, clock.day)
         ? job.times.map((time) => ({ job, scheduledFor: getScheduledFor(clock, time) }))

@@ -1246,8 +1246,11 @@ function getMarketFetchRank(symbol: string): number {
   return 1;
 }
 
-function orderMarketFetchSymbols(symbols: string[]): string[] {
-  const pauseUsFetch = shouldPauseUsFetchForJapanSession();
+function orderMarketFetchSymbols(
+  symbols: string[],
+  options: { includePausedMarkets?: boolean } = {},
+): string[] {
+  const pauseUsFetch = !options.includePausedMarkets && shouldPauseUsFetchForJapanSession();
   const uniqueSymbols = Array.from(new Set(symbols.map(normalizeStoredSymbolValue).filter(Boolean)));
   return uniqueSymbols
     .filter((symbol) => !(pauseUsFetch && isUsMarketSymbol(symbol)))
@@ -2277,10 +2280,16 @@ export default function App() {
   const candleFetchGenerationRef = useRef(0);
   const candleRetryTimerRef = useRef<number | null>(null);
   const forceCandleRefreshRef = useRef(false);
+  const manualCandleRefreshSequenceRef = useRef(0);
+  const manualCandleRefreshSymbolsRef = useRef<Set<string>>(new Set());
+  const manualCandleRefreshBypassMarketPauseRef = useRef(false);
   const initialVisibleChartRefreshRef = useRef(true);
   const quoteFetchInFlightRef = useRef(false);
   const quoteFetchPendingRef = useRef(false);
-  const quoteFetchManualTabQueueRef = useRef<string[]>([]);
+  const quoteFetchManualTabQueueRef = useRef<Array<{
+    tabId: string;
+    includePausedMarkets: boolean;
+  }>>([]);
   const quoteFetchAutoSweepRequestedRef = useRef(false);
   const quoteFetchAutoAttemptedTabIdsRef = useRef<Set<string>>(new Set());
   const quoteFetchLastAutoSweepAtRef = useRef(0);
@@ -2645,6 +2654,7 @@ export default function App() {
   const [quoteFetchFailures, setQuoteFetchFailures] = useState<Record<string, string>>({});
   const [quoteFetchInFlight, setQuoteFetchInFlight] = useState(false);
   const [quoteFetchTarget, setQuoteFetchTarget] = useState<WatchlistQuoteFetchTarget | null>(null);
+  const [manualChartRefreshInFlight, setManualChartRefreshInFlight] = useState(false);
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
   const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>(() =>
@@ -3567,12 +3577,15 @@ export default function App() {
     setMoomooRealTimeActive((active) => !active);
   };
 
-  const getWatchlistTabQuoteOperands = (tab: WatchlistTab | null | undefined): string[] => {
+  const getWatchlistTabQuoteOperands = (
+    tab: WatchlistTab | null | undefined,
+    includePausedMarkets = false,
+  ): string[] => {
     return orderMarketFetchSymbols(Array.from(new Set(
       getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab))
         .map((symbol) => normalizeStoredSymbolValue(symbol))
         .filter(Boolean),
-    )));
+    )), { includePausedMarkets });
   };
 
   const requestAutoWatchlistQuoteRefresh = (force = false): boolean => {
@@ -3605,7 +3618,10 @@ export default function App() {
       && Number.isFinite(changePct);
   };
 
-  const queueWatchlistQuoteRefreshes = (tabIds: Array<string | null | undefined>) => {
+  const queueWatchlistQuoteRefreshes = (
+    tabIds: Array<string | null | undefined>,
+    options: { includePausedMarkets?: boolean } = {},
+  ) => {
     const refreshTabs: WatchlistTab[] = [];
     const seenTabIds = new Set<string>();
     tabIds.forEach((tabId) => {
@@ -3616,12 +3632,23 @@ export default function App() {
       refreshTabs.push(tab);
     });
     if (refreshTabs.length === 0) return;
+    const includePausedMarkets = options.includePausedMarkets === true;
     const retrySymbols = Array.from(new Set(
-      refreshTabs.flatMap((tab) => getWatchlistTabQuoteOperands(tab)),
+      refreshTabs.flatMap((tab) => getWatchlistTabQuoteOperands(tab, includePausedMarkets)),
     ));
+    const queuedTabRequests = new Map<string, {
+      tabId: string;
+      includePausedMarkets: boolean;
+    }>(
+      quoteFetchManualTabQueueRef.current.map((request) => [request.tabId, request] as const),
+    );
     quoteFetchManualTabQueueRef.current = [
-      ...refreshTabs.map((tab) => tab.id),
-      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => !seenTabIds.has(queuedTabId)),
+      ...refreshTabs.map((tab) => ({
+        tabId: tab.id,
+        includePausedMarkets: includePausedMarkets
+          || queuedTabRequests.get(tab.id)?.includePausedMarkets === true,
+      })),
+      ...quoteFetchManualTabQueueRef.current.filter((request) => !seenTabIds.has(request.tabId)),
     ];
     quoteFetchAutoSweepRequestedRef.current = true;
     quoteFetchAutoAttemptedTabIdsRef.current.clear();
@@ -3646,6 +3673,28 @@ export default function App() {
 
   const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
     queueWatchlistQuoteRefreshes([tabId]);
+  };
+
+  const requestManualChartRefresh = (symbols: string[] = []) => {
+    manualCandleRefreshSequenceRef.current += 1;
+    symbols.forEach((rawSymbol) => {
+      const normalizedSymbol = normalizeStoredSymbolValue(rawSymbol);
+      if (normalizedSymbol) manualCandleRefreshSymbolsRef.current.add(normalizedSymbol);
+    });
+    // 手動操作は画面を空白にしないことを最優先し、米国市場の停止時間帯も取得対象にする。
+    manualCandleRefreshBypassMarketPauseRef.current = true;
+    forceCandleRefreshRef.current = true;
+    chartMissingDataRefreshRef.current = { signature: '', requestedAt: 0 };
+    setManualChartRefreshInFlight(true);
+    setMoomooStatus('connecting');
+    setMoomooError(null);
+    if (candleFetchInFlightRef.current) {
+      candleFetchPendingRef.current = true;
+    }
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    setTickTrigger((current) => current + 1);
   };
 
   const getWatchlistTabIdsForChartSymbols = (symbols: string[]): string[] => {
@@ -3677,6 +3726,16 @@ export default function App() {
       ? activeWatchlistTabId
       : watchlistTabs[0]?.id;
     queueWatchlistQuoteRefresh(refreshTabId);
+    requestManualChartRefresh();
+  };
+
+  const handleRefreshWatchlistTabData = (tabId: string) => {
+    const tab = watchlistTabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    // タブ内の全銘柄を価格・KLineともに強制取得する。
+    queueWatchlistQuoteRefreshes([tab.id], { includePausedMarkets: true });
+    requestManualChartRefresh(getWatchlistTabSymbols(tab));
+    setWatchlistTabMenu(null);
   };
 
   useEffect(() => {
@@ -3721,15 +3780,31 @@ export default function App() {
     // Discord自動通知用のヘッドレス画面では、実行ジョブが対象パネルを指定するまで
     // 全画面のKLine取得を開始しない。選択チャートを60秒待機内に確定させるため。
     if (isDiscordAutomationPage && discordAutomationTargetPanelIds.length === 0) return;
-    const fetchGeneration = candleFetchGenerationRef.current + 1;
-    candleFetchGenerationRef.current = fetchGeneration;
+    // 通常の30秒更新や価格取得完了で進行中のKLine取得を中断すると、
+    // 銘柄数の多いタブが毎回先頭からやり直しになってしまう。
+    // 現在の逐次取得を完走させ、後続要求はpendingとして1回だけ続けて実行する。
     if (candleFetchInFlightRef.current) {
       candleFetchPendingRef.current = true;
       return;
     }
+    const fetchGeneration = candleFetchGenerationRef.current + 1;
+    candleFetchGenerationRef.current = fetchGeneration;
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
+      const manualRefreshSequence = manualCandleRefreshSequenceRef.current;
+      const manualRefreshSymbols = Array.from<string>(manualCandleRefreshSymbolsRef.current);
+      const bypassMarketPauseForManualRefresh = manualCandleRefreshBypassMarketPauseRef.current;
+      const finishManualRefresh = () => {
+        if (
+          manualRefreshSequence > 0
+          && manualCandleRefreshSequenceRef.current === manualRefreshSequence
+        ) {
+          manualCandleRefreshSymbolsRef.current.clear();
+          manualCandleRefreshBypassMarketPauseRef.current = false;
+          setManualChartRefreshInFlight(false);
+        }
+      };
       const forceRefresh = forceCandleRefreshRef.current || initialVisibleChartRefreshRef.current;
       const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }>();
       const activeWatchlistSymbolSet = new Set(
@@ -3755,7 +3830,11 @@ export default function App() {
 
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
-          if (shouldPauseUsFetchForJapanSession() && isUsMarketSymbol(normalizedSymbol)) return;
+          if (
+            !bypassMarketPauseForManualRefresh
+            && shouldPauseUsFetchForJapanSession()
+            && isUsMarketSymbol(normalizedSymbol)
+          ) return;
           const key = `${normalizedSymbol}-${timeframe}`;
           const existing = requests.get(key);
           const activePriority = activeWatchlistSymbolSet.has(normalizedSymbol)
@@ -3807,6 +3886,10 @@ export default function App() {
           addCandleRequest(symbol, panel.timeframe, symbolPriority + 2);
         });
       });
+      // タブ右クリックから要求された全銘柄は、現在の表示パネルの取得後に順番にKLineを取得する。
+      manualRefreshSymbols.forEach((symbol, symbolIndex) => {
+        addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, 20_000 + symbolIndex);
+      });
       if (!isDiscordAutomationPage && (!isMobileViewport || appView !== 'charts')) {
         valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
           const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
@@ -3834,8 +3917,11 @@ export default function App() {
       );
 
       if (requestsToFetch.length === 0) {
-        forceCandleRefreshRef.current = false;
-        initialVisibleChartRefreshRef.current = false;
+        if (manualCandleRefreshSequenceRef.current === manualRefreshSequence) {
+          forceCandleRefreshRef.current = false;
+          initialVisibleChartRefreshRef.current = false;
+          finishManualRefresh();
+        }
         setMoomooStatus('connected');
         setMoomooError(null);
         return;
@@ -4052,10 +4138,13 @@ export default function App() {
         const shouldRefetch = candleFetchPendingRef.current
           || candleFetchGenerationRef.current !== fetchGeneration;
         candleFetchPendingRef.current = false;
-        forceCandleRefreshRef.current = false;
-        initialVisibleChartRefreshRef.current = false;
         if (shouldRefetch) {
           setTickTrigger((current) => current + 1);
+        } else if (manualCandleRefreshSequenceRef.current === manualRefreshSequence) {
+          // 取得途中の再クリックで入った新しい強制更新要求を消さない。
+          forceCandleRefreshRef.current = false;
+          initialVisibleChartRefreshRef.current = false;
+          finishManualRefresh();
         }
       }
     };
@@ -4087,10 +4176,11 @@ export default function App() {
       source: WatchlistQuoteFetchSource;
     } | null => {
       while (quoteFetchManualTabQueueRef.current.length > 0) {
-        const tabId = quoteFetchManualTabQueueRef.current.shift();
-        const tab = watchlistTabs.find((item) => item.id === tabId);
+        const queuedRequest = quoteFetchManualTabQueueRef.current.shift();
+        if (!queuedRequest) continue;
+        const tab = watchlistTabs.find((item) => item.id === queuedRequest.tabId);
         if (!tab) continue;
-        const symbols = getWatchlistTabQuoteOperands(tab);
+        const symbols = getWatchlistTabQuoteOperands(tab, queuedRequest.includePausedMarkets);
         if (symbols.length === 0) continue;
         return { tab, symbols, source: 'manual' };
       }
@@ -8781,11 +8871,13 @@ export default function App() {
             <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] font-bold">
               <span
                 className={`min-w-0 truncate ${
-                  quoteFetchInFlight ? 'text-cyan-300' : 'text-gray-500'
+                  quoteFetchInFlight || manualChartRefreshInFlight ? 'text-cyan-300' : 'text-gray-500'
                 }`}
                 title={activeWatchlistQuoteProgress.title}
               >
-                {quoteFetchInFlight
+                {manualChartRefreshInFlight
+                  ? '表示チャートと価格を更新中'
+                  : quoteFetchInFlight
                   ? `${activeWatchlistQuoteProgress.scopeLabel} を更新中`
                   : ''}
               </span>
@@ -8812,13 +8904,13 @@ export default function App() {
                   type="button"
                   onClick={handleRefreshWatchlistQuotes}
                   className={`h-4 px-1.5 border text-[10px] leading-none font-bold transition ${
-                    quoteFetchInFlight
+                    quoteFetchInFlight || manualChartRefreshInFlight
                       ? 'border-cyan-700 bg-cyan-950/50 text-cyan-200'
                       : 'border-[#303030] bg-[#101010] text-gray-300 hover:text-white hover:border-emerald-500 hover:bg-emerald-950/40'
                   }`}
-                  title="ウォッチリストの価格データを再取得"
+                  title="表示中チャートのKLineと選択中ウォッチリストの価格を強制再取得"
                 >
-                  {quoteFetchInFlight ? '更新中' : '更新'}
+                  {manualChartRefreshInFlight ? 'チャート更新中' : quoteFetchInFlight ? '更新中' : '更新'}
                 </button>
               </div>
             </div>
@@ -9261,10 +9353,18 @@ export default function App() {
 
             {watchlistTabMenu && (
               <div
-                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-56 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: watchlistTabMenu.x, top: watchlistTabMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
+                <button
+                  type="button"
+                  onClick={() => handleRefreshWatchlistTabData(watchlistTabMenu.tabId)}
+                  className="w-full px-2.5 py-1.5 text-left text-emerald-200 hover:bg-emerald-950/40"
+                >
+                  このタブの価格・チャートを強制更新
+                </button>
+                <div className="my-1 h-px bg-[#242424]" />
                 <button
                   type="button"
                   onClick={() => toggleWatchlistTabQuoteFetchMode(watchlistTabMenu.tabId)}

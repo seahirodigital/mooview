@@ -7400,13 +7400,8 @@ export default function App() {
     };
   };
 
-  const prepareDiscordAutomationInBrowser = async (
-    job: DiscordAutomationJob,
-  ): Promise<DiscordAutomationPreparation> => {
-    if (chartExportStatus || chartAiStatus) {
-      throw new Error('別のチャート出力またはAI分析が実行中です。');
-    }
-    const resolveAutomationPanelIds = (selection: DiscordAutomationSelection) => resolveChartExportPanelIds(
+  const resolveDiscordAutomationPanelIds = (job: DiscordAutomationJob) => {
+    const resolveSelection = (selection: DiscordAutomationSelection) => resolveChartExportPanelIds(
       {
         mode: selection.mode,
         firstCount: 1,
@@ -7414,11 +7409,48 @@ export default function App() {
       },
       panels.map((panel) => panel.id),
     );
-    const requestedImagePanelIds = resolveAutomationPanelIds(job.imageSelection);
-    const requestedVideoPanelIds = resolveAutomationPanelIds(job.videoSelection);
-    if (requestedImagePanelIds.length === 0 || requestedVideoPanelIds.length === 0) {
+    const imagePanelIds = resolveSelection(job.imageSelection);
+    const videoPanelIds = resolveSelection(job.videoSelection);
+    if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
       throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
     }
+    return {
+      imagePanelIds,
+      videoPanelIds,
+      targetPanelIds: Array.from(new Set([...imagePanelIds, ...videoPanelIds])),
+    };
+  };
+
+  const refreshDiscordAutomationChartsInBrowser = async (job: DiscordAutomationJob) => {
+    if (chartExportStatus || chartAiStatus) {
+      throw new Error('別のチャート出力またはAI分析が実行中です。');
+    }
+    const { targetPanelIds } = resolveDiscordAutomationPanelIds(job);
+    setChartAiStatus({ stage: 'capturing', progress: 0 });
+    setChartExportError(null);
+    try {
+      // 通常画面の更新ボタンと同じ強制取得を実行し、取得開始後に60秒待機する。
+      refreshChartsForDiscordAutomation(targetPanelIds);
+      await sleep(60_000);
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    } finally {
+      setChartAiStatus(null);
+      setChartExportStatus(null);
+      setChartExportPlayback(null);
+    }
+  };
+
+  const prepareDiscordAutomationInBrowser = async (
+    job: DiscordAutomationJob,
+  ): Promise<DiscordAutomationPreparation> => {
+    if (chartExportStatus || chartAiStatus) {
+      throw new Error('別のチャート出力またはAI分析が実行中です。');
+    }
+    const {
+      imagePanelIds: requestedImagePanelIds,
+      videoPanelIds: requestedVideoPanelIds,
+      targetPanelIds,
+    } = resolveDiscordAutomationPanelIds(job);
     const prompt = (job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt).trim();
     const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
     if (!prompt) {
@@ -7429,10 +7461,7 @@ export default function App() {
     setChartExportError(null);
     try {
       // 最新チャートを確定させるため、必ず更新処理を開始してから60秒待機する。
-      refreshChartsForDiscordAutomation(Array.from(new Set([
-        ...requestedImagePanelIds,
-        ...requestedVideoPanelIds,
-      ])));
+      refreshChartsForDiscordAutomation(targetPanelIds);
       await sleep(60_000);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 
@@ -7507,7 +7536,8 @@ export default function App() {
     });
 
     try {
-      // Playwrightが撮影した、ユーザーがブラウザで見るものと同一のPNGをGeminiへ渡す。
+      // Geminiへ渡すのは画像設定で選択したPNGだけであり、動画設定の対象は渡さない。
+      // Discordにはこの画像に加え、下で作成する動画を動画→画像の順に送る。
       setChartAiStatus({ stage: 'requesting', progress: 1 });
       const aiResult = await requestChartAiAnalysis(
         preparation.prompt,
@@ -7562,6 +7592,7 @@ export default function App() {
     }
     window.mooviewDiscordAutomation = {
       prepare: prepareDiscordAutomationInBrowser,
+      refresh: refreshDiscordAutomationChartsInBrowser,
       complete: completeDiscordAutomationInBrowser,
     };
     return () => {
@@ -7574,6 +7605,7 @@ export default function App() {
     requestAutoWatchlistQuoteRefresh,
     completeDiscordAutomationInBrowser,
     prepareDiscordAutomationInBrowser,
+    refreshDiscordAutomationChartsInBrowser,
     workspacePersistenceMode,
   ]);
 

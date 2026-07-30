@@ -52,6 +52,10 @@ export interface DiscordAutomationRunRecord {
   status: 'running' | 'succeeded' | 'failed' | 'skipped';
   message: string;
   model: string | null;
+  // 定時実行の初回失敗だけ、更新後10分に一度だけ再試行するための状態。
+  attempt?: number;
+  retryPreparedAt?: string | null;
+  retryScheduledAt?: string | null;
 }
 
 export interface DiscordAutomationArtifact {

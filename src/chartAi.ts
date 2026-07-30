@@ -56,9 +56,9 @@ export const DEFAULT_CHART_AI_PROMPT = `#日本株 フロー分析
 
 const CHART_AI_ENDPOINT = '/api/ai/chart-analysis';
 const CHART_AI_TIMEOUT_MS = 120_000;
-const MAX_CHART_AI_IMAGE_BYTES = 14 * 1024 * 1024;
+const MAX_CHART_AI_MEDIA_BYTES = 14 * 1024 * 1024;
 
-interface EncodedChartImage {
+interface EncodedChartMedia {
   mimeType: string;
   data: string;
 }
@@ -68,14 +68,14 @@ export interface ChartAiAnalysisResult {
   model: string;
 }
 
-function encodeFileAsBase64(file: File): Promise<EncodedChartImage> {
+function encodeFileAsBase64(file: File): Promise<EncodedChartMedia> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = typeof reader.result === 'string' ? reader.result : '';
       const separatorIndex = result.indexOf(',');
       if (separatorIndex < 0) {
-        reject(new Error('AIへ送る画像データを作成できませんでした。'));
+        reject(new Error('AIへ送る画像・動画データを作成できませんでした。'));
         return;
       }
       resolve({
@@ -83,30 +83,30 @@ function encodeFileAsBase64(file: File): Promise<EncodedChartImage> {
         data: result.slice(separatorIndex + 1),
       });
     };
-    reader.onerror = () => reject(new Error('AIへ送る画像を読み込めませんでした。'));
+    reader.onerror = () => reject(new Error('AIへ送る画像・動画を読み込めませんでした。'));
     reader.readAsDataURL(file);
   });
 }
 
 export async function requestChartAiAnalysis(
   prompt: string,
-  imageFiles: File[],
+  mediaFiles: File[],
   model: GeminiChartModelId,
 ): Promise<ChartAiAnalysisResult> {
   const normalizedPrompt = prompt.trim();
   if (!normalizedPrompt) {
     throw new Error('AIプロンプトを入力してください。');
   }
-  if (imageFiles.length === 0) {
-    throw new Error('AIへ送るチャート画像がありません。');
+  if (mediaFiles.length === 0) {
+    throw new Error('AIへ送るチャート画像・動画がありません。');
   }
 
-  const totalImageBytes = imageFiles.reduce((total, file) => total + file.size, 0);
-  if (totalImageBytes > MAX_CHART_AI_IMAGE_BYTES) {
-    throw new Error('選択した画像の合計容量が大きすぎます。対象チャートを減らしてください。');
+  const totalMediaBytes = mediaFiles.reduce((total, file) => total + file.size, 0);
+  if (totalMediaBytes > MAX_CHART_AI_MEDIA_BYTES) {
+    throw new Error('Geminiへ送る画像・動画の合計容量が大きすぎます。対象チャートを減らしてください。');
   }
 
-  const images = await Promise.all(imageFiles.map(encodeFileAsBase64));
+  const media = await Promise.all(mediaFiles.map(encodeFileAsBase64));
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), CHART_AI_TIMEOUT_MS);
 
@@ -118,7 +118,7 @@ export async function requestChartAiAnalysis(
       },
       body: JSON.stringify({
         prompt: normalizedPrompt,
-        images,
+        media,
         model,
       }),
       signal: controller.signal,

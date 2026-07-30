@@ -31,6 +31,9 @@ export interface DiscordAutomationJob {
   useCurrentChartAiSettings: boolean;
   imageSelection: DiscordAutomationSelection;
   videoSelection: DiscordAutomationSelection;
+  // Geminiへ渡す対象はDiscord添付対象とは独立して切り替える。
+  sendImagesToGemini: boolean;
+  sendVideosToGemini: boolean;
   videoDurationSeconds: number;
   videoFrameRate: DiscordAutomationVideoFrameRate;
   videoResolutionId: DiscordAutomationVideoResolution;
@@ -76,6 +79,8 @@ export interface DiscordAutomationPreparation {
   model: GeminiChartModelId;
   imagePanelIds: string[];
   videoPanelIds: string[];
+  sendImagesToGemini: boolean;
+  sendVideosToGemini: boolean;
   videoDurationSeconds: number;
   videoFrameRate: DiscordAutomationVideoFrameRate;
   videoResolutionId: DiscordAutomationVideoResolution;
@@ -118,6 +123,8 @@ function createDefaultJob(
     useCurrentChartAiSettings: true,
     imageSelection: cloneSelection(),
     videoSelection: cloneSelection(),
+    sendImagesToGemini: true,
+    sendVideosToGemini: false,
     videoDurationSeconds: 5,
     videoFrameRate: 30,
     videoResolutionId: 'square-720',
@@ -215,6 +222,8 @@ function normalizeJob(value: unknown, fallback: DiscordAutomationJob, index: num
     useCurrentChartAiSettings: source.useCurrentChartAiSettings !== false,
     imageSelection: normalizeSelection(source.imageSelection),
     videoSelection: normalizeSelection(source.videoSelection),
+    sendImagesToGemini: source.sendImagesToGemini !== false,
+    sendVideosToGemini: source.sendVideosToGemini === true,
     videoDurationSeconds: Number.isFinite(duration)
       ? Math.max(1, Math.min(30, Math.round(duration)))
       : fallback.videoDurationSeconds,

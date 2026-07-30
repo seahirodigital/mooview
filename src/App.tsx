@@ -761,6 +761,23 @@ function formatClockTime(date = new Date()): string {
   return date.toLocaleTimeString('ja-JP', { hour12: false });
 }
 
+function formatDiscordAutomationJapanDateTime(value: string | null): string {
+  if (!value) return '—';
+  const source = value.startsWith('manual:') ? value.slice('manual:'.length) : value;
+  const date = new Date(source);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).format(date);
+}
+
 function formatTickerPrice(symbol: string, price: number | null | undefined): string {
   const numericPrice = Number(price);
   if (!Number.isFinite(numericPrice)) return 'N/A';
@@ -2341,6 +2358,7 @@ export default function App() {
     () => createDefaultDiscordAutomationSettings(),
   );
   const [discordAutomationRuns, setDiscordAutomationRuns] = useState<DiscordAutomationRunRecord[]>([]);
+  const [discordAutomationActiveTab, setDiscordAutomationActiveTab] = useState<'settings' | 'history'>('settings');
   const [discordAutomationLoading, setDiscordAutomationLoading] = useState(false);
   const [discordAutomationSaving, setDiscordAutomationSaving] = useState(false);
   const [discordAutomationMessage, setDiscordAutomationMessage] = useState<string | null>(null);
@@ -7507,6 +7525,8 @@ export default function App() {
         model,
         imagePanelIds,
         videoPanelIds,
+        sendImagesToGemini: job.sendImagesToGemini,
+        sendVideosToGemini: job.sendVideosToGemini,
         videoDurationSeconds: job.videoDurationSeconds,
         videoFrameRate: job.videoFrameRate,
         videoResolutionId: job.videoResolutionId,
@@ -7536,19 +7556,10 @@ export default function App() {
     });
 
     try {
-      // Geminiへ渡すのは画像設定で選択したPNGだけであり、動画設定の対象は渡さない。
-      // Discordにはこの画像に加え、下で作成する動画を動画→画像の順に送る。
-      setChartAiStatus({ stage: 'requesting', progress: 1 });
-      const aiResult = await requestChartAiAnalysis(
-        preparation.prompt,
-        imageFiles,
-        preparation.model,
-      );
       const resolution = CHART_EXPORT_RESOLUTIONS.find(
         (candidate) => candidate.id === preparation.videoResolutionId,
       ) ?? CHART_EXPORT_RESOLUTIONS[0];
       const videoFiles: File[] = [];
-      setChartAiStatus(null);
       setChartExportStatus({ kind: 'video', progress: 0 });
       for (let index = 0; index < preparation.videoPanelIds.length; index += 1) {
         const panelId = preparation.videoPanelIds[index];
@@ -7572,6 +7583,21 @@ export default function App() {
         });
         videoFiles.push(videoFile);
       }
+      const geminiMediaFiles = [
+        ...(preparation.sendImagesToGemini ? imageFiles : []),
+        ...(preparation.sendVideosToGemini ? videoFiles : []),
+      ];
+      if (geminiMediaFiles.length === 0) {
+        throw new Error('Geminiへ送付する画像または動画をONにしてください。');
+      }
+      // ONにした添付種別だけをGeminiへ渡し、Discordには常に選択済み動画→画像を添付する。
+      setChartExportStatus(null);
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const aiResult = await requestChartAiAnalysis(
+        preparation.prompt,
+        geminiMediaFiles,
+        preparation.model,
+      );
       return {
         text: aiResult.text,
         model: aiResult.model,
@@ -10986,7 +11012,34 @@ export default function App() {
               </button>
             </header>
 
+            <nav className="flex border-b border-[#322645] bg-[#09070d] px-3 pt-2 md:px-4" aria-label="Discord自動通知の表示切替">
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationActiveTab('settings')}
+                className={`relative -mb-px h-9 border border-b-0 px-4 text-[10px] font-bold ${
+                  discordAutomationActiveTab === 'settings'
+                    ? 'border-violet-600 bg-[#080808] text-violet-100'
+                    : 'border-transparent text-gray-500 hover:bg-[#15121a] hover:text-gray-300'
+                }`}
+              >
+                通知設定
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationActiveTab('history')}
+                className={`relative -mb-px h-9 border border-b-0 px-4 text-[10px] font-bold ${
+                  discordAutomationActiveTab === 'history'
+                    ? 'border-violet-600 bg-[#080808] text-violet-100'
+                    : 'border-transparent text-gray-500 hover:bg-[#15121a] hover:text-gray-300'
+                }`}
+              >
+                実行履歴{discordAutomationRuns.length > 0 ? `（${discordAutomationRuns.length}）` : ''}
+              </button>
+            </nav>
+
             <div className="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
+              {discordAutomationActiveTab === 'settings' ? (
+                <>
               <div className="mb-4 flex flex-col gap-3 border border-violet-800/70 bg-violet-950/25 p-3 sm:flex-row sm:items-center">
                 <div className="min-w-0 flex-1">
                   <div className="font-bold text-violet-100">Discord通知</div>
@@ -11025,7 +11078,7 @@ export default function App() {
                   disabled={discordAutomationLoading || discordAutomationSaving}
                   className="h-7 border border-[#3d3d3d] px-2.5 text-[10px] text-gray-300 hover:bg-[#171717] disabled:opacity-40"
                 >
-                  {discordAutomationLoading ? '再読込中…' : '実行履歴を更新'}
+                  {discordAutomationLoading ? '再読込中…' : '設定を再読込'}
                 </button>
               </div>
 
@@ -11065,43 +11118,39 @@ export default function App() {
                     color: 'emerald' | 'cyan',
                   ) => {
                     const selection = job[field];
+                    const geminiField = field === 'imageSelection'
+                      ? 'sendImagesToGemini'
+                      : 'sendVideosToGemini';
+                    const sendToGemini = job[geminiField];
                     const selectedIds = selection.mode === 'all'
                       ? panels.map((panel) => panel.id)
                       : selection.panelIds;
-                    const activeClass = color === 'emerald'
-                      ? 'border-emerald-600 bg-emerald-950/60 text-emerald-100'
-                      : 'border-cyan-600 bg-cyan-950/60 text-cyan-100';
                     return (
                       <div className="border border-[#303030] bg-[#0d0d0d] p-2.5">
                         <div className="mb-2 flex items-center justify-between gap-2">
                           <span className="font-bold text-gray-200">{label}</span>
-                          <div className="flex gap-1">
-                            <button
-                              type="button"
-                              onClick={() => setDiscordAutomationSelection(job.id, field, {
-                                mode: 'all',
-                                panelIds: [],
-                              })}
-                              className={`h-6 border px-2 text-[9px] ${
-                                selection.mode === 'all' ? activeClass : 'border-[#3a3a3a] text-gray-400'
-                              }`}
-                            >
-                              全て
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDiscordAutomationSelection(job.id, field, {
-                                mode: 'custom',
-                                panelIds: selection.mode === 'custom' ? selection.panelIds : [],
-                              })}
-                              className={`h-6 border px-2 text-[9px] ${
-                                selection.mode === 'custom' ? activeClass : 'border-[#3a3a3a] text-gray-400'
-                              }`}
-                            >
-                              個別指定
-                            </button>
-                          </div>
+                          <button
+                            type="button"
+                            aria-pressed={sendToGemini}
+                            onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                              ...current,
+                              [geminiField]: !current[geminiField],
+                            }))}
+                            className={`flex h-7 items-center gap-1.5 border px-2 text-[9px] font-bold ${
+                              sendToGemini
+                                ? color === 'emerald'
+                                  ? 'border-emerald-600 bg-emerald-950/60 text-emerald-100'
+                                  : 'border-cyan-600 bg-cyan-950/60 text-cyan-100'
+                                : 'border-[#3a3a3a] bg-[#111] text-gray-500'
+                            }`}
+                          >
+                            <span className={`h-2 w-2 rounded-full ${
+                              sendToGemini ? (color === 'emerald' ? 'bg-emerald-400' : 'bg-cyan-400') : 'bg-gray-600'
+                            }`} />
+                            Geminiへ送付: {sendToGemini ? 'ON' : 'OFF'}
+                          </button>
                         </div>
+                        <div className="mb-1 text-[9px] text-gray-500">チェックしたチャートだけをDiscordへ添付します。</div>
                         <div className="max-h-32 overflow-y-auto border border-[#252525]">
                           {panels.map((panel, index) => {
                             const selected = selectedIds.includes(panel.id);
@@ -11427,28 +11476,60 @@ export default function App() {
                 通知設定を追加
               </button>
 
-              {discordAutomationRuns.length > 0 && (
-                <div className="mt-5 border border-[#302b35] bg-[#0d0d0d]">
-                  <div className="border-b border-[#302b35] px-3 py-2 text-[10px] font-bold text-gray-300">
-                    直近のサーバー実行履歴
+                </>
+              ) : (
+                <section className="border border-[#302b35] bg-[#0d0d0d]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#302b35] px-3 py-2.5">
+                    <div>
+                      <div className="text-[11px] font-bold text-gray-200">直近のサーバー実行履歴</div>
+                      <div className="mt-0.5 text-[9px] text-gray-500">完了・失敗時刻は日本時間（Asia/Tokyo）で表示します。</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void loadDiscordAutomationSettings()}
+                      disabled={discordAutomationLoading || discordAutomationSaving}
+                      className="h-7 border border-[#3d3d3d] px-2.5 text-[10px] text-gray-300 hover:bg-[#171717] disabled:opacity-40"
+                    >
+                      {discordAutomationLoading ? '更新中…' : '実行履歴を更新'}
+                    </button>
                   </div>
-                  <div className="max-h-40 overflow-y-auto">
-                    {discordAutomationRuns.slice(0, 8).map((run) => (
-                      <div key={run.id} className="grid grid-cols-[5.5rem_1fr] gap-2 border-b border-[#242424] px-3 py-2 text-[9px] last:border-b-0">
-                        <span className={
-                          run.status === 'succeeded' ? 'text-emerald-300'
-                            : run.status === 'failed' ? 'text-red-300'
-                              : 'text-amber-300'
-                        }>
-                          {run.status === 'succeeded' ? '完了' : run.status === 'failed' ? '失敗' : '実行中'}
-                        </span>
-                        <span className="min-w-0 break-words text-gray-400">
-                          {run.scheduledFor} — {run.message}{run.model ? `（${run.model}）` : ''}
-                        </span>
+                  {discordAutomationRuns.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-[10px] text-gray-500">実行履歴はまだありません。</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[52rem]">
+                        <div className="grid grid-cols-[5rem_11rem_11rem_8rem_minmax(18rem,1fr)] gap-2 border-b border-[#302b35] bg-[#121212] px-3 py-2 text-[9px] font-bold text-gray-400">
+                          <span>状態</span>
+                          <span>完了・失敗（日本時間）</span>
+                          <span>実行予定（日本時間）</span>
+                          <span>Geminiモデル</span>
+                          <span>詳細・エラー</span>
+                        </div>
+                        <div className="max-h-[min(52vh,34rem)] overflow-y-auto">
+                          {discordAutomationRuns.slice(0, 50).map((run) => (
+                            <div key={run.id} className="grid grid-cols-[5rem_11rem_11rem_8rem_minmax(18rem,1fr)] gap-2 border-b border-[#242424] px-3 py-2 text-[10px] last:border-b-0">
+                              <span className={
+                                run.status === 'succeeded' ? 'font-bold text-emerald-300'
+                                  : run.status === 'failed' ? 'font-bold text-red-300'
+                                    : 'font-bold text-amber-300'
+                              }>
+                                {run.status === 'succeeded' ? '完了' : run.status === 'failed' ? '失敗' : '実行中'}
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-300">
+                                {formatDiscordAutomationJapanDateTime(run.completedAt)}
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-400">
+                                {formatDiscordAutomationJapanDateTime(run.scheduledFor)}
+                              </span>
+                              <span className="break-words text-[9px] text-violet-200">{run.model || '—'}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-[9px] leading-relaxed text-gray-400">{run.message}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                    </div>
+                  )}
+                </section>
               )}
             </div>
 

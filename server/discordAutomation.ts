@@ -131,6 +131,9 @@ function validatePreparation(value: unknown): DiscordAutomationPreparation {
     model: model as DiscordAutomationPreparation['model'],
     imagePanelIds,
     videoPanelIds,
+    // 既存のブラウザ実行結果では画像ON・動画OFFを既定にして後方互換を保つ。
+    sendImagesToGemini: source.sendImagesToGemini !== false,
+    sendVideosToGemini: source.sendVideosToGemini === true,
     videoDurationSeconds: Number(source.videoDurationSeconds),
     videoFrameRate: source.videoFrameRate === 60 ? 60 : 30,
     videoResolutionId: source.videoResolutionId === 'landscape-720'

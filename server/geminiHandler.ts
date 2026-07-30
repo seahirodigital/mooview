@@ -7,16 +7,17 @@ import {
 } from '../geminiModels';
 
 const MAX_PROMPT_LENGTH = 30_000;
-const MAX_IMAGE_COUNT = 12;
-const MAX_TOTAL_IMAGE_BYTES = 14 * 1024 * 1024;
+const MAX_MEDIA_COUNT = 12;
+const MAX_TOTAL_MEDIA_BYTES = 14 * 1024 * 1024;
 const RETRY_DELAYS_MS = [700, 1_500];
-const ALLOWED_IMAGE_MIME_TYPES = new Set([
+const ALLOWED_MEDIA_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/webp',
+  'video/mp4',
 ]);
 
-interface GeminiChartImage {
+interface GeminiChartMedia {
   mimeType: string;
   data: string;
 }
@@ -25,20 +26,20 @@ function normalizePrompt(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeImages(value: unknown): GeminiChartImage[] {
+function normalizeMedia(value: unknown): GeminiChartMedia[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) => {
     if (!entry || typeof entry !== 'object') {
-      throw new Error('画像データの形式が正しくありません。');
+      throw new Error('画像・動画データの形式が正しくありません。');
     }
-    const source = entry as Partial<GeminiChartImage>;
+    const source = entry as Partial<GeminiChartMedia>;
     const mimeType = typeof source.mimeType === 'string' ? source.mimeType.trim() : '';
     const data = typeof source.data === 'string' ? source.data.trim() : '';
-    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType) || !data) {
-      throw new Error('対応していない画像データです。');
+    if (!ALLOWED_MEDIA_MIME_TYPES.has(mimeType) || !data) {
+      throw new Error('対応していない画像・動画データです。');
     }
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
-      throw new Error('画像データの形式が正しくありません。');
+      throw new Error('画像・動画データの形式が正しくありません。');
     }
     return { mimeType, data };
   });
@@ -64,7 +65,7 @@ async function generateWithRetry(
   ai: GoogleGenAI,
   model: string,
   prompt: string,
-  images: GeminiChartImage[],
+  media: GeminiChartMedia[],
 ): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
@@ -72,10 +73,10 @@ async function generateWithRetry(
       const response = await ai.models.generateContent({
         model,
         contents: [
-          ...images.map((image) => ({
+          ...media.map((item) => ({
             inlineData: {
-              mimeType: image.mimeType,
-              data: image.data,
+              mimeType: item.mimeType,
+              data: item.data,
             },
           })),
           { text: prompt },
@@ -105,11 +106,11 @@ async function generateWithFallback(
   ai: GoogleGenAI,
   requestedModel: string,
   prompt: string,
-  images: GeminiChartImage[],
+  media: GeminiChartMedia[],
 ): Promise<{ text: string; model: string }> {
   try {
     return {
-      text: await generateWithRetry(ai, requestedModel, prompt, images),
+      text: await generateWithRetry(ai, requestedModel, prompt, media),
       model: requestedModel,
     };
   } catch (primaryError) {
@@ -123,7 +124,7 @@ async function generateWithFallback(
       status: resolveErrorStatus(primaryError),
     });
     return {
-      text: await generateWithRetry(ai, DEFAULT_GEMINI_CHART_MODEL, prompt, images),
+      text: await generateWithRetry(ai, DEFAULT_GEMINI_CHART_MODEL, prompt, media),
       model: DEFAULT_GEMINI_CHART_MODEL,
     };
   }
@@ -178,29 +179,30 @@ export async function handleGeminiChartAnalysis(
       return;
     }
 
-    let images: GeminiChartImage[];
+    let media: GeminiChartMedia[];
     try {
-      images = normalizeImages(request.body?.images);
+      // 旧クライアントのimagesも受け付け、動画ONの新クライアントはmediaを使う。
+      media = normalizeMedia(request.body?.media ?? request.body?.images);
     } catch (error) {
       response.status(400).json({
-        error: error instanceof Error ? error.message : '画像データの形式が正しくありません。',
+        error: error instanceof Error ? error.message : '画像・動画データの形式が正しくありません。',
       });
       return;
     }
-    if (images.length === 0 || images.length > MAX_IMAGE_COUNT) {
+    if (media.length === 0 || media.length > MAX_MEDIA_COUNT) {
       response.status(400).json({
-        error: `チャート画像は1枚以上${MAX_IMAGE_COUNT}枚以内で指定してください。`,
+        error: `Geminiへ送るチャート画像・動画は1件以上${MAX_MEDIA_COUNT}件以内で指定してください。`,
       });
       return;
     }
 
-    const totalImageBytes = images.reduce(
-      (total, image) => total + Buffer.byteLength(image.data, 'base64'),
+    const totalMediaBytes = media.reduce(
+      (total, item) => total + Buffer.byteLength(item.data, 'base64'),
       0,
     );
-    if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+    if (totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
       response.status(413).json({
-        error: '選択した画像の合計容量が大きすぎます。対象チャートを減らしてください。',
+        error: 'Geminiへ送る画像・動画の合計容量が大きすぎます。対象チャートを減らしてください。',
       });
       return;
     }
@@ -220,7 +222,7 @@ export async function handleGeminiChartAnalysis(
     // サーバー起動時の認証モジュール読み込みを避け、AI実行時だけSDKを初期化する。
     const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey });
-    const result = await generateWithFallback(ai, model, prompt, images);
+    const result = await generateWithFallback(ai, model, prompt, media);
     response.json(result);
   } catch (error) {
     console.error('Geminiチャート分析に失敗しました。', {

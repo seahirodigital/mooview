@@ -7469,7 +7469,8 @@ export default function App() {
       videoPanelIds: requestedVideoPanelIds,
       targetPanelIds,
     } = resolveDiscordAutomationPanelIds(job);
-    const prompt = (job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt).trim();
+    // Discord自動通知は、右クリックAI分析とは独立して通知設定ごとのプロンプトだけを使う。
+    const prompt = job.prompt.trim();
     const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
     if (!prompt) {
       throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
@@ -7763,7 +7764,7 @@ export default function App() {
         enabled: true,
         days: { mode: 'weekdays', customDays: [] },
         times: ['12:00'],
-        prompt: chartAiPrompt || DEFAULT_CHART_AI_PROMPT,
+        prompt: DEFAULT_CHART_AI_PROMPT,
         model: chartAiModel,
         useCurrentChartAiSettings: true,
         imageSelection: { mode: 'all', panelIds: [] },
@@ -11358,54 +11359,29 @@ export default function App() {
                             }`}
                           >
                             <span className="block font-bold">
-                              右クリックAI設定を常に使用: {job.useCurrentChartAiSettings ? 'ON' : 'OFF'}
+                              右クリックAI分析のモデルを使用: {job.useCurrentChartAiSettings ? 'ON' : 'OFF'}
                             </span>
                             <span className="mt-0.5 block text-[9px] opacity-80">
-                              ONでは、通知時に右クリックのプロンプトとGeminiモデルを自動で使用します。
+                              ONではGeminiモデルだけを共有します。プロンプトは常にこの通知設定固有です。
                             </span>
                           </button>
                         </div>
 
                         <div className="space-y-3">
                           <label className="block">
-                            <span className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-gray-300">
-                              Geminiへの指示
-                              {!job.useCurrentChartAiSettings && (
-                                <button
-                                  type="button"
-                                  onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
-                                    ...current,
-                                    prompt: chartAiPrompt,
-                                    model: chartAiModel,
-                                  }))}
-                                  className="font-normal text-violet-300 hover:text-violet-100"
-                                >
-                                  現在のAI設定を反映
-                                </button>
-                              )}
-                            </span>
+                            <span className="mb-1 block text-[10px] font-bold text-gray-300">Geminiへの指示</span>
                             <textarea
-                              value={job.useCurrentChartAiSettings ? chartAiPrompt : job.prompt}
-                              onChange={(event) => {
-                                const prompt = event.target.value;
-                                if (job.useCurrentChartAiSettings) {
-                                  // ON時は右クリックAI設定を直接更新し、共有ワークスペースへ自動保存する。
-                                  setChartAiPrompt(prompt);
-                                  return;
-                                }
-                                updateDiscordAutomationJob(job.id, (current) => ({
-                                  ...current,
-                                  prompt,
-                                }));
-                              }}
+                              value={job.prompt}
+                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                ...current,
+                                prompt: event.target.value,
+                              }))}
                               maxLength={30_000}
                               spellCheck={false}
                               className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
                             />
                             <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
-                              {job.useCurrentChartAiSettings
-                                ? 'ここでの編集は右クリックAI設定へ即時反映され、ONの通知設定で使用されます。'
-                                : 'この通知設定だけに使用するプロンプトです。'}
+                              この通知設定だけに使用する独立したプロンプトです。右クリックAI分析のプロンプトには反映しません。
                             </span>
                           </label>
                           <div className="grid gap-3 xl:grid-cols-2">

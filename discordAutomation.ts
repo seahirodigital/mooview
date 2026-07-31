@@ -26,8 +26,8 @@ export interface DiscordAutomationJob {
   times: string[];
   prompt: string;
   model: GeminiChartModelId;
-  // 右クリックのAI設定を、通知実行時に共有ワークスペースから読み取って使う。
-  // false を明示した通知だけ、ここに保存した個別設定を固定で使用する。
+  // 右クリックAI分析と同期できるのはGeminiモデルだけ。
+  // プロンプトは常にこの通知設定固有のpromptを使用する。
   useCurrentChartAiSettings: boolean;
   imageSelection: DiscordAutomationSelection;
   videoSelection: DiscordAutomationSelection;

@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
   ExternalLink,
   FileText,
@@ -19,6 +20,7 @@ import {
   RefreshCw,
   Search,
   Square,
+  X,
 } from 'lucide-react';
 
 import {
@@ -54,6 +56,14 @@ interface DisclosureContextMenuState {
   item: DisclosureListItem;
   x: number;
   y: number;
+}
+
+interface DisclosureSummaryViewerState {
+  id: number;
+  companyName: string;
+  title: string;
+  text: string;
+  model: string | null;
 }
 
 interface DisclosureLoadOverrides {
@@ -213,7 +223,6 @@ export function DisclosureDatabase() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<DisclosurePageSize>(loadDisclosurePageSize);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [syncingSource, setSyncingSource] = useState<DisclosureSyncAction | null>(null);
   const [searchSyncing, setSearchSyncing] = useState(false);
@@ -231,6 +240,8 @@ export function DisclosureDatabase() {
   const [noiseKeywordsText, setNoiseKeywordsText] = useState('');
   const [noiseKeywordsTitle, setNoiseKeywordsTitle] = useState('読み込み中…');
   const [savingNoiseKeywords, setSavingNoiseKeywords] = useState(false);
+  const [summaryViewer, setSummaryViewer] = useState<DisclosureSummaryViewerState | null>(null);
+  const [summaryCopied, setSummaryCopied] = useState(false);
   const filterDetailsRef = useRef<HTMLDetailsElement>(null);
   const columnResizeRef = useRef<{
     key: DisclosureColumnKey;
@@ -355,6 +366,20 @@ export function DisclosureDatabase() {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!summaryViewer) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSummaryViewer(null);
+    };
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [summaryViewer]);
 
   useEffect(() => {
     if (!resizingColumn || !columnResizeRef.current) return undefined;
@@ -483,7 +508,18 @@ export function DisclosureDatabase() {
       const result = await summarizeDisclosures(ids);
       const succeeded = result.results.filter((item) => item.text).map((item) => item.id);
       const failures = result.results.filter((item) => item.error);
-      setExpandedIds((current) => new Set([...current, ...succeeded]));
+      const firstSucceeded = result.results.find((item) => item.text);
+      if (firstSucceeded?.text) {
+        const sourceItem = response.items.find((item) => item.id === firstSucceeded.id);
+        setSummaryViewer({
+          id: firstSucceeded.id,
+          companyName: sourceItem?.companyName || `開示ID ${firstSucceeded.id}`,
+          title: sourceItem?.title || 'Gemini要約',
+          text: firstSucceeded.text,
+          model: firstSucceeded.model || sourceItem?.summaryModel || null,
+        });
+        setSummaryCopied(false);
+      }
       if (failures.length > 0) {
         setError(failures.map((item) => `${item.id}: ${item.error}`).join('\n'));
       }
@@ -498,15 +534,40 @@ export function DisclosureDatabase() {
 
   const handleRowSummary = (item: DisclosureListItem) => {
     if (item.summaryText) {
-      setExpandedIds((current) => {
-        const next = new Set(current);
-        if (next.has(item.id)) next.delete(item.id);
-        else next.add(item.id);
-        return next;
+      setSummaryViewer({
+        id: item.id,
+        companyName: item.companyName,
+        title: item.title,
+        text: item.summaryText,
+        model: item.summaryModel,
       });
+      setSummaryCopied(false);
       return;
     }
     void runSummaries([item.id]);
+  };
+
+  const copySummaryText = async () => {
+    if (!summaryViewer?.text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(summaryViewer.text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = summaryViewer.text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (!copied) throw new Error('コピーできませんでした。');
+      }
+      setSummaryCopied(true);
+      window.setTimeout(() => setSummaryCopied(false), 2_000);
+    } catch {
+      setError('Gemini要約の全文をクリップボードへコピーできませんでした。');
+    }
   };
 
   const handleSync = async (source: DisclosureSyncAction) => {
@@ -1134,16 +1195,6 @@ export function DisclosureDatabase() {
                 >
                   {columnOrder.map((columnKey) => renderCell(item, columnKey))}
                 </tr>
-                {expandedIds.has(item.id) && item.summaryText && (
-                  <tr className="border-b border-violet-950 bg-[#0d0a13]">
-                    <td colSpan={columnOrder.length} className="px-5 py-3">
-                      <div className="mb-1 text-[9px] font-bold text-violet-300">
-                        Gemini要約 {item.summaryModel ? `・${item.summaryModel}` : ''}
-                      </div>
-                      <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-gray-200">{item.summaryText}</div>
-                    </td>
-                  </tr>
-                )}
               </React.Fragment>
             ))}
           </tbody>
@@ -1179,9 +1230,6 @@ export function DisclosureDatabase() {
                 {item.edinetDbCompanyUrl && <a href={item.edinetDbCompanyUrl} target="_blank" rel="noreferrer" className="flex h-7 items-center border border-emerald-900 px-2 text-emerald-300">EDINET DB</a>}
                 {item.buffettCodeUrl && <a href={item.buffettCodeUrl} target="_blank" rel="noreferrer" className="flex h-7 items-center border border-amber-900 px-2 text-amber-300">バフェット・コード</a>}
               </div>
-              {expandedIds.has(item.id) && item.summaryText && (
-                <div className="mt-3 whitespace-pre-wrap border-t border-violet-950 pt-3 text-[11px] leading-relaxed text-gray-200">{item.summaryText}</div>
-              )}
             </article>
           ))}
         </div>
@@ -1201,6 +1249,57 @@ export function DisclosureDatabase() {
           </div>
         )}
       </div>
+
+      {summaryViewer && (
+        <div
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-black/80 p-2 md:p-8"
+          onClick={() => setSummaryViewer(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="disclosure-summary-title"
+            className="flex max-h-[calc(100dvh-16px)] w-full max-w-5xl flex-col border border-violet-700/70 bg-[#080808] shadow-2xl md:max-h-[calc(100vh-64px)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex shrink-0 items-start gap-2 border-b border-[#352747] px-3 py-2.5 md:items-center md:px-4">
+              <div className="min-w-0 flex-1">
+                <h2 id="disclosure-summary-title" className="text-xs font-black text-violet-100 md:text-sm">
+                  Gemini要約
+                </h2>
+                <div className="mt-0.5 truncate text-[10px] font-bold text-gray-300" title={summaryViewer.title}>
+                  {summaryViewer.companyName} ・ {summaryViewer.title}
+                </div>
+                {summaryViewer.model && <div className="mt-0.5 font-mono text-[9px] text-gray-500">使用モデル: {summaryViewer.model}</div>}
+              </div>
+              <button
+                type="button"
+                onClick={() => void copySummaryText()}
+                className="flex h-8 shrink-0 items-center gap-1.5 border border-violet-700 bg-violet-950/50 px-3 text-[10px] font-bold text-violet-100 hover:bg-violet-900/60"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {summaryCopied ? 'コピー済み' : '全文コピー'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSummaryViewer(null)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center text-gray-400 hover:bg-[#171717] hover:text-white"
+                aria-label="Gemini要約を閉じる"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 md:p-5">
+              <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-sans text-[12px] leading-7 text-gray-100 md:text-[13px]">
+                {summaryViewer.text}
+              </pre>
+            </div>
+            <footer className="shrink-0 border-t border-[#242424] px-4 py-2 text-[9px] text-gray-500">
+              全文を表示中 ・ Escキーまたは背景クリックで閉じる
+            </footer>
+          </section>
+        </div>
+      )}
 
       {contextMenu && (
         <div

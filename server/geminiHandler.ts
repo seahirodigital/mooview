@@ -1,4 +1,4 @@
-import type { GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI, Part } from '@google/genai';
 import type { Request, Response } from 'express';
 import {
   DEFAULT_GEMINI_CHART_MODEL,
@@ -7,16 +7,18 @@ import {
 } from '../geminiModels';
 
 const MAX_PROMPT_LENGTH = 30_000;
-const MAX_IMAGE_COUNT = 12;
-const MAX_TOTAL_IMAGE_BYTES = 14 * 1024 * 1024;
+const MAX_MEDIA_COUNT = 12;
+const MAX_TOTAL_MEDIA_BYTES = 14 * 1024 * 1024;
+const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 120_000;
 const RETRY_DELAYS_MS = [700, 1_500];
-const ALLOWED_IMAGE_MIME_TYPES = new Set([
+const ALLOWED_MEDIA_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/webp',
+  'video/mp4',
 ]);
 
-interface GeminiChartImage {
+export interface GeminiInlineData {
   mimeType: string;
   data: string;
 }
@@ -25,20 +27,20 @@ function normalizePrompt(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeImages(value: unknown): GeminiChartImage[] {
+function normalizeMedia(value: unknown): GeminiInlineData[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) => {
     if (!entry || typeof entry !== 'object') {
-      throw new Error('画像データの形式が正しくありません。');
+      throw new Error('画像・動画データの形式が正しくありません。');
     }
-    const source = entry as Partial<GeminiChartImage>;
+    const source = entry as Partial<GeminiInlineData>;
     const mimeType = typeof source.mimeType === 'string' ? source.mimeType.trim() : '';
     const data = typeof source.data === 'string' ? source.data.trim() : '';
-    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType) || !data) {
-      throw new Error('対応していない画像データです。');
+    if (!ALLOWED_MEDIA_MIME_TYPES.has(mimeType) || !data) {
+      throw new Error('対応していない画像・動画データです。');
     }
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
-      throw new Error('画像データの形式が正しくありません。');
+      throw new Error('画像・動画データの形式が正しくありません。');
     }
     return { mimeType, data };
   });
@@ -64,7 +66,7 @@ async function generateWithRetry(
   ai: GoogleGenAI,
   model: string,
   prompt: string,
-  images: GeminiChartImage[],
+  attachments: Part[],
 ): Promise<string> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
@@ -72,12 +74,7 @@ async function generateWithRetry(
       const response = await ai.models.generateContent({
         model,
         contents: [
-          ...images.map((image) => ({
-            inlineData: {
-              mimeType: image.mimeType,
-              data: image.data,
-            },
-          })),
+          ...attachments,
           { text: prompt },
         ],
         config: {
@@ -105,11 +102,11 @@ async function generateWithFallback(
   ai: GoogleGenAI,
   requestedModel: string,
   prompt: string,
-  images: GeminiChartImage[],
+  attachments: Part[],
 ): Promise<{ text: string; model: string }> {
   try {
     return {
-      text: await generateWithRetry(ai, requestedModel, prompt, images),
+      text: await generateWithRetry(ai, requestedModel, prompt, attachments),
       model: requestedModel,
     };
   } catch (primaryError) {
@@ -123,13 +120,13 @@ async function generateWithFallback(
       status: resolveErrorStatus(primaryError),
     });
     return {
-      text: await generateWithRetry(ai, DEFAULT_GEMINI_CHART_MODEL, prompt, images),
+      text: await generateWithRetry(ai, DEFAULT_GEMINI_CHART_MODEL, prompt, attachments),
       model: DEFAULT_GEMINI_CHART_MODEL,
     };
   }
 }
 
-function createPublicError(error: unknown): { status: number; message: string } {
+export function createPublicGeminiError(error: unknown): { status: number; message: string } {
   const upstreamStatus = resolveErrorStatus(error);
   if (upstreamStatus === 401 || upstreamStatus === 403) {
     return {
@@ -157,6 +154,93 @@ function createPublicError(error: unknown): { status: number; message: string } 
   };
 }
 
+export async function generateGeminiContent(
+  prompt: string,
+  attachments: GeminiInlineData[],
+  requestedModel?: string,
+): Promise<{ text: string; model: string }> {
+  const apiKey = process.env.GEMINI_API_KEY?.trim() || '';
+  if (!apiKey) {
+    const error = new Error('Gemini APIキーがサーバーに設定されていません。') as Error & {
+      status?: number;
+    };
+    error.status = 503;
+    throw error;
+  }
+  const configuredModel = process.env.GEMINI_MODEL?.trim()
+    || DEFAULT_GEMINI_CHART_MODEL;
+  const model = normalizeGeminiChartModelId(requestedModel || configuredModel);
+  const { GoogleGenAI } = await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+  return generateWithFallback(ai, model, prompt, attachments.map((attachment) => ({
+    inlineData: {
+      mimeType: attachment.mimeType,
+      data: attachment.data,
+    },
+  })));
+}
+
+export async function generateGeminiPdfContent(
+  prompt: string,
+  pdfBytes: Buffer,
+  displayName: string,
+  requestedModel?: string,
+): Promise<{ text: string; model: string }> {
+  const apiKey = process.env.GEMINI_API_KEY?.trim() || '';
+  if (!apiKey) {
+    const error = new Error('Gemini APIキーがサーバーに設定されていません。') as Error & {
+      status?: number;
+    };
+    error.status = 503;
+    throw error;
+  }
+  const configuredModel = process.env.GEMINI_MODEL?.trim()
+    || DEFAULT_GEMINI_CHART_MODEL;
+  const model = normalizeGeminiChartModelId(requestedModel || configuredModel);
+  const { createPartFromUri, GoogleGenAI } = await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+  let uploadedName: string | null = null;
+  try {
+    let uploaded = await ai.files.upload({
+      file: new Blob([new Uint8Array(pdfBytes)], { type: 'application/pdf' }),
+      config: {
+        mimeType: 'application/pdf',
+        displayName: displayName.slice(0, 200),
+      },
+    });
+    uploadedName = uploaded.name || null;
+    const deadline = Date.now() + GEMINI_FILE_PROCESSING_TIMEOUT_MS;
+    while (uploaded.state === 'PROCESSING') {
+      if (!uploaded.name || Date.now() >= deadline) {
+        throw new Error('GeminiでのPDF前処理が時間内に完了しませんでした。');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      uploaded = await ai.files.get({ name: uploaded.name });
+    }
+    if (uploaded.state === 'FAILED') {
+      throw new Error(uploaded.error?.message || 'GeminiでPDFを処理できませんでした。');
+    }
+    if (!uploaded.uri) throw new Error('GeminiへアップロードしたPDFのURIを取得できませんでした。');
+    return await generateWithFallback(
+      ai,
+      model,
+      prompt,
+      [createPartFromUri(uploaded.uri, uploaded.mimeType || 'application/pdf')],
+    );
+  } finally {
+    if (uploadedName) {
+      try {
+        await ai.files.delete({ name: uploadedName });
+      } catch (error) {
+        console.warn('Geminiへ一時アップロードしたPDFを直ちに削除できませんでした。', {
+          name: uploadedName,
+          status: resolveErrorStatus(error),
+        });
+      }
+    }
+  }
+}
+
 export async function handleGeminiChartAnalysis(
   request: Request,
   response: Response,
@@ -178,29 +262,30 @@ export async function handleGeminiChartAnalysis(
       return;
     }
 
-    let images: GeminiChartImage[];
+    let media: GeminiInlineData[];
     try {
-      images = normalizeImages(request.body?.images);
+      // 旧クライアントのimagesも受け付け、動画ONの新クライアントはmediaを使う。
+      media = normalizeMedia(request.body?.media ?? request.body?.images);
     } catch (error) {
       response.status(400).json({
-        error: error instanceof Error ? error.message : '画像データの形式が正しくありません。',
+        error: error instanceof Error ? error.message : '画像・動画データの形式が正しくありません。',
       });
       return;
     }
-    if (images.length === 0 || images.length > MAX_IMAGE_COUNT) {
+    if (media.length === 0 || media.length > MAX_MEDIA_COUNT) {
       response.status(400).json({
-        error: `チャート画像は1枚以上${MAX_IMAGE_COUNT}枚以内で指定してください。`,
+        error: `Geminiへ送るチャート画像・動画は1件以上${MAX_MEDIA_COUNT}件以内で指定してください。`,
       });
       return;
     }
 
-    const totalImageBytes = images.reduce(
-      (total, image) => total + Buffer.byteLength(image.data, 'base64'),
+    const totalMediaBytes = media.reduce(
+      (total, item) => total + Buffer.byteLength(item.data, 'base64'),
       0,
     );
-    if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+    if (totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
       response.status(413).json({
-        error: '選択した画像の合計容量が大きすぎます。対象チャートを減らしてください。',
+        error: 'Geminiへ送る画像・動画の合計容量が大きすぎます。対象チャートを減らしてください。',
       });
       return;
     }
@@ -212,22 +297,18 @@ export async function handleGeminiChartAnalysis(
       });
       return;
     }
-    const configuredModel = process.env.GEMINI_MODEL?.trim()
-      || DEFAULT_GEMINI_CHART_MODEL;
-    const model = requestedModel === undefined
-      ? normalizeGeminiChartModelId(configuredModel)
-      : requestedModel.trim();
-    // サーバー起動時の認証モジュール読み込みを避け、AI実行時だけSDKを初期化する。
-    const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey });
-    const result = await generateWithFallback(ai, model, prompt, images);
+    const result = await generateGeminiContent(
+      prompt,
+      media,
+      requestedModel === undefined ? undefined : requestedModel.trim(),
+    );
     response.json(result);
   } catch (error) {
     console.error('Geminiチャート分析に失敗しました。', {
       status: resolveErrorStatus(error),
       message: error instanceof Error ? error.message : String(error),
     });
-    const publicError = createPublicError(error);
+    const publicError = createPublicGeminiError(error);
     response.status(publicError.status).json({ error: publicError.message });
   }
 }

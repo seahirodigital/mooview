@@ -11,6 +11,9 @@ import { createServer as createViteServer } from 'vite';
 import { handleMoomooRequest } from './server/moomooHandler.js';
 import { resolveMoomooGatewayKey } from './server/moomooClient.js';
 import { handleGeminiChartAnalysis } from './server/geminiHandler.js';
+import { registerDisclosureRoutes } from './server/disclosureRoutes.js';
+import { initializeDisclosureService } from './server/disclosureService.js';
+import { configureSystemTlsTrust } from './server/systemTlsTrust.js';
 import {
   startDiscordAutomationScheduler,
   triggerDiscordAutomationJob,
@@ -26,6 +29,8 @@ import {
   sharedWorkspaceSettingsEnabled,
   writeSharedWorkspaceSettings,
 } from './server/workspaceSettingsStore.js';
+
+configureSystemTlsTrust();
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -110,6 +115,27 @@ app.use('/api/ai', (request, response, next) => {
 app.post('/api/ai/chart-analysis', (request, response) => {
   void handleGeminiChartAnalysis(request, response);
 });
+
+app.use('/api/disclosures', (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin) {
+    if (!workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+      response.status(403).json({ error: '許可されていないオリジンです。' });
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,PUT,POST,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (request.method === 'OPTIONS') {
+    response.status(204).end();
+    return;
+  }
+  next();
+});
+
+registerDisclosureRoutes(app);
 
 app.use('/api/discord-automation', (request, response, next) => {
   const origin = request.get('origin');
@@ -350,6 +376,7 @@ function stopGateway(): void {
 }
 
 async function startServer(): Promise<void> {
+  initializeDisclosureService();
   try {
     await ensureLocalGateway();
   } catch (error) {

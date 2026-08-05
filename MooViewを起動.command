@@ -18,6 +18,7 @@ readonly SERVER_LAUNCHER_PATH="${NODE_RUNTIME_ROOT}/start-server.command"
 readonly LOG_ROOT="${HOME}/Library/Logs/MooView"
 readonly LAUNCH_SERVICE_LABEL="com.mooview.server"
 readonly APP_BASE_URL="http://127.0.0.1:3000"
+readonly GEMINI_KEY_PATH="/Users/user/.config/mooview/gemini-api-key"
 
 typeset -g PYTHON_BOOTSTRAP=""
 
@@ -261,6 +262,12 @@ function run_preflight_check() {
         fail "package-lock.jsonが見つかりません: ${PACKAGE_LOCK_PATH}"
     [[ -f "${REQUIREMENTS_PATH}" ]] ||
         fail "Python依存関係ファイルが見つかりません: ${REQUIREMENTS_PATH}"
+    [[ -f "${GEMINI_KEY_PATH}" ]] ||
+        fail "Gemini APIキーが見つかりません: ${GEMINI_KEY_PATH}"
+    [[ "$(/usr/bin/stat -f '%Lp' "${GEMINI_KEY_PATH}")" == "600" ]] ||
+        fail "Gemini APIキーの権限を0600へ設定してください: ${GEMINI_KEY_PATH}"
+    [[ -s "${GEMINI_KEY_PATH}" ]] ||
+        fail "Gemini APIキーが空です: ${GEMINI_KEY_PATH}"
 
     require_command \
         "node" \
@@ -276,12 +283,19 @@ function run_preflight_check() {
     print_success "Node.js: 正常（$(command -v node)、$(node --version)）"
     print_success "npm: 正常（$(command -v npm)、$(npm --version)）"
     print_success "Python 3: 正常（${PYTHON_BOOTSTRAP}、$("${PYTHON_BOOTSTRAP}" --version 2>&1)）"
+    print_success "Gemini APIキー: 正常（値は表示しません）"
 
     print_success "重いファイルの保存先: OneDrive外（${MAC_RUNTIME_ROOT}）"
 }
 
 function run_server_process() {
     cd "${MAC_APP_ROOT}" || exit 1
+    local gemini_api_key
+    gemini_api_key="$(<"${GEMINI_KEY_PATH}")"
+    [[ -n "${gemini_api_key}" ]] || fail "Gemini APIキーが空です: ${GEMINI_KEY_PATH}"
+    export GEMINI_API_KEY="${gemini_api_key}"
+    export GEMINI_MODEL="gemini-2.5-flash"
+    unset gemini_api_key
     export MOOMOO_PYTHON="${PYTHON_PATH}"
     export MOOMOO_GATEWAY_URL="http://127.0.0.1:8787"
     export MOOMOO_GATEWAY_AUTOSTART="true"

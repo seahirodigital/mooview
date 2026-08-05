@@ -7,6 +7,7 @@ coverage/
 *.log
 .env*
 !.env.example
+gemini_key
 .vercel
 data/TEST_backet_import/
 data/TEST_backet_import_backup/

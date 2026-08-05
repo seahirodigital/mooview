@@ -14,8 +14,12 @@ function getDiscordWebhookUrl(): string {
   } catch {
     throw new Error('Discord Webhook URLの形式が正しくありません。');
   }
-  if (url.protocol !== 'https:' || url.hostname !== 'discord.com' || !url.pathname.startsWith('/api/webhooks/')) {
-    throw new Error('Discord Webhook URLはdiscord.comのHTTPS Webhookを指定してください。');
+  if (
+    url.protocol !== 'https:'
+    || !['discord.com', 'discordapp.com'].includes(url.hostname)
+    || !url.pathname.startsWith('/api/webhooks/')
+  ) {
+    throw new Error('Discord Webhook URLはDiscord公式ドメインのHTTPS Webhookを指定してください。');
   }
   return url.toString();
 }
@@ -71,6 +75,15 @@ async function sendDiscordFiles(
     body,
   });
   await assertDiscordResponse(response);
+}
+
+export async function notifyDiscordText(text: string): Promise<void> {
+  const webhookUrl = getDiscordWebhookUrl();
+  const normalized = text.trim();
+  if (!normalized) throw new Error('Discordへ送信する本文が空です。');
+  for (const part of splitDiscordText(normalized)) {
+    await sendDiscordJson(webhookUrl, part);
+  }
 }
 
 /**

@@ -29,7 +29,8 @@ import {
   Copy,
   LoaderCircle,
   Bell,
-  Clock3
+  Clock3,
+  BellRing
 } from 'lucide-react';
 
 import { Timeframe, ChartDisplayRange, ChartPanel, SymbolIndicatorSettings, TickerInfo, Candle, IndicatorLineStyle, ComparisonLabelLayoutMode } from './types';
@@ -39,6 +40,8 @@ import { TradingViewWidget } from './components/TradingViewWidget';
 import { IndicatorSettingsPanel } from './components/IndicatorSettingsPanel';
 import { ValueChainMap } from './components/ValueChainMap';
 import { MacroFlowMap, getMacroFlowDefaultWatchlistChain } from './components/MacroFlowMap';
+import { DisclosureDatabase } from './components/DisclosureDatabase';
+import { DisclosureSettingsPanel } from './components/DisclosureSettingsPanel';
 import {
   calculateExpressionQuote,
   combineExpressionCandles,
@@ -101,7 +104,7 @@ const DEFAULT_WATCHLIST_SECTION_ID = 'section-default';
 const WATCHLIST_TARGET_SEPARATOR = '::section::';
 const INDICATOR_LINE_STYLES: IndicatorLineStyle[] = ['solid', 'dashed', 'dotted', 'dashdot'];
 
-type SidebarView = 'watchlist' | 'indicators' | 'settings';
+type SidebarView = 'watchlist' | 'indicators' | 'settings' | 'disclosures';
 type MobileSheetView = SidebarView | 'image-export' | 'video-export';
 type WatchlistColumnKey = 'symbol' | 'price' | 'change';
 type SortDirection = 'asc' | 'desc';
@@ -110,7 +113,7 @@ type WatchlistTransferMenuLayer = 'root' | 'import' | 'export';
 type WatchlistQuoteFetchMode = 'manual' | 'auto';
 type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
-type AppView = 'charts' | 'value-chain' | 'macro-flow';
+type AppView = 'charts' | 'value-chain' | 'macro-flow' | 'disclosures';
 type WorkspacePersistenceMode = 'checking' | 'local' | 'shared';
 type DisplayTickerStat = TickerInfo & {
   currentPrice: number | null;
@@ -118,7 +121,7 @@ type DisplayTickerStat = TickerInfo & {
   marketCap?: number;
 };
 
-const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow'];
+const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow', 'disclosures'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
 const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
@@ -5112,8 +5115,8 @@ export default function App() {
   };
 
   const handleMobileSheetNavClick = (view: MobileSheetView) => {
-    setAppView('charts');
-    if (view === 'watchlist' || view === 'indicators' || view === 'settings') {
+    setAppView(view === 'disclosures' ? 'disclosures' : 'charts');
+    if (view === 'watchlist' || view === 'indicators' || view === 'settings' || view === 'disclosures') {
       setSidebarView(view);
     }
     const activePanel = panels[activeMobilePanelIndex];
@@ -7811,6 +7814,17 @@ export default function App() {
               <span>マクロ資金フロー</span>
               {appView === 'macro-flow' && <span className="text-[9px]">表示中</span>}
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAppView('disclosures');
+                setWorkspaceMenuOpen(false);
+              }}
+              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'disclosures' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
+            >
+              <span>企業開示DB</span>
+              {appView === 'disclosures' && <span className="text-[9px]">表示中</span>}
+            </button>
           </div>
         </div>
       )}
@@ -7850,8 +7864,11 @@ export default function App() {
         />
       ) : (
       <div className="relative flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
-        
+
         {/* Workspace Panels container */}
+        {appView === 'disclosures' ? (
+          <DisclosureDatabase />
+        ) : (
         <div className="flex-1 flex flex-col min-h-0 p-1 bg-[#050505] overflow-hidden md:p-3 md:overflow-y-auto">
           
           <div className="flex-1 min-h-0 w-full flex flex-row select-none overflow-hidden">
@@ -8538,6 +8555,7 @@ export default function App() {
             ))}
           </div>
         </div>
+        )}
 
         {sidebarOpen && !isMobileViewport && (
           <div
@@ -8597,9 +8615,11 @@ export default function App() {
                     ? 'インジケーター設定'
                     : mobileSheetView === 'settings'
                       ? '接続・保存設定'
-                      : mobileSheetView === 'image-export'
-                        ? 'チャート画像'
-                        : 'チャート動画'}
+                      : mobileSheetView === 'disclosures'
+                        ? '企業開示DB・通知設定'
+                        : mobileSheetView === 'image-export'
+                          ? 'チャート画像'
+                          : 'チャート動画'}
               </span>
               <button
                 type="button"
@@ -9838,9 +9858,27 @@ export default function App() {
           </div>
           )}
 
+          {(!isMobileViewport || mobileSheetView === 'disclosures') && sidebarView === 'disclosures' && (
+            <DisclosureSettingsPanel />
+          )}
+
           {/* 5. CONNECTION STATUS & PERFORMANCE (Moved to sidebar bottom) */}
           {(!isMobileViewport || mobileSheetView === 'settings') && sidebarView === 'settings' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+          <button
+            type="button"
+            onClick={() => {
+              setSidebarView('disclosures');
+              if (isMobileViewport) setMobileSheetView('disclosures');
+            }}
+            className="flex w-full items-center justify-between gap-3 border border-violet-900/70 bg-violet-950/30 p-3 text-left hover:bg-violet-900/40"
+          >
+            <span className="flex items-center gap-2 text-xs font-bold text-violet-100">
+              <BellRing className="h-4 w-4 text-violet-300" />
+              企業開示DB・Gemini・Discord設定
+            </span>
+            <ChevronRight className="h-4 w-4 text-violet-400" />
+          </button>
           <div className="bg-[#101010] p-3 border border-[#242424] text-xs leading-relaxed shrink-0 flex flex-col space-y-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
@@ -10167,6 +10205,19 @@ export default function App() {
               aria-label="接続設定を表示"
             >
               <Settings className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSidebarNavClick('disclosures')}
+              className={`w-9 h-10 flex items-center justify-center border transition ${
+                sidebarOpen && sidebarView === 'disclosures'
+                  ? 'bg-violet-950/70 border-violet-700 text-violet-200'
+                  : 'border-transparent text-gray-400 hover:text-violet-200 hover:bg-[#161616]'
+              }`}
+              title="企業開示DB・Discord通知設定"
+              aria-label="企業開示DB・Discord通知設定を表示"
+            >
+              <BellRing className="w-5 h-5" />
             </button>
             <button
               type="button"
@@ -11279,7 +11330,7 @@ export default function App() {
 
       <nav
         data-mobile-bottom-navigation="true"
-        className="fixed inset-x-0 bottom-0 z-[100] grid grid-cols-6 border-t border-[#303030] bg-[#080808]/98 shadow-[0_-8px_28px_rgba(0,0,0,0.55)] backdrop-blur md:hidden"
+        className="fixed inset-x-0 bottom-0 z-[100] grid grid-cols-7 border-t border-[#303030] bg-[#080808]/98 shadow-[0_-8px_28px_rgba(0,0,0,0.55)] backdrop-blur md:hidden"
         style={{
           height: 'calc(4rem + env(safe-area-inset-bottom))',
           paddingBottom: 'env(safe-area-inset-bottom)',
@@ -11340,6 +11391,19 @@ export default function App() {
         >
           <Settings className="h-5 w-5" />
           <span>設定</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMobileSheetNavClick('disclosures')}
+          className={`flex min-w-0 flex-col items-center justify-center gap-0.5 text-[9px] transition ${
+            mobileSheetView === 'disclosures'
+              ? 'bg-violet-950/70 text-violet-200'
+              : 'text-gray-400'
+          }`}
+          aria-label="企業開示DB・通知設定を表示"
+        >
+          <BellRing className="h-5 w-5" />
+          <span>開示</span>
         </button>
         <button
           type="button"

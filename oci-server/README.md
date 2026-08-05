@@ -254,6 +254,24 @@ GEMINI_MODEL=gemini-2.5-flash
 
 Geminiへの外向きHTTPS通信を許可する代わりに、MooView本体の待受は `/etc/systemd/system/mooview.service` の `HOST=127.0.0.1` でlocalhostへ限定します。外部からの閲覧経路は引き続きTailscale Serveだけです。
 
+## 企業開示DBのAPI設定
+
+企業開示DBは `/var/lib/mooview/disclosures.sqlite` にEDINET、EDINET DB、TDNETのメタデータ、設定、要約を保存します。PDF本体は保存せず、画面で表示、個別ダウンロード、Gemini要約を要求した時だけ配信元から取得します。14MBを超える要約対象はGemini Files APIへ一時アップロードし、処理後に直ちに削除します。PDF上限は50MBです。TDNET WEB APIはAPIキー不要です。
+
+初回取得範囲は既定100日です。設定画面で日数を変更すると次回同期で過去分を再走査し、手動同期の完了後に新規件数、確認件数、更新なし、配信元エラー、期限切れ削除件数を表示します。既存の30日設定は起動時に100日へ移行します。新規取得があった手動同期後は絞り込みを解除し、一覧を取得日時の新しい順で1ページ目から再読込します。
+
+大企業リストに登録されていないEDINET・EDINET DB開示は取得日時から2日後に削除します。TDNET開示は削除せずメタデータを保持します。企業マスターは削除しないため、画面の検索欄から企業名、証券コード、ティッカーコード、EDINETコードを確定すると、該当企業だけを選択中のTDNETまたはEDINET DBから再取得できます。
+
+EDINETとEDINET DBの登録が完了したら、秘密値を `/etc/mooview/mooview.env` にだけ設定します。どちらか一方が未設定でもMooViewは正常起動し、未設定の配信元だけ同期しません。
+
+```dotenv
+EDINET_API_KEY=登録後に設定
+EDINET_DB_API_KEY=登録後に設定
+MOOVIEW_PUBLIC_URL=https://MooViewのTailscale限定URL
+```
+
+`GEMINI_API_KEY` と `DISCORD_WEBHOOK_URL` は既存設定を共用します。チャットへ掲載されたWebhook URLは漏えい済みとして扱い、Discord側でローテーションしてから新しい値を `/etc/mooview/mooview.env` へ保存してください。新着開示通知とGemini要約通知は初期状態でOFFなので、APIキー登録後も設定画面で明示的にONにするまで外部送信されません。
+
 ## Discord自動通知
 
 AIボタンを右クリックし、「Discord自動通知の設定」を開くと、サーバーで実行する通知時刻を設定できます。設定画面の最上段にある「Discord通知」は既定でONです。ONの設定だけが、OCI上で日本時間に従い実行されます。

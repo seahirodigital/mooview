@@ -130,6 +130,159 @@ export function buildEdinetDbCompanyUrl(edinetCode: string | null | undefined): 
   return normalized ? `https://edinetdb.jp/company/${encodeURIComponent(normalized)}` : null;
 }
 
+export function tdnetDocumentKey(value: unknown): string | null {
+  const raw = textOrNull(value);
+  if (!raw) return null;
+  try {
+    let parsed = new URL(raw);
+    if (parsed.hostname === 'webapi.yanoshin.jp' && parsed.pathname.endsWith('/rd.php')) {
+      const nested = decodeURIComponent(parsed.search.slice(1));
+      if (nested.startsWith('https://')) parsed = new URL(nested);
+    }
+    const filename = decodeURIComponent(parsed.pathname.split('/').pop() || '').toLowerCase();
+    return /^[a-z0-9_-]+\.pdf$/.test(filename) ? filename : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseMetadataRecord(value: unknown): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(typeof value === 'string' ? value : '{}') as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function mergeTdnetMetadata(
+  current: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  documentKey: string | null,
+): Record<string, unknown> {
+  const retrievalChannels = Array.from(new Set([
+    ...(Array.isArray(current.retrievalChannels)
+      ? current.retrievalChannels.filter((value): value is string => typeof value === 'string')
+      : []),
+    typeof current.retrievalChannel === 'string' ? current.retrievalChannel : '',
+    ...(Array.isArray(incoming.retrievalChannels)
+      ? incoming.retrievalChannels.filter((value): value is string => typeof value === 'string')
+      : []),
+    typeof incoming.retrievalChannel === 'string' ? incoming.retrievalChannel : '',
+  ].filter(Boolean)));
+  return {
+    ...current,
+    ...incoming,
+    ...(documentKey ? { tdnetDocumentKey: documentKey } : {}),
+    ...(retrievalChannels.length > 0 ? { retrievalChannels } : {}),
+  };
+}
+
+function deduplicateTdnetDisclosures(target: DatabaseSync): number {
+  type TdnetDuplicateCandidate = {
+    id: number | bigint;
+    source: DisclosureSource;
+    source_url: string | null;
+    metadata_json: string;
+    summary_text: string | null;
+  };
+  const rows = target.prepare(`
+    SELECT id, source, source_url, metadata_json, summary_text
+    FROM disclosures
+    WHERE source IN ('tdnet', 'tdnet-scrape') AND source_url IS NOT NULL
+    ORDER BY id
+  `).all() as TdnetDuplicateCandidate[];
+  const groups = new Map<string, TdnetDuplicateCandidate[]>();
+  for (const row of rows) {
+    const key = tdnetDocumentKey(row.source_url);
+    if (!key) continue;
+    const group = groups.get(key) || [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  const duplicates = Array.from(groups.entries()).filter(([, group]) => group.length > 1);
+  if (duplicates.length === 0) return 0;
+
+  let removed = 0;
+  target.exec('SAVEPOINT disclosure_tdnet_deduplicate');
+  try {
+    for (const [documentKey, group] of duplicates) {
+      const ordered = [...group].sort((left, right) => {
+        const leftSummary = left.summary_text ? 1 : 0;
+        const rightSummary = right.summary_text ? 1 : 0;
+        if (leftSummary !== rightSummary) return rightSummary - leftSummary;
+        const leftApi = left.source === 'tdnet' ? 1 : 0;
+        const rightApi = right.source === 'tdnet' ? 1 : 0;
+        if (leftApi !== rightApi) return rightApi - leftApi;
+        return Number(left.id) - Number(right.id);
+      });
+      const keep = ordered[0];
+      const keepId = Number(keep.id);
+      let mergedMetadata = parseMetadataRecord(keep.metadata_json);
+      const officialSourceUrl = group
+        .map((candidate) => normalizeHttpsUrl(candidate.source_url))
+        .find((url) => url?.includes('www.release.tdnet.info/inbs/')) || null;
+      for (const remove of ordered.slice(1)) {
+        const removeId = Number(remove.id);
+        mergedMetadata = mergeTdnetMetadata(
+          mergedMetadata,
+          parseMetadataRecord(remove.metadata_json),
+          documentKey,
+        );
+        target.prepare(`
+          INSERT OR IGNORE INTO disclosure_notification_log (disclosure_id, kind, sent_at)
+          SELECT ?, kind, sent_at FROM disclosure_notification_log WHERE disclosure_id = ?
+        `).run(keepId, removeId);
+        target.prepare(`
+          UPDATE disclosures SET
+            company_id = COALESCE(company_id, (SELECT company_id FROM disclosures WHERE id = ?)),
+            edinet_code = COALESCE(edinet_code, (SELECT edinet_code FROM disclosures WHERE id = ?)),
+            sec_code = COALESCE(sec_code, (SELECT sec_code FROM disclosures WHERE id = ?)),
+            ticker_code = COALESCE(ticker_code, (SELECT ticker_code FROM disclosures WHERE id = ?)),
+            ir_url = COALESCE(ir_url, (SELECT ir_url FROM disclosures WHERE id = ?)),
+            pdf_available = MAX(pdf_available, (SELECT pdf_available FROM disclosures WHERE id = ?)),
+            summary_text = COALESCE(summary_text, (SELECT summary_text FROM disclosures WHERE id = ?)),
+            summary_model = COALESCE(summary_model, (SELECT summary_model FROM disclosures WHERE id = ?)),
+            summary_updated_at = COALESCE(summary_updated_at, (SELECT summary_updated_at FROM disclosures WHERE id = ?)),
+            discovered_at = MIN(discovered_at, (SELECT discovered_at FROM disclosures WHERE id = ?)),
+            updated_at = MAX(updated_at, (SELECT updated_at FROM disclosures WHERE id = ?))
+          WHERE id = ?
+        `).run(
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          removeId,
+          keepId,
+        );
+        target.prepare('DELETE FROM disclosures WHERE id = ?').run(removeId);
+        removed += 1;
+      }
+      target.prepare(`
+        UPDATE disclosures SET source_url = COALESCE(?, source_url), metadata_json = ? WHERE id = ?
+      `).run(
+        officialSourceUrl,
+        JSON.stringify(mergeTdnetMetadata(mergedMetadata, {}, documentKey)),
+        keepId,
+      );
+    }
+    target.exec('RELEASE disclosure_tdnet_deduplicate');
+  } catch (error) {
+    target.exec('ROLLBACK TO disclosure_tdnet_deduplicate');
+    target.exec('RELEASE disclosure_tdnet_deduplicate');
+    throw error;
+  }
+  return removed;
+}
+
 export function resolveDisclosureDatabasePath(): string {
   return path.join(resolveWorkspaceSettingsDirectory(), DATABASE_FILE_NAME);
 }
@@ -233,7 +386,7 @@ function initializeDatabase(target: DatabaseSync): void {
     `).run(JSON.stringify(DEFAULT_DISCLOSURE_SETTINGS), nowIso());
   }
 
-  for (const source of ['edinet', 'edinet-db', 'tdnet']) {
+  for (const source of ['edinet', 'edinet-db', 'tdnet', 'tdnet-scrape']) {
     target.prepare(`
       INSERT INTO disclosure_sync_state (source, baseline_complete)
       VALUES (?, 0)
@@ -295,6 +448,11 @@ function initializeDatabase(target: DatabaseSync): void {
       id,
     );
     repairedCompanyIds.add(id);
+  }
+
+  const removedDuplicateCount = deduplicateTdnetDisclosures(target);
+  if (removedDuplicateCount > 0) {
+    console.log(`企業開示DB: TDNETの重複開示${removedDuplicateCount}件を統合しました。`);
   }
 }
 
@@ -451,9 +609,33 @@ export function upsertCompany(input: CompanyUpsertInput): number {
 
 export function upsertDisclosure(input: DisclosureUpsertInput): DisclosureUpsertResult {
   const target = getDisclosureDatabase();
-  const existing = target.prepare(`
-    SELECT id FROM disclosures WHERE source = ? AND source_document_id = ?
-  `).get(input.source, input.sourceDocumentId) as { id: number | bigint } | undefined;
+  type ExistingDisclosureRow = {
+    id: number | bigint;
+    source: DisclosureSource;
+    source_url: string | null;
+    metadata_json: string;
+  };
+  let existing = target.prepare(`
+    SELECT id, source, source_url, metadata_json
+    FROM disclosures WHERE source = ? AND source_document_id = ?
+  `).get(input.source, input.sourceDocumentId) as ExistingDisclosureRow | undefined;
+  const incomingSourceUrl = normalizeHttpsUrl(input.sourceUrl);
+  const incomingTdnetDocumentKey = input.source === 'tdnet' || input.source === 'tdnet-scrape'
+    ? tdnetDocumentKey(incomingSourceUrl)
+    : null;
+  if (!existing && incomingTdnetDocumentKey) {
+    existing = target.prepare(`
+      SELECT id, source, source_url, metadata_json
+      FROM disclosures
+      WHERE source IN ('tdnet', 'tdnet-scrape')
+        AND (
+          lower(COALESCE(source_url, '')) LIKE ?
+          OR json_extract(metadata_json, '$.tdnetDocumentKey') = ?
+        )
+      ORDER BY CASE WHEN source = 'tdnet' THEN 0 ELSE 1 END, id
+      LIMIT 1
+    `).get(`%${incomingTdnetDocumentKey}`, incomingTdnetDocumentKey) as ExistingDisclosureRow | undefined;
+  }
   const secCode = normalizeSecuritiesCode(input.secCode ?? input.tickerCode);
   const edinetCode = normalizeEdinetCode(input.edinetCode);
   const companyId = upsertCompany({
@@ -465,6 +647,13 @@ export function upsertDisclosure(input: DisclosureUpsertInput): DisclosureUpsert
     preserveNotificationSetting: true,
   });
   const timestamp = nowIso();
+  const existingMetadata = parseMetadataRecord(existing?.metadata_json);
+  const incomingMetadata = input.metadata || {};
+  const mergedMetadata = mergeTdnetMetadata(existingMetadata, incomingMetadata, incomingTdnetDocumentKey);
+  const existingSourceUrl = normalizeHttpsUrl(existing?.source_url);
+  const sourceUrl = existingSourceUrl?.includes('www.release.tdnet.info/inbs/')
+    ? existingSourceUrl
+    : incomingSourceUrl;
   const values: SQLInputValue[] = [
     companyId,
     input.companyName.trim() || '名称未取得',
@@ -474,11 +663,11 @@ export function upsertDisclosure(input: DisclosureUpsertInput): DisclosureUpsert
     input.title.trim() || 'タイトル未取得',
     input.tag,
     input.publishedAt,
-    normalizeHttpsUrl(input.sourceUrl),
+    sourceUrl,
     normalizeHttpsUrl(input.irUrl),
     input.pdfAvailable ? 1 : 0,
     input.withdrawn ? 1 : 0,
-    JSON.stringify(input.metadata || {}),
+    JSON.stringify(mergedMetadata),
     timestamp,
   ];
 
@@ -526,7 +715,6 @@ function rowToDisclosure(row: Record<string, unknown>): DisclosureListItem {
     sourceUrl: normalizeHttpsUrl(row.source_url),
     irUrl: normalizeHttpsUrl(row.company_ir_url) || normalizeHttpsUrl(row.ir_url),
     edinetDbCompanyUrl: buildEdinetDbCompanyUrl(edinetCode),
-    tdnetUrl: row.source === 'tdnet' && pdfAvailable ? `/api/disclosures/${id}/pdf` : null,
     buffettCodeUrl: buildBuffettCodeUrl(secCode),
     pdfAvailable,
     isLargeCap: Number(row.is_large_cap) === 1,
@@ -548,7 +736,7 @@ export function listDisclosures(query: DisclosureQuery): DisclosureListResponse 
   if (sourceGroups.length === 0) {
     conditions.push('1 = 0');
   } else if (!sourceGroups.includes('edinet')) {
-    conditions.push("d.source = 'tdnet'");
+    conditions.push("d.source IN ('tdnet', 'tdnet-scrape')");
   } else if (!sourceGroups.includes('tdnet')) {
     conditions.push("d.source IN ('edinet', 'edinet-db')");
   }
@@ -585,7 +773,7 @@ export function listDisclosures(query: DisclosureQuery): DisclosureListResponse 
     summaryUpdatedAt: 'd.summary_updated_at',
     documentUrl: 'd.pdf_available',
     irUrl: 'COALESCE(c.ir_url, d.ir_url)',
-    tdnetUrl: "CASE WHEN d.source = 'tdnet' THEN 1 ELSE 0 END",
+    sourceRoute: "CASE WHEN d.source IN ('tdnet', 'tdnet-scrape') THEN 'T' ELSE 'E' END",
     buffettCodeUrl: 'd.sec_code',
   };
   const sortColumn = query.direction ? sortColumns[query.sort || ''] : null;

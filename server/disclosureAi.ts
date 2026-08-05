@@ -35,7 +35,9 @@ export async function summarizeDisclosure(id: number): Promise<{
   }
   const settings = readDisclosureSettings();
   const context = [
-    disclosure.source === 'tdnet' ? settings.tdnetGeminiPrompt : settings.geminiPrompt,
+    disclosure.source === 'tdnet' || disclosure.source === 'tdnet-scrape'
+      ? settings.tdnetGeminiPrompt
+      : settings.geminiPrompt,
     '',
     '--- 対象資料 ---',
     `企業名: ${disclosure.companyName}`,

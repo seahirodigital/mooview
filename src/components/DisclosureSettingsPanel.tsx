@@ -36,6 +36,7 @@ import {
   saveDisclosureSettings,
   setAllDisclosureCompanyNotifications,
   synchronizeEdinetDisclosures,
+  synchronizeTdnetScrapedDisclosures,
   synchronizeTdnetDisclosures,
   updateDisclosureCompany,
 } from '../disclosureApi';
@@ -48,6 +49,7 @@ interface CompanyFormState {
 }
 
 const EMPTY_FORM: CompanyFormState = { name: '', secCode: '', edinetCode: '', irUrl: '' };
+type DisclosureSyncAction = DisclosureSourceGroup | 'tdnet-scrape';
 
 function StatusBadge({ configured, label }: { configured: boolean; label: string }) {
   return (
@@ -172,7 +174,7 @@ export function DisclosureSettingsPanel() {
   const [editForm, setEditForm] = useState<CompanyFormState>(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [syncingSource, setSyncingSource] = useState<DisclosureSourceGroup | null>(null);
+  const [syncingSource, setSyncingSource] = useState<DisclosureSyncAction | null>(null);
   const [bulkUpdatingSource, setBulkUpdatingSource] = useState<DisclosureSourceGroup | null>(null);
   const [promptSource, setPromptSource] = useState<DisclosureSourceGroup>('edinet');
   const [savedBackfillDays, setSavedBackfillDays] = useState(100);
@@ -275,27 +277,35 @@ export function DisclosureSettingsPanel() {
     }
   };
 
-  const runSync = async (source: DisclosureSourceGroup) => {
+  const runSync = async (source: DisclosureSyncAction) => {
     if (syncingSource) return;
     setSyncingSource(source);
     setError(null);
-    const sourceLabel = source === 'tdnet' ? 'TDNET' : 'EDINET・EDINET DB';
+    const sourceLabel = source === 'tdnet-scrape'
+      ? 'TDスクレイピング'
+      : source === 'tdnet'
+        ? 'TDNET API'
+        : 'EDINET・EDINET DB';
     const isBackfill = status
-      ? source === 'tdnet'
-        ? !status.sources.tdnet.baselineComplete
-        : !status.sources.edinet.baselineComplete || !status.sources.edinetDb.baselineComplete
+      ? source === 'tdnet-scrape'
+        ? !status.sources.tdnetScrape.baselineComplete
+        : source === 'tdnet'
+          ? !status.sources.tdnet.baselineComplete
+          : !status.sources.edinet.baselineComplete || !status.sources.edinetDb.baselineComplete
       : false;
     setMessage(isBackfill
       ? `${sourceLabel}から過去${settings?.backfillDays ?? 100}日分の開示情報を取得しています…`
       : `${sourceLabel}の更新情報を取得しています…`);
     try {
-      const result = source === 'tdnet'
-        ? await synchronizeTdnetDisclosures()
-        : await synchronizeEdinetDisclosures();
+      const result = source === 'tdnet-scrape'
+        ? await synchronizeTdnetScrapedDisclosures()
+        : source === 'tdnet'
+          ? await synchronizeTdnetDisclosures()
+          : await synchronizeEdinetDisclosures();
       setMessage(result.message);
       const failures = result.sources.filter((item) => item.status === 'failed');
       if (failures.length > 0) {
-        setError(`${result.message}\n${failures.map((failed) => `${failed.source === 'tdnet' ? 'TDNET' : failed.source === 'edinet' ? 'EDINET' : 'EDINET DB'}: ${failed.error}`).join('\n')}`);
+        setError(`${result.message}\n${failures.map((failed) => `${failed.source === 'tdnet-scrape' ? 'TDスクレイピング' : failed.source === 'tdnet' ? 'TDNET API' : failed.source === 'edinet' ? 'EDINET' : 'EDINET DB'}: ${failed.error}`).join('\n')}`);
       }
       setStatus(await fetchDisclosureStatus());
     } catch (syncError) {
@@ -372,17 +382,19 @@ export function DisclosureSettingsPanel() {
           <StatusBadge configured={settings?.apiConfigured.discord === true} label="Discord" />
         </div>
         {status && <div className="mt-2 grid grid-cols-2 gap-1 font-mono text-[9px] text-gray-500"><span>開示 {status.disclosureCount.toLocaleString('ja-JP')}件</span><span>大企業 {status.largeCapCount.toLocaleString('ja-JP')}社</span></div>}
-        <div className="mt-2 grid grid-cols-2 gap-2">
+        <div className="mt-2 grid grid-cols-3 gap-2">
           <button type="button" onClick={() => void runSync('edinet')} disabled={syncingSource !== null} className="flex h-8 items-center justify-center gap-1 border border-emerald-900 bg-emerald-950/35 text-[10px] font-bold text-emerald-200 disabled:opacity-45">{syncingSource === 'edinet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{syncingSource === 'edinet' ? '取得中…' : 'EDINET同期'}</button>
-          <button type="button" onClick={() => void runSync('tdnet')} disabled={syncingSource !== null} className="flex h-8 items-center justify-center gap-1 border border-blue-900 bg-blue-950/35 text-[10px] font-bold text-blue-200 disabled:opacity-45">{syncingSource === 'tdnet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{syncingSource === 'tdnet' ? '取得中…' : 'TDNET同期'}</button>
+          <button type="button" onClick={() => void runSync('tdnet-scrape')} disabled={syncingSource !== null} className="flex h-8 items-center justify-center gap-1 border border-cyan-900 bg-cyan-950/35 text-[10px] font-bold text-cyan-200 disabled:opacity-45">{syncingSource === 'tdnet-scrape' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{syncingSource === 'tdnet-scrape' ? '取得中…' : 'TDスクレイピング'}</button>
+          <button type="button" onClick={() => void runSync('tdnet')} disabled={syncingSource !== null} className="flex h-8 items-center justify-center gap-1 border border-blue-900 bg-blue-950/35 text-[10px] font-bold text-blue-200 disabled:opacity-45">{syncingSource === 'tdnet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{syncingSource === 'tdnet' ? '取得中…' : 'TDNET API'}</button>
         </div>
       </SettingsSection>
 
       {settings && (
         <>
           <SettingsSection title="同期間隔">
-            <div className="grid grid-cols-3 gap-2">
-              <NumericInput label="TDNET（分）" value={settings.tdnetPollMinutes} minimum={1} maximum={180} onChange={(value) => updateSetting('tdnetPollMinutes', value)} />
+            <div className="grid grid-cols-2 gap-2">
+              <NumericInput label="TDスクレイピング（分）" value={settings.tdnetScrapePollMinutes} minimum={1} maximum={60} onChange={(value) => updateSetting('tdnetScrapePollMinutes', value)} />
+              <NumericInput label="TDNET API（分）" value={settings.tdnetPollMinutes} minimum={1} maximum={180} onChange={(value) => updateSetting('tdnetPollMinutes', value)} />
               <NumericInput label="EDINET（分）" value={settings.edinetPollMinutes} minimum={1} maximum={180} onChange={(value) => updateSetting('edinetPollMinutes', value)} />
               <NumericInput label="EDINET DB（分）" value={settings.edinetDbPollMinutes} minimum={5} maximum={720} onChange={(value) => updateSetting('edinetDbPollMinutes', value)} />
             </div>

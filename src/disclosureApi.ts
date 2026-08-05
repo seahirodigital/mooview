@@ -84,6 +84,12 @@ export async function synchronizeTdnetDisclosures(): Promise<DisclosureSyncRunRe
   }));
 }
 
+export async function synchronizeTdnetScrapedDisclosures(): Promise<DisclosureSyncRunResult> {
+  return readJson<DisclosureSyncRunResult>(await fetch('/api/disclosures/sync/tdnet-scrape', {
+    method: 'POST',
+  }));
+}
+
 export async function refreshDisclosuresForSearch(
   query: string,
   sources: DisclosureSourceGroup[],

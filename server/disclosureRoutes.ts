@@ -20,6 +20,7 @@ import {
   forceEdinetDisclosureSync,
   forceDisclosureSync,
   forceTdnetDisclosureSync,
+  forceTdnetScrapeDisclosureSync,
   getDisclosureServiceStatus,
   refreshDisclosuresForSearch,
 } from './disclosureService';
@@ -164,6 +165,15 @@ export function registerDisclosureRoutes(app: Express): void {
       response.json(await forceTdnetDisclosureSync());
     } catch (error) {
       console.error('企業開示DBのTDNET手動同期に失敗しました。', publicError(error));
+      response.status(502).json({ error: publicError(error) });
+    }
+  });
+
+  app.post('/api/disclosures/sync/tdnet-scrape', async (_request, response) => {
+    try {
+      response.json(await forceTdnetScrapeDisclosureSync());
+    } catch (error) {
+      console.error('企業開示DBのTDNETスクレイピングに失敗しました。', publicError(error));
       response.status(502).json({ error: publicError(error) });
     }
   });

@@ -27,7 +27,7 @@ export const DEFAULT_DISCLOSURE_NOISE_KEYWORDS = [
 ] as const;
 
 export type DisclosureTag = typeof DISCLOSURE_TAGS[number];
-export type DisclosureSource = 'edinet' | 'edinet-db' | 'tdnet';
+export type DisclosureSource = 'edinet' | 'edinet-db' | 'tdnet' | 'tdnet-scrape';
 export type DisclosureSourceGroup = 'edinet' | 'tdnet';
 
 export const DEFAULT_DISCLOSURE_GEMINI_PROMPT = `あなたは日本株の企業開示を読むアナリストです。
@@ -65,6 +65,7 @@ export interface DisclosureSettings {
   edinetPollMinutes: number;
   edinetDbPollMinutes: number;
   tdnetPollMinutes: number;
+  tdnetScrapePollMinutes: number;
   backfillDays: number;
   noiseFilterKeywords: string[];
 }
@@ -97,7 +98,6 @@ export interface DisclosureListItem {
   sourceUrl: string | null;
   irUrl: string | null;
   edinetDbCompanyUrl: string | null;
-  tdnetUrl: string | null;
   buffettCodeUrl: string | null;
   pdfAvailable: boolean;
   isLargeCap: boolean;
@@ -150,6 +150,7 @@ export interface DisclosureSyncStatus {
     edinet: DisclosureSyncSourceStatus;
     edinetDb: DisclosureSyncSourceStatus;
     tdnet: DisclosureSyncSourceStatus;
+    tdnetScrape: DisclosureSyncSourceStatus;
   };
 }
 
@@ -194,6 +195,7 @@ export const DEFAULT_DISCLOSURE_SETTINGS: DisclosureSettings = {
   edinetPollMinutes: 5,
   edinetDbPollMinutes: 30,
   tdnetPollMinutes: 5,
+  tdnetScrapePollMinutes: 1,
   backfillDays: 100,
   noiseFilterKeywords: [...DEFAULT_DISCLOSURE_NOISE_KEYWORDS],
 };
@@ -231,6 +233,7 @@ export function normalizeDisclosureSettings(value: unknown): DisclosureSettings 
     edinetPollMinutes: clampInteger(source.edinetPollMinutes, 5, 1, 180),
     edinetDbPollMinutes: clampInteger(source.edinetDbPollMinutes, 30, 5, 720),
     tdnetPollMinutes: clampInteger(source.tdnetPollMinutes, 5, 1, 180),
+    tdnetScrapePollMinutes: clampInteger(source.tdnetScrapePollMinutes, 1, 1, 60),
     backfillDays: clampInteger(source.backfillDays, 100, 1, 365),
     noiseFilterKeywords,
   };

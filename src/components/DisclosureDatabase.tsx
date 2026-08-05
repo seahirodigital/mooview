@@ -37,14 +37,16 @@ import {
   summarizeDisclosures,
   synchronizeEdinetDisclosures,
   synchronizeTdnetDisclosures,
+  synchronizeTdnetScrapedDisclosures,
   updateDisclosureCompany,
 } from '../disclosureApi';
 
 type SortDirection = 'asc' | 'desc' | '';
+type DisclosureSyncAction = DisclosureSourceGroup | 'tdnet-scrape';
 type SortKey = 'publishedAt' | 'companyName' | 'secCode' | 'title' | 'tag'
-  | 'summaryUpdatedAt' | 'documentUrl' | 'irUrl' | 'tdnetUrl' | 'buffettCodeUrl';
+  | 'sourceRoute' | 'summaryUpdatedAt' | 'documentUrl' | 'irUrl' | 'buffettCodeUrl';
 type DisclosureColumnKey = 'select' | 'summary' | 'publishedAt' | 'companyName' | 'secCode'
-  | 'title' | 'tag' | 'documentUrl' | 'irUrl' | 'tdnetUrl' | 'buffettCodeUrl';
+  | 'sourceRoute' | 'title' | 'tag' | 'documentUrl' | 'irUrl' | 'buffettCodeUrl';
 type DisclosurePageSize = 50 | 100 | 200 | 300 | 'all';
 
 interface DisclosureContextMenuState {
@@ -71,13 +73,13 @@ const DEFAULT_DISCLOSURE_COLUMN_ORDER: DisclosureColumnKey[] = [
   'select',
   'publishedAt',
   'secCode',
+  'sourceRoute',
   'tag',
   'companyName',
   'title',
   'summary',
   'documentUrl',
   'irUrl',
-  'tdnetUrl',
   'buffettCodeUrl',
 ];
 const DEFAULT_DISCLOSURE_COLUMN_WIDTHS: Record<DisclosureColumnKey, number> = {
@@ -86,11 +88,11 @@ const DEFAULT_DISCLOSURE_COLUMN_WIDTHS: Record<DisclosureColumnKey, number> = {
   publishedAt: 132,
   companyName: 192,
   secCode: 96,
+  sourceRoute: 52,
   title: 480,
   tag: 88,
   documentUrl: 56,
   irUrl: 68,
-  tdnetUrl: 56,
   buffettCodeUrl: 56,
 };
 const MIN_DISCLOSURE_COLUMN_WIDTHS: Record<DisclosureColumnKey, number> = {
@@ -99,11 +101,11 @@ const MIN_DISCLOSURE_COLUMN_WIDTHS: Record<DisclosureColumnKey, number> = {
   publishedAt: 96,
   companyName: 112,
   secCode: 72,
+  sourceRoute: 44,
   title: 180,
   tag: 64,
   documentUrl: 44,
   irUrl: 48,
-  tdnetUrl: 44,
   buffettCodeUrl: 44,
 };
 const LEGACY_DISCLOSURE_LINK_COLUMN_WIDTHS: Partial<Record<DisclosureColumnKey, number>> = {
@@ -142,8 +144,8 @@ function loadDisclosureColumnOrder(): DisclosureColumnKey[] {
     const next = Array.from(new Set(valid));
     for (const key of DEFAULT_DISCLOSURE_COLUMN_ORDER) {
       if (next.includes(key)) continue;
-      if (key === 'tdnetUrl' && next.includes('irUrl')) {
-        next.splice(next.indexOf('irUrl') + 1, 0, key);
+      if (key === 'sourceRoute' && next.includes('secCode')) {
+        next.splice(next.indexOf('secCode') + 1, 0, key);
       } else {
         next.push(key);
       }
@@ -172,14 +174,17 @@ const EMPTY_RESPONSE: DisclosureListResponse = {
 function formatPublishedAt(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('ja-JP', {
+  const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Tokyo',
-    year: 'numeric',
+    year: '2-digit',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  });
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}${part('month')}${part('day')} ${part('hour')}:${part('minute')}`;
 }
 
 function tagClassName(tag: DisclosureTag): string {
@@ -209,7 +214,7 @@ export function DisclosureDatabase() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const [expandedIds, setExpandedIds] = useState<Set<number>>(() => new Set());
   const [loading, setLoading] = useState(true);
-  const [syncingSource, setSyncingSource] = useState<DisclosureSourceGroup | null>(null);
+  const [syncingSource, setSyncingSource] = useState<DisclosureSyncAction | null>(null);
   const [searchSyncing, setSearchSyncing] = useState(false);
   const [summaryIds, setSummaryIds] = useState<Set<number>>(() => new Set());
   const [message, setMessage] = useState<string | null>(null);
@@ -483,22 +488,28 @@ export function DisclosureDatabase() {
     void runSummaries([item.id]);
   };
 
-  const handleSync = async (source: DisclosureSourceGroup) => {
+  const handleSync = async (source: DisclosureSyncAction) => {
     setSyncingSource(source);
     setError(null);
-    const sourceLabel = source === 'tdnet' ? 'TDNET' : 'EDINET・EDINET DB';
+    const sourceLabel = source === 'tdnet-scrape'
+      ? 'TDNET公式ページ'
+      : source === 'tdnet'
+        ? 'TDNET API'
+        : 'EDINET・EDINET DB';
     setMessage(`${sourceLabel}から開示情報を取得しています…`);
     try {
-      const result = source === 'tdnet'
-        ? await synchronizeTdnetDisclosures()
-        : await synchronizeEdinetDisclosures();
+      const result = source === 'tdnet-scrape'
+        ? await synchronizeTdnetScrapedDisclosures()
+        : source === 'tdnet'
+          ? await synchronizeTdnetDisclosures()
+          : await synchronizeEdinetDisclosures();
       const failures = result.sources.filter((source) => source.status === 'failed');
       if (result.added > 0) {
         const visibleSources: DisclosureSourceGroup[] = [
           ...(edinetEnabled || source === 'edinet' ? ['edinet' as const] : []),
-          ...(tdnetEnabled || source === 'tdnet' ? ['tdnet' as const] : []),
+          ...(tdnetEnabled || source === 'tdnet' || source === 'tdnet-scrape' ? ['tdnet' as const] : []),
         ];
-        if (source === 'tdnet') setTdnetEnabled(true);
+        if (source === 'tdnet' || source === 'tdnet-scrape') setTdnetEnabled(true);
         else setEdinetEnabled(true);
         setSearchInput('');
         setQuery('');
@@ -522,7 +533,7 @@ export function DisclosureDatabase() {
         setMessage(result.message);
       }
       if (failures.length > 0) {
-        setError(`${result.message}\n${failures.map((failed) => `${failed.source === 'tdnet' ? 'TDNET' : failed.source === 'edinet' ? 'EDINET' : 'EDINET DB'}: ${failed.error}`).join('\n')}`);
+        setError(`${result.message}\n${failures.map((failed) => `${failed.source === 'tdnet-scrape' ? 'TDスクレイピング' : failed.source === 'tdnet' ? 'TDNET' : failed.source === 'edinet' ? 'EDINET' : 'EDINET DB'}: ${failed.error}`).join('\n')}`);
       }
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : '同期に失敗しました。');
@@ -583,7 +594,7 @@ export function DisclosureDatabase() {
     setCompanyNotificationIds((current) => new Set(current).add(item.companyId as number));
     setError(null);
     try {
-      const tdnet = item.source === 'tdnet';
+      const tdnet = item.source === 'tdnet' || item.source === 'tdnet-scrape';
       const currentlyEnabled = tdnet
         ? item.tdnetCompanyNotifyEnabled
         : item.edinetCompanyNotifyEnabled;
@@ -813,13 +824,13 @@ export function DisclosureDatabase() {
     const definitions: Record<Exclude<DisclosureColumnKey, 'select'>, { label: string; sortKey: SortKey }> = {
       publishedAt: { label: '日時', sortKey: 'publishedAt' },
       secCode: { label: 'コード', sortKey: 'secCode' },
+      sourceRoute: { label: '経由', sortKey: 'sourceRoute' },
       tag: { label: 'タグ', sortKey: 'tag' },
       companyName: { label: '企業名', sortKey: 'companyName' },
       title: { label: '配信情報タイトル', sortKey: 'title' },
       summary: { label: '要約', sortKey: 'summaryUpdatedAt' },
       documentUrl: { label: '資料URL', sortKey: 'documentUrl' },
-      irUrl: { label: 'IR / EDINET DB', sortKey: 'irUrl' },
-      tdnetUrl: { label: 'TDNET', sortKey: 'tdnetUrl' },
+      irUrl: { label: 'EDINET DB', sortKey: 'irUrl' },
       buffettCodeUrl: { label: 'バフェット・コード', sortKey: 'buffettCodeUrl' },
     };
     const definition = definitions[columnKey];
@@ -857,6 +868,14 @@ export function DisclosureDatabase() {
             <div className="text-cyan-300">{item.secCode || '—'}</div>
           </td>
         );
+      case 'sourceRoute': {
+        const tdnet = item.source === 'tdnet' || item.source === 'tdnet-scrape';
+        return (
+          <td key={columnKey} className="px-2 py-1.5 align-middle text-center">
+            <span className={`inline-flex h-5 min-w-5 items-center justify-center border font-black ${tdnet ? 'border-blue-900 bg-blue-950/60 text-blue-300' : 'border-emerald-900 bg-emerald-950/60 text-emerald-300'}`}>{tdnet ? 'T' : 'E'}</span>
+          </td>
+        );
+      }
       case 'tag':
         return (
           <td key={columnKey} className="truncate whitespace-nowrap px-2 py-1.5 align-middle">
@@ -902,12 +921,6 @@ export function DisclosureDatabase() {
             </div>
           </td>
         );
-      case 'tdnetUrl':
-        return (
-          <td key={columnKey} className="px-1 py-1.5 align-middle text-center">
-            {item.tdnetUrl ? <a href={item.tdnetUrl} target="_blank" rel="noreferrer" aria-label="TDNET資料を開く" title="TDNET資料を開く" className="inline-flex h-6 w-6 items-center justify-center text-blue-300 hover:bg-blue-950/50 hover:text-blue-100"><Link2 className="h-3.5 w-3.5" /></a> : null}
-          </td>
-        );
       case 'buffettCodeUrl':
         return (
           <td key={columnKey} className="px-1 py-2 align-top text-center">
@@ -944,12 +957,21 @@ export function DisclosureDatabase() {
           </button>
           <button
             type="button"
+            onClick={() => void handleSync('tdnet-scrape')}
+            disabled={syncingSource !== null}
+            className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-blue-800 hover:text-blue-200 disabled:opacity-50"
+          >
+            {syncingSource === 'tdnet-scrape' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {syncingSource === 'tdnet-scrape' ? '取得しています…' : 'TDスクレイピング'}
+          </button>
+          <button
+            type="button"
             onClick={() => void handleSync('tdnet')}
             disabled={syncingSource !== null}
             className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-blue-800 hover:text-blue-200 disabled:opacity-50"
           >
             {syncingSource === 'tdnet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingSource === 'tdnet' ? '取得しています…' : 'TDNET同期'}
+            {syncingSource === 'tdnet' ? '取得しています…' : 'TDNET API同期'}
           </button>
         </div>
 
@@ -1112,6 +1134,7 @@ export function DisclosureDatabase() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className={`border px-1.5 py-0.5 text-[9px] font-bold ${tagClassName(item.tag)}`}>{item.tag}</span>
+                    <span className={`border px-1 text-[9px] font-black ${item.source === 'tdnet' || item.source === 'tdnet-scrape' ? 'border-blue-900 text-blue-300' : 'border-emerald-900 text-emerald-300'}`}>{item.source === 'tdnet' || item.source === 'tdnet-scrape' ? 'T' : 'E'}</span>
                     <span className="font-mono text-[9px] text-gray-500">{formatPublishedAt(item.publishedAt)}</span>
                   </div>
                   <div className="mt-1 text-xs font-black text-white">{item.companyName}</div>
@@ -1161,7 +1184,7 @@ export function DisclosureDatabase() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button type="button" role="menuitem" disabled={!contextMenu.item.edinetDbCompanyUrl} onClick={() => { openExternal(contextMenu.item.edinetDbCompanyUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-emerald-300 hover:bg-[#202820] disabled:text-gray-700"><Building2 className="h-3.5 w-3.5" />EDINET DB</button>
-          <button type="button" role="menuitem" disabled={!contextMenu.item.tdnetUrl} onClick={() => { openExternal(contextMenu.item.tdnetUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-blue-300 hover:bg-blue-950/40 disabled:text-gray-700"><ExternalLink className="h-3.5 w-3.5" />TDNET</button>
+          <button type="button" role="menuitem" disabled={!((contextMenu.item.source === 'tdnet' || contextMenu.item.source === 'tdnet-scrape') && contextMenu.item.documentUrl)} onClick={() => { openExternal(contextMenu.item.documentUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-blue-300 hover:bg-blue-950/40 disabled:text-gray-700"><ExternalLink className="h-3.5 w-3.5" />TDNET</button>
           <button type="button" role="menuitem" disabled={!contextMenu.item.buffettCodeUrl} onClick={() => { openExternal(contextMenu.item.buffettCodeUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-amber-300 hover:bg-[#2a2418] disabled:text-gray-700"><ExternalLink className="h-3.5 w-3.5" />バフェット・コード</button>
           <button type="button" role="menuitem" disabled={!contextMenu.item.documentUrl} onClick={() => { openExternal(contextMenu.item.documentUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-cyan-300 hover:bg-[#17262a] disabled:text-gray-700"><FileText className="h-3.5 w-3.5" />PDFを表示</button>
           <button type="button" role="menuitem" disabled={!contextMenu.item.downloadUrl} onClick={() => { const item = contextMenu.item; setContextMenu(null); void downloadItemsIndividually([item]); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-cyan-200 hover:bg-[#17262a] disabled:text-gray-700"><Download className="h-3.5 w-3.5" />PDFを個別ダウンロード</button>
@@ -1170,7 +1193,7 @@ export function DisclosureDatabase() {
           <button
             type="button"
             role="menuitemcheckbox"
-            aria-checked={contextMenu.item.source === 'tdnet' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled}
+            aria-checked={contextMenu.item.source === 'tdnet' || contextMenu.item.source === 'tdnet-scrape' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled}
             disabled={!contextMenu.item.companyId || companyNotificationIds.has(contextMenu.item.companyId)}
             onClick={() => {
               const item = contextMenu.item;
@@ -1179,8 +1202,8 @@ export function DisclosureDatabase() {
             }}
             className="flex h-8 w-full items-center gap-2 px-2 text-left text-gray-200 hover:bg-[#202020] disabled:text-gray-700"
           >
-            {(contextMenu.item.source === 'tdnet' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled) ? <BellOff className="h-3.5 w-3.5 text-red-300" /> : <Bell className="h-3.5 w-3.5 text-emerald-300" />}
-            {contextMenu.item.source === 'tdnet' ? 'TDNET' : 'EDINET'}通知対象を{(contextMenu.item.source === 'tdnet' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled) ? 'OFF' : 'ON'}
+            {(contextMenu.item.source === 'tdnet' || contextMenu.item.source === 'tdnet-scrape' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled) ? <BellOff className="h-3.5 w-3.5 text-red-300" /> : <Bell className="h-3.5 w-3.5 text-emerald-300" />}
+            {contextMenu.item.source === 'tdnet' || contextMenu.item.source === 'tdnet-scrape' ? 'TDNET' : 'EDINET'}通知対象を{(contextMenu.item.source === 'tdnet' || contextMenu.item.source === 'tdnet-scrape' ? contextMenu.item.tdnetCompanyNotifyEnabled : contextMenu.item.edinetCompanyNotifyEnabled) ? 'OFF' : 'ON'}
           </button>
         </div>
       )}

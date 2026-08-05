@@ -4,9 +4,12 @@ import {
   markDisclosureSourceSuccess,
   normalizeSecuritiesCode,
   readDisclosureSourceState,
+  tdnetDocumentKey,
   upsertDisclosure,
   type DisclosureUpsertResult,
 } from './disclosureStore';
+import * as tls from 'node:tls';
+
 import { classifyDisclosure } from './disclosureClassification';
 import type {
   DisclosureSettings,
@@ -16,8 +19,11 @@ import type {
 const EDINET_BASE_URL = 'https://api.edinet-fsa.go.jp/api/v2';
 const EDINET_DB_BASE_URL = 'https://edinetdb.jp/v1';
 const TDNET_BASE_URL = 'https://webapi.yanoshin.jp/webapi/tdnet';
+const TDNET_DISCLOSURE_BASE_URL = 'https://www.release.tdnet.info/inbs/';
 const REQUEST_TIMEOUT_MS = 45_000;
 const MAX_EDINET_DB_PAGES = 20;
+const MAX_TDNET_SCRAPE_PAGES = 100;
+let systemCaEnabled = false;
 
 export interface SourceSyncResult {
   source: DisclosureSource;
@@ -37,14 +43,14 @@ function booleanFlag(value: unknown): boolean {
 }
 
 function apiKeyFor(source: DisclosureSource): string {
-  if (source === 'tdnet') return '';
+  if (source === 'tdnet' || source === 'tdnet-scrape') return '';
   return source === 'edinet'
     ? process.env.EDINET_API_KEY?.trim() || ''
     : process.env.EDINET_DB_API_KEY?.trim() || '';
 }
 
 export function disclosureSourceConfigured(source: DisclosureSource): boolean {
-  return source === 'tdnet' || Boolean(apiKeyFor(source));
+  return source === 'tdnet' || source === 'tdnet-scrape' || Boolean(apiKeyFor(source));
 }
 
 async function fetchWithTimeout(url: URL, init: RequestInit = {}): Promise<Response> {
@@ -55,6 +61,21 @@ async function fetchWithTimeout(url: URL, init: RequestInit = {}): Promise<Respo
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function enableSystemCaCertificates(): void {
+  if (systemCaEnabled) return;
+  const tlsWithSystemCa = tls as typeof tls & {
+    getCACertificates?: (type?: 'default' | 'system' | 'bundled' | 'extra') => string[];
+    setDefaultCACertificates?: (certificates: string[]) => void;
+  };
+  if (tlsWithSystemCa.getCACertificates && tlsWithSystemCa.setDefaultCACertificates) {
+    tlsWithSystemCa.setDefaultCACertificates([
+      ...tlsWithSystemCa.getCACertificates('default'),
+      ...tlsWithSystemCa.getCACertificates('system'),
+    ]);
+  }
+  systemCaEnabled = true;
 }
 
 async function fetchJson(url: URL, init: RequestInit = {}): Promise<unknown> {
@@ -357,6 +378,7 @@ function registerTdnetItems(
     const secCode = normalizeSecuritiesCode(companyCode);
     const publishedAt = normalizePublishedAt(item.pubdate || item.published_at, fallbackDate);
     const sourceUrl = stringValue(item.document_url) || stringValue(item.url);
+    const documentKey = tdnetDocumentKey(sourceUrl);
     const documentId = primitiveString(item.id)
       || [publishedAt, companyCode || '', title, sourceUrl || ''].join('|');
     registerResult(upsertDisclosure({
@@ -375,6 +397,8 @@ function registerTdnetItems(
         companyCode,
         markets: stringValue(item.markets_string),
         documentUrl: sourceUrl,
+        tdnetDocumentKey: documentKey,
+        retrievalChannel: 'api',
         xbrlUrl: stringValue(item.url_xbrl),
         updateHistory: item.update_history ?? null,
       },
@@ -433,6 +457,150 @@ export async function syncTdnetCompanies(
   return { source, newDisclosureIds, processed, baselineWasComplete: true };
 }
 
+function decodeHtmlText(value: string): string {
+  const namedEntities: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    nbsp: ' ',
+    quot: '"',
+  };
+  return value
+    .replace(/<br\s*\/?\s*>/gi, ' ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&#(\d+);/g, (_match, decimal: string) => String.fromCodePoint(Number(decimal)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hexadecimal: string) => String.fromCodePoint(Number.parseInt(hexadecimal, 16)))
+    .replace(/&([a-z]+);/gi, (match, name: string) => namedEntities[name.toLowerCase()] ?? match)
+    .replace(/[\u00a0\s]+/g, ' ')
+    .trim();
+}
+
+function extractTdnetCell(rowHtml: string, className: string): string {
+  const pattern = new RegExp(
+    `<td\\b[^>]*class=["'][^"']*\\b${className}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/td>`,
+    'i',
+  );
+  return pattern.exec(rowHtml)?.[1] || '';
+}
+
+export interface TdnetScrapedItem {
+  time: string;
+  companyCode: string;
+  companyName: string;
+  title: string;
+  documentUrl: string;
+  markets: string;
+  updateHistory: string;
+}
+
+export function parseTdnetDisclosurePage(html: string): TdnetScrapedItem[] {
+  const items: TdnetScrapedItem[] = [];
+  for (const match of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = match[1];
+    const time = decodeHtmlText(extractTdnetCell(rowHtml, 'kjTime'));
+    const companyCode = decodeHtmlText(extractTdnetCell(rowHtml, 'kjCode'));
+    const companyName = decodeHtmlText(extractTdnetCell(rowHtml, 'kjName'));
+    const titleCell = extractTdnetCell(rowHtml, 'kjTitle');
+    const documentLink = /<a\b[^>]*href=["']([^"']+\.pdf(?:\?[^"']*)?)["'][^>]*>([\s\S]*?)<\/a>/i.exec(titleCell);
+    if (!/^\d{2}:\d{2}$/.test(time) || !companyCode || !companyName || !documentLink) continue;
+    const documentUrl = new URL(decodeHtmlText(documentLink[1]), TDNET_DISCLOSURE_BASE_URL).toString();
+    const parsedUrl = new URL(documentUrl);
+    if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'www.release.tdnet.info') continue;
+    items.push({
+      time,
+      companyCode,
+      companyName,
+      title: decodeHtmlText(documentLink[2]) || 'TDNET適時開示資料',
+      documentUrl,
+      markets: decodeHtmlText(extractTdnetCell(rowHtml, 'kjPlace')),
+      updateHistory: decodeHtmlText(extractTdnetCell(rowHtml, 'kjHistroy')),
+    });
+  }
+  return items;
+}
+
+async function fetchTdnetHtml(pathname: string): Promise<string> {
+  if (!/^I_(?:main_00|list_\d{3}_\d{8})\.html$/.test(pathname)) {
+    throw new Error('TDNETスクレイピング対象ページが不正です。');
+  }
+  enableSystemCaCertificates();
+  const url = new URL(pathname, TDNET_DISCLOSURE_BASE_URL);
+  url.searchParams.set('_', String(Date.now()));
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      Accept: 'text/html,application/xhtml+xml',
+      'Cache-Control': 'no-cache',
+      'User-Agent': 'MooView/1.0 TDNET disclosure synchronization',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`TDNET公式ページの取得に失敗しました（HTTP ${response.status}）。`);
+  }
+  return response.text();
+}
+
+export async function syncTdnetScrape(settings: DisclosureSettings): Promise<SourceSyncResult> {
+  const source: DisclosureSource = 'tdnet-scrape';
+  const state = readDisclosureSourceState(source);
+  const newDisclosureIds: number[] = [];
+  let processed = 0;
+  markDisclosureSourceAttempt(source);
+  try {
+    const mainHtml = await fetchTdnetHtml('I_main_00.html');
+    const firstPage = /<iframe\b[^>]*\bid=["']main_list["'][^>]*\bsrc=["'](I_list_001_(\d{8})\.html)["']/i.exec(mainHtml)
+      || /<iframe\b[^>]*\bsrc=["'](I_list_001_(\d{8})\.html)["'][^>]*\bid=["']main_list["']/i.exec(mainHtml);
+    if (!firstPage) throw new Error('TDNET公式ページから当日の一覧URLを取得できませんでした。');
+    const dateCompact = firstPage[2];
+    const fallbackDate = `${dateCompact.slice(0, 4)}-${dateCompact.slice(4, 6)}-${dateCompact.slice(6, 8)}`;
+    const firstPageHtml = await fetchTdnetHtml(firstPage[1]);
+    const totalMatch = /全\s*([\d,]+)件/.exec(decodeHtmlText(firstPageHtml));
+    const total = Number((totalMatch?.[1] || '0').replaceAll(',', ''));
+    const pageCount = Math.min(
+      MAX_TDNET_SCRAPE_PAGES,
+      Math.max(1, Math.ceil(total / 100)),
+    );
+    for (let page = 1; page <= pageCount; page += 1) {
+      const pageHtml = page === 1
+        ? firstPageHtml
+        : await fetchTdnetHtml(`I_list_${String(page).padStart(3, '0')}_${dateCompact}.html`);
+      for (const item of parseTdnetDisclosurePage(pageHtml)) {
+        const secCode = normalizeSecuritiesCode(item.companyCode);
+        const documentKey = tdnetDocumentKey(item.documentUrl);
+        if (!documentKey) continue;
+        const title = item.title;
+        registerResult(upsertDisclosure({
+          source,
+          sourceDocumentId: `tdnet-scrape:${documentKey}`,
+          companyName: item.companyName,
+          secCode,
+          tickerCode: secCode ? `${secCode}.JP` : null,
+          title,
+          tag: classifyDisclosure(title, source, '', settings.noiseFilterKeywords),
+          publishedAt: normalizePublishedAt(`${fallbackDate} ${item.time}:00`, fallbackDate),
+          sourceUrl: item.documentUrl,
+          pdfAvailable: true,
+          metadata: {
+            companyCode: item.companyCode,
+            markets: item.markets,
+            updateHistory: item.updateHistory || null,
+            documentUrl: item.documentUrl,
+            tdnetDocumentKey: documentKey,
+            retrievalChannel: 'scraping',
+            scrapedAt: new Date().toISOString(),
+          },
+        }), newDisclosureIds);
+        processed += 1;
+      }
+    }
+    markDisclosureSourceSuccess(source, { baselineComplete: true });
+    return { source, newDisclosureIds, processed, baselineWasComplete: state.baselineComplete };
+  } catch (error) {
+    markDisclosureSourceError(source, error);
+    throw error;
+  }
+}
+
 export async function fetchDisclosurePdf(
   source: DisclosureSource,
   sourceDocumentId: string,
@@ -452,7 +620,7 @@ export async function fetchDisclosurePdf(
     return response;
   }
 
-  if (source === 'tdnet') {
+  if (source === 'tdnet' || source === 'tdnet-scrape') {
     if (!sourceUrl) throw new Error('TDNETの資料URLがありません。');
     const parsedUrl = new URL(sourceUrl);
     const allowedHosts = new Set(['webapi.yanoshin.jp', 'www.release.tdnet.info']);

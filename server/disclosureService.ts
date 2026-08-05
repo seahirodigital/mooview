@@ -26,6 +26,7 @@ import {
   syncEdinetDbCompanies,
   syncTdnet,
   syncTdnetCompanies,
+  syncTdnetScrape,
   type SourceSyncResult,
 } from './disclosureSources';
 import { seedLargeCapCompanies } from './largeCapImporter';
@@ -36,11 +37,13 @@ const running: Record<DisclosureSource, boolean> = {
   edinet: false,
   'edinet-db': false,
   tdnet: false,
+  'tdnet-scrape': false,
 };
 const runningPromises: Record<DisclosureSource, Promise<SourceSyncResult> | null> = {
   edinet: null,
   'edinet-db': null,
   tdnet: null,
+  'tdnet-scrape': null,
 };
 let scheduler: ReturnType<typeof setInterval> | null = null;
 
@@ -64,7 +67,7 @@ async function notifyNewDisclosures(ids: number[]): Promise<void> {
     if (!disclosure?.companyId || notificationAlreadySent(id, 'new-disclosure')) continue;
     if (disclosure.tag === 'NOISE') continue;
     const company = getCompany(disclosure.companyId);
-    const tdnet = disclosure.source === 'tdnet';
+    const tdnet = disclosure.source === 'tdnet' || disclosure.source === 'tdnet-scrape';
     const globallyEnabled = tdnet
       ? settings.tdnetDisclosureNotificationsEnabled
       : settings.newDisclosureNotificationsEnabled;
@@ -98,10 +101,12 @@ async function synchronizeSource(
   const settings = readDisclosureSettings();
   const state = readDisclosureSourceState(source);
   const interval = source === 'edinet'
-    ? settings.edinetPollMinutes
-    : source === 'edinet-db'
-      ? settings.edinetDbPollMinutes
-      : settings.tdnetPollMinutes;
+      ? settings.edinetPollMinutes
+      : source === 'edinet-db'
+        ? settings.edinetDbPollMinutes
+        : source === 'tdnet-scrape'
+          ? settings.tdnetScrapePollMinutes
+          : settings.tdnetPollMinutes;
   if (!force && minutesSince(state.lastAttemptAt) < interval) return null;
   running[source] = true;
   const task = (async () => {
@@ -109,7 +114,9 @@ async function synchronizeSource(
       ? await syncEdinet(settings)
       : source === 'edinet-db'
         ? await syncEdinetDb(settings)
-        : await syncTdnet(settings);
+        : source === 'tdnet-scrape'
+          ? await syncTdnetScrape(settings)
+          : await syncTdnet(settings);
     if (result.baselineWasComplete && result.newDisclosureIds.length > 0) {
       await notifyNewDisclosures(result.newDisclosureIds);
     }
@@ -126,10 +133,11 @@ async function synchronizeSource(
 
 async function schedulerTick(): Promise<void> {
   await Promise.allSettled([
+    synchronizeSource('tdnet-scrape'),
     synchronizeSource('edinet'),
     synchronizeSource('edinet-db'),
-    synchronizeSource('tdnet'),
   ]);
+  await synchronizeSource('tdnet');
   const pruned = pruneExpiredNonLargeCapDisclosures();
   if (pruned > 0) {
     console.log(`企業開示DB: 取得から2日を超えた大企業以外の開示${pruned}件を削除しました。`);
@@ -191,8 +199,10 @@ async function forceDisclosureSyncSources(sources: DisclosureSource[]): Promise<
   const cleanupMessage = pruned > 0
     ? ` 大企業以外の期限切れ${pruned.toLocaleString('ja-JP')}件を削除しました。`
     : '';
-  const sourceLabel = (source: DisclosureSource) => source === 'tdnet'
-    ? 'TDNET'
+  const sourceLabel = (source: DisclosureSource) => source === 'tdnet-scrape'
+    ? 'TDスクレイピング'
+    : source === 'tdnet'
+      ? 'TDNET'
     : source === 'edinet-db'
       ? 'EDINET DB'
       : 'EDINET';
@@ -223,8 +233,12 @@ export function forceTdnetDisclosureSync(): Promise<DisclosureSyncRunResult> {
   return forceDisclosureSyncSources(['tdnet']);
 }
 
+export function forceTdnetScrapeDisclosureSync(): Promise<DisclosureSyncRunResult> {
+  return forceDisclosureSyncSources(['tdnet-scrape']);
+}
+
 export function forceDisclosureSync(): Promise<DisclosureSyncRunResult> {
-  return forceDisclosureSyncSources(['edinet', 'edinet-db', 'tdnet']);
+  return forceDisclosureSyncSources(['tdnet-scrape', 'edinet', 'edinet-db', 'tdnet']);
 }
 
 export async function refreshDisclosuresForSearch(
@@ -280,6 +294,7 @@ export function getDisclosureServiceStatus() {
   const edinet = readDisclosureSourceState('edinet');
   const edinetDb = readDisclosureSourceState('edinet-db');
   const tdnet = readDisclosureSourceState('tdnet');
+  const tdnetScrape = readDisclosureSourceState('tdnet-scrape');
   return {
     databasePath: resolveDisclosureDatabasePath(),
     ...counts,
@@ -298,6 +313,11 @@ export function getDisclosureServiceStatus() {
         configured: disclosureSourceConfigured('tdnet'),
         running: running.tdnet,
         ...tdnet,
+      },
+      tdnetScrape: {
+        configured: disclosureSourceConfigured('tdnet-scrape'),
+        running: running['tdnet-scrape'],
+        ...tdnetScrape,
       },
     },
   };

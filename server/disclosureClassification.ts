@@ -27,6 +27,6 @@ export function classifyDisclosure(
   if (/yuho|securities.report|annual[_-]?report|有価証券報告書|半期報告書|四半期報告書/.test(`${normalizedSourceType}${normalizedTitle}`)) {
     return '有報';
   }
-  if (source === 'tdnet') return '適時開示';
+  if (source === 'tdnet' || source === 'tdnet-scrape') return '適時開示';
   return 'その他';
 }

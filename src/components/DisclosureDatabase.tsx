@@ -8,6 +8,7 @@ import {
   Bot,
   Building2,
   CheckSquare,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -230,6 +231,7 @@ export function DisclosureDatabase() {
   const [noiseKeywordsText, setNoiseKeywordsText] = useState('');
   const [noiseKeywordsTitle, setNoiseKeywordsTitle] = useState('読み込み中…');
   const [savingNoiseKeywords, setSavingNoiseKeywords] = useState(false);
+  const filterDetailsRef = useRef<HTMLDetailsElement>(null);
   const columnResizeRef = useRef<{
     key: DisclosureColumnKey;
     startX: number;
@@ -316,6 +318,25 @@ export function DisclosureDatabase() {
     window.addEventListener(DISCLOSURE_COMPANY_NOTIFICATIONS_CHANGED_EVENT, handleNotificationChange);
     return () => window.removeEventListener(DISCLOSURE_COMPANY_NOTIFICATIONS_CHANGED_EVENT, handleNotificationChange);
   }, [load]);
+
+  useEffect(() => {
+    const closeFilter = (event: PointerEvent) => {
+      const details = filterDetailsRef.current;
+      if (!details?.open || details.contains(event.target as Node)) return;
+      details.open = false;
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && filterDetailsRef.current?.open) {
+        filterDetailsRef.current.open = false;
+      }
+    };
+    window.addEventListener('pointerdown', closeFilter);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', closeFilter);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -812,7 +833,7 @@ export function DisclosureDatabase() {
       return (
         <React.Fragment key={columnKey}>
           <ResizableHeader columnKey={columnKey} label="選択">
-            <button type="button" onClick={toggleAllVisible} aria-label="表示中のPDFをすべて選択">
+            <button type="button" onClick={toggleAllVisible} aria-label="表示中のPDFをすべて選択" className="flex w-full items-center justify-center">
               {allVisibleSelected
                 ? <CheckSquare className="h-4 w-4 text-emerald-300" />
                 : <Square className="h-4 w-4 text-gray-500" />}
@@ -849,13 +870,13 @@ export function DisclosureDatabase() {
     switch (columnKey) {
       case 'select':
         return (
-          <td key={columnKey} className="px-2 py-2 align-top">
+          <td key={columnKey} className="px-2 py-2 text-center align-middle">
             <input
               type="checkbox"
               checked={selectedIds.has(item.id)}
               disabled={!item.pdfAvailable}
               onChange={() => toggleSelected(item.id)}
-              className="accent-emerald-500 disabled:opacity-25"
+              className="mx-auto block accent-emerald-500 disabled:opacity-25"
               aria-label={`${item.companyName}の資料を選択`}
             />
           </td>
@@ -948,21 +969,12 @@ export function DisclosureDatabase() {
           </div>
           <button
             type="button"
-            onClick={() => void handleSync('edinet')}
-            disabled={syncingSource !== null}
-            className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-emerald-800 hover:text-emerald-200 disabled:opacity-50"
-          >
-            {syncingSource === 'edinet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingSource === 'edinet' ? '取得しています…' : 'EDINET同期'}
-          </button>
-          <button
-            type="button"
             onClick={() => void handleSync('tdnet-scrape')}
             disabled={syncingSource !== null}
             className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-blue-800 hover:text-blue-200 disabled:opacity-50"
           >
             {syncingSource === 'tdnet-scrape' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingSource === 'tdnet-scrape' ? '取得しています…' : 'TDスクレイピング'}
+            {syncingSource === 'tdnet-scrape' ? '取得しています…' : 'TD Sync'}
           </button>
           <button
             type="button"
@@ -971,7 +983,16 @@ export function DisclosureDatabase() {
             className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-blue-800 hover:text-blue-200 disabled:opacity-50"
           >
             {syncingSource === 'tdnet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            {syncingSource === 'tdnet' ? '取得しています…' : 'TDNET API同期'}
+            {syncingSource === 'tdnet' ? '取得しています…' : 'TD API'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSync('edinet')}
+            disabled={syncingSource !== null}
+            className="flex h-8 items-center gap-1.5 border border-[#343434] bg-[#121212] px-3 text-[10px] font-bold text-gray-300 hover:border-emerald-800 hover:text-emerald-200 disabled:opacity-50"
+          >
+            {syncingSource === 'edinet' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {syncingSource === 'edinet' ? '取得しています…' : 'ED API'}
           </button>
         </div>
 
@@ -1001,34 +1022,42 @@ export function DisclosureDatabase() {
               {searchSyncing ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
             </button>
           </label>
-          <label className="flex h-9 cursor-pointer items-center gap-2 border border-[#303030] bg-[#101010] px-3 text-[10px] font-bold text-blue-300">
-            <input type="checkbox" checked={tdnetEnabled} onChange={(event) => { setTdnetEnabled(event.target.checked); setPage(1); }} className="accent-blue-500" />
-            TDNET
-          </label>
-          <label className="flex h-9 cursor-pointer items-center gap-2 border border-[#303030] bg-[#101010] px-3 text-[10px] font-bold text-emerald-300">
-            <input type="checkbox" checked={edinetEnabled} onChange={(event) => { setEdinetEnabled(event.target.checked); setPage(1); }} className="accent-emerald-500" />
-            EDINET
-          </label>
-          <label
-            className="flex h-9 cursor-pointer items-center gap-2 border border-[#303030] bg-[#101010] px-3 text-[10px] font-bold text-gray-300"
-            title={noiseKeywordsTitle}
-            onContextMenu={(event) => { event.preventDefault(); void openNoiseEditor(); }}
-          >
-            <input type="checkbox" checked={excludeNoise} onChange={(event) => { setExcludeNoise(event.target.checked); setPage(1); }} className="accent-amber-500" />
-            ノイズ除去
-          </label>
-          <label className="flex h-9 cursor-pointer items-center gap-2 border border-[#303030] bg-[#101010] px-3 text-[10px] font-bold text-gray-300">
-            <input
-              type="checkbox"
-              checked={largeCapOnly}
-              onChange={(event) => {
-                setLargeCapOnly(event.target.checked);
-                setPage(1);
-              }}
-              className="accent-emerald-500"
-            />
-            大企業のみ
-          </label>
+          <details ref={filterDetailsRef} className="group relative">
+            <summary className="flex h-9 min-w-24 cursor-pointer list-none items-center gap-2 border border-[#303030] bg-[#101010] px-2 text-[10px] font-bold text-gray-300 outline-none hover:border-emerald-800 focus:border-emerald-700">
+              フィルタ
+              <ChevronDown className="ml-auto h-3.5 w-3.5 text-gray-500 transition group-open:rotate-180" />
+            </summary>
+            <div className="absolute left-0 top-full z-40 mt-1 min-w-44 border border-[#343434] bg-[#0c0c0c] p-1.5 shadow-2xl">
+              <label className="flex h-8 cursor-pointer items-center gap-2 px-2 text-[10px] font-bold text-blue-300 hover:bg-[#171717]">
+                <input type="checkbox" checked={tdnetEnabled} onChange={(event) => { setTdnetEnabled(event.target.checked); setPage(1); }} className="accent-blue-500" />
+                TDNET
+              </label>
+              <label className="flex h-8 cursor-pointer items-center gap-2 px-2 text-[10px] font-bold text-emerald-300 hover:bg-[#171717]">
+                <input type="checkbox" checked={edinetEnabled} onChange={(event) => { setEdinetEnabled(event.target.checked); setPage(1); }} className="accent-emerald-500" />
+                EDINET
+              </label>
+              <label
+                className="flex h-8 cursor-pointer items-center gap-2 px-2 text-[10px] font-bold text-gray-300 hover:bg-[#171717]"
+                title={noiseKeywordsTitle}
+                onContextMenu={(event) => { event.preventDefault(); void openNoiseEditor(); }}
+              >
+                <input type="checkbox" checked={excludeNoise} onChange={(event) => { setExcludeNoise(event.target.checked); setPage(1); }} className="accent-amber-500" />
+                ノイズ除去
+              </label>
+              <label className="flex h-8 cursor-pointer items-center gap-2 px-2 text-[10px] font-bold text-gray-300 hover:bg-[#171717]">
+                <input
+                  type="checkbox"
+                  checked={largeCapOnly}
+                  onChange={(event) => {
+                    setLargeCapOnly(event.target.checked);
+                    setPage(1);
+                  }}
+                  className="accent-emerald-500"
+                />
+                大企業のみ
+              </label>
+            </div>
+          </details>
           <select
             value={tag}
             onChange={(event) => {

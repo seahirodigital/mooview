@@ -547,6 +547,10 @@ export function DisclosureDatabase() {
     void runSummaries([item.id]);
   };
 
+  const rerunSummary = (id: number) => {
+    void runSummaries([id]);
+  };
+
   const copySummaryText = async () => {
     if (!summaryViewer?.text) return;
     try {
@@ -974,8 +978,13 @@ export function DisclosureDatabase() {
             <button
               type="button"
               onClick={() => handleRowSummary(item)}
+              onContextMenu={(event) => {
+                event.stopPropagation();
+                showContextMenu(event, item);
+              }}
               disabled={!item.pdfAvailable || summaryIds.has(item.id)}
               className="flex h-7 items-center gap-1 border border-violet-900 bg-violet-950/35 px-2 font-bold text-violet-200 hover:bg-violet-900/50 disabled:opacity-30"
+              title={item.summaryText ? '左クリックで表示・右クリックで再実行メニュー' : 'Geminiで要約'}
             >
               {summaryIds.has(item.id)
                 ? <LoaderCircle className="h-3 w-3 animate-spin" />
@@ -1274,6 +1283,17 @@ export function DisclosureDatabase() {
               </div>
               <button
                 type="button"
+                onClick={() => rerunSummary(summaryViewer.id)}
+                disabled={summaryIds.has(summaryViewer.id)}
+                className="flex h-8 shrink-0 items-center gap-1.5 border border-violet-700 bg-violet-950/50 px-2 text-[10px] font-bold text-violet-100 hover:bg-violet-900/60 disabled:cursor-wait disabled:opacity-50 md:px-3"
+              >
+                {summaryIds.has(summaryViewer.id)
+                  ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  : <RefreshCw className="h-3.5 w-3.5" />}
+                {summaryIds.has(summaryViewer.id) ? '再実行中' : '再実行'}
+              </button>
+              <button
+                type="button"
                 onClick={() => void copySummaryText()}
                 className="flex h-8 shrink-0 items-center gap-1.5 border border-violet-700 bg-violet-950/50 px-3 text-[10px] font-bold text-violet-100 hover:bg-violet-900/60"
               >
@@ -1316,7 +1336,7 @@ export function DisclosureDatabase() {
           <button type="button" role="menuitem" disabled={!contextMenu.item.buffettCodeUrl} onClick={() => { openExternal(contextMenu.item.buffettCodeUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-amber-300 hover:bg-[#2a2418] disabled:text-gray-700"><ExternalLink className="h-3.5 w-3.5" />バフェット・コード</button>
           <button type="button" role="menuitem" disabled={!contextMenu.item.documentUrl} onClick={() => { openExternal(contextMenu.item.documentUrl); setContextMenu(null); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-cyan-300 hover:bg-[#17262a] disabled:text-gray-700"><FileText className="h-3.5 w-3.5" />PDFを表示</button>
           <button type="button" role="menuitem" disabled={!contextMenu.item.downloadUrl} onClick={() => { const item = contextMenu.item; setContextMenu(null); void downloadItemsIndividually([item]); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-cyan-200 hover:bg-[#17262a] disabled:text-gray-700"><Download className="h-3.5 w-3.5" />PDFを個別ダウンロード</button>
-          <button type="button" role="menuitem" disabled={!contextMenu.item.pdfAvailable || summaryIds.has(contextMenu.item.id)} onClick={() => { const item = contextMenu.item; setContextMenu(null); handleRowSummary(item); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-violet-300 hover:bg-[#251b30] disabled:text-gray-700"><Bot className="h-3.5 w-3.5" />Gemini要約</button>
+          <button type="button" role="menuitem" disabled={!contextMenu.item.pdfAvailable || summaryIds.has(contextMenu.item.id)} onClick={() => { const item = contextMenu.item; setContextMenu(null); rerunSummary(item.id); }} className="flex h-8 w-full items-center gap-2 px-2 text-left text-violet-300 hover:bg-[#251b30] disabled:text-gray-700"><Bot className="h-3.5 w-3.5" />{contextMenu.item.summaryText ? 'Gemini要約を再実行' : 'Gemini要約'}</button>
           <div className="my-1 border-t border-[#2b2b2b]" />
           <button
             type="button"

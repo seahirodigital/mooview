@@ -84,6 +84,8 @@ import {
   createDefaultDiscordAutomationSettings,
   normalizeDiscordAutomationSettings,
   type DiscordAutomationJob,
+  type DiscordAutomationArtifact,
+  type DiscordAutomationPreparation,
   type DiscordAutomationRunRecord,
   type DiscordAutomationSelection,
   type DiscordAutomationSettings,
@@ -134,6 +136,11 @@ const CANDLES_CACHE_TTL_MS = 30_000;
 const CANDLES_CACHE_MAX_LENGTH = 180;
 const KLINE_FETCH_BATCH_LIMIT = 20;
 const KLINE_FETCH_BATCH_COOLDOWN_MS = 30_000;
+const DISCORD_AUTOMATION_KLINE_CONCURRENCY = 8;
+const DISCORD_AUTOMATION_MIN_COMPARISON_READY_RATIO = 0.6;
+// 定時通知は完全なローソク足を待ち続けない。更新開始から120秒で、画面に残る対象だけを送信する。
+const DISCORD_AUTOMATION_CHART_READY_TIMEOUT_MS = 2 * 60_000;
+const DISCORD_AUTOMATION_CHART_READY_POLL_MS = 1_000;
 const KLINE_RATE_LIMIT_RETRY_MS = 30_000;
 const WATCHLIST_QUOTE_BATCH_LIMIT = 80;
 const WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS = 30_000;
@@ -760,6 +767,23 @@ function formatClockTime(date = new Date()): string {
   return date.toLocaleTimeString('ja-JP', { hour12: false });
 }
 
+function formatDiscordAutomationJapanDateTime(value: string | null): string {
+  if (!value) return '—';
+  const source = value.startsWith('manual:') ? value.slice('manual:'.length) : value;
+  const date = new Date(source);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).format(date);
+}
+
 function formatTickerPrice(symbol: string, price: number | null | undefined): string {
   const numericPrice = Number(price);
   if (!Number.isFinite(numericPrice)) return 'N/A';
@@ -1245,8 +1269,11 @@ function getMarketFetchRank(symbol: string): number {
   return 1;
 }
 
-function orderMarketFetchSymbols(symbols: string[]): string[] {
-  const pauseUsFetch = shouldPauseUsFetchForJapanSession();
+function orderMarketFetchSymbols(
+  symbols: string[],
+  options: { includePausedMarkets?: boolean } = {},
+): string[] {
+  const pauseUsFetch = !options.includePausedMarkets && shouldPauseUsFetchForJapanSession();
   const uniqueSymbols = Array.from(new Set(symbols.map(normalizeStoredSymbolValue).filter(Boolean)));
   return uniqueSymbols
     .filter((symbol) => !(pauseUsFetch && isUsMarketSymbol(symbol)))
@@ -2267,6 +2294,8 @@ function formatCandleLookupError(symbol: string): string {
 
 export default function App() {
   // --- STATE ---
+  const isDiscordAutomationPage = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('discordAutomation');
   const csvImportInputRef = useRef<HTMLInputElement | null>(null);
   const watchlistImportModeRef = useRef<WatchlistImportMode>('new-tab');
   const candleFetchInFlightRef = useRef(false);
@@ -2274,10 +2303,16 @@ export default function App() {
   const candleFetchGenerationRef = useRef(0);
   const candleRetryTimerRef = useRef<number | null>(null);
   const forceCandleRefreshRef = useRef(false);
+  const manualCandleRefreshSequenceRef = useRef(0);
+  const manualCandleRefreshSymbolsRef = useRef<Set<string>>(new Set());
+  const manualCandleRefreshBypassMarketPauseRef = useRef(false);
   const initialVisibleChartRefreshRef = useRef(true);
   const quoteFetchInFlightRef = useRef(false);
   const quoteFetchPendingRef = useRef(false);
-  const quoteFetchManualTabQueueRef = useRef<string[]>([]);
+  const quoteFetchManualTabQueueRef = useRef<Array<{
+    tabId: string;
+    includePausedMarkets: boolean;
+  }>>([]);
   const quoteFetchAutoSweepRequestedRef = useRef(false);
   const quoteFetchAutoAttemptedTabIdsRef = useRef<Set<string>>(new Set());
   const quoteFetchLastAutoSweepAtRef = useRef(0);
@@ -2295,6 +2330,8 @@ export default function App() {
   const [appView, setAppView] = useState<AppView>(() =>
     readStoredValue('mooview_active_view', 'charts')
   );
+  const [discordAutomationTargetPanelIds, setDiscordAutomationTargetPanelIds] = useState<string[]>([]);
+  const [discordAutomationUnavailableQuoteOperands, setDiscordAutomationUnavailableQuoteOperands] = useState<string[]>([]);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [videoExportMenu, setVideoExportMenu] = useState<{ x: number; y: number } | null>(null);
   const [imageExportMenu, setImageExportMenu] = useState<{ x: number; y: number } | null>(null);
@@ -2328,9 +2365,14 @@ export default function App() {
     () => createDefaultDiscordAutomationSettings(),
   );
   const [discordAutomationRuns, setDiscordAutomationRuns] = useState<DiscordAutomationRunRecord[]>([]);
+  const [discordAutomationActiveTab, setDiscordAutomationActiveTab] = useState<'settings' | 'history'>('settings');
   const [discordAutomationLoading, setDiscordAutomationLoading] = useState(false);
   const [discordAutomationSaving, setDiscordAutomationSaving] = useState(false);
   const [discordAutomationMessage, setDiscordAutomationMessage] = useState<string | null>(null);
+  const [discordAutomationSaveFeedback, setDiscordAutomationSaveFeedback] = useState<
+    'success' | 'error' | null
+  >(null);
+  const discordAutomationSaveFeedbackTimerRef = useRef<number | null>(null);
   const [chartExportStatus, setChartExportStatus] = useState<{
     kind: 'video' | 'image';
     progress: number;
@@ -2637,6 +2679,7 @@ export default function App() {
   const [quoteFetchFailures, setQuoteFetchFailures] = useState<Record<string, string>>({});
   const [quoteFetchInFlight, setQuoteFetchInFlight] = useState(false);
   const [quoteFetchTarget, setQuoteFetchTarget] = useState<WatchlistQuoteFetchTarget | null>(null);
+  const [manualChartRefreshInFlight, setManualChartRefreshInFlight] = useState(false);
 
   // Layout presentation selection: 'grid' (automatic grid wrapping) | 'columns' (side-by-side flex) | 'rows' (stacked flex)
   const [layoutStyle, setLayoutStyle] = useState<'grid' | 'columns' | 'rows'>(() =>
@@ -2840,7 +2883,11 @@ export default function App() {
         const browserSettingsChanged = applySharedWorkspaceSettings(envelope.settings);
         sharedWorkspaceRevisionRef.current = envelope.revision;
         setSharedWorkspaceUpdatedAt(envelope.updatedAt);
-        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+        if (
+          browserSettingsChanged
+          && !isDiscordAutomationPage
+          && reloadForSharedBrowserSettings(envelope.revision)
+        ) {
           return;
         }
       }
@@ -3021,7 +3068,11 @@ export default function App() {
         setSharedWorkspaceUpdatedAt(envelope.updatedAt);
         setSharedWorkspaceError(null);
         setWorkspacePersistenceMode('shared');
-        if (browserSettingsChanged && reloadForSharedBrowserSettings(envelope.revision)) {
+        if (
+          browserSettingsChanged
+          && !isDiscordAutomationPage
+          && reloadForSharedBrowserSettings(envelope.revision)
+        ) {
           return;
         }
       } catch (error) {
@@ -3559,12 +3610,15 @@ export default function App() {
     setMoomooRealTimeActive((active) => !active);
   };
 
-  const getWatchlistTabQuoteOperands = (tab: WatchlistTab | null | undefined): string[] => {
+  const getWatchlistTabQuoteOperands = (
+    tab: WatchlistTab | null | undefined,
+    includePausedMarkets = false,
+  ): string[] => {
     return orderMarketFetchSymbols(Array.from(new Set(
       getQuoteOperandSymbolsForWatchlistSymbols(getWatchlistTabSymbols(tab))
         .map((symbol) => normalizeStoredSymbolValue(symbol))
         .filter(Boolean),
-    )));
+    )), { includePausedMarkets });
   };
 
   const requestAutoWatchlistQuoteRefresh = (force = false): boolean => {
@@ -3597,7 +3651,10 @@ export default function App() {
       && Number.isFinite(changePct);
   };
 
-  const queueWatchlistQuoteRefreshes = (tabIds: Array<string | null | undefined>) => {
+  const queueWatchlistQuoteRefreshes = (
+    tabIds: Array<string | null | undefined>,
+    options: { includePausedMarkets?: boolean } = {},
+  ) => {
     const refreshTabs: WatchlistTab[] = [];
     const seenTabIds = new Set<string>();
     tabIds.forEach((tabId) => {
@@ -3608,12 +3665,23 @@ export default function App() {
       refreshTabs.push(tab);
     });
     if (refreshTabs.length === 0) return;
+    const includePausedMarkets = options.includePausedMarkets === true;
     const retrySymbols = Array.from(new Set(
-      refreshTabs.flatMap((tab) => getWatchlistTabQuoteOperands(tab)),
+      refreshTabs.flatMap((tab) => getWatchlistTabQuoteOperands(tab, includePausedMarkets)),
     ));
+    const queuedTabRequests = new Map<string, {
+      tabId: string;
+      includePausedMarkets: boolean;
+    }>(
+      quoteFetchManualTabQueueRef.current.map((request) => [request.tabId, request] as const),
+    );
     quoteFetchManualTabQueueRef.current = [
-      ...refreshTabs.map((tab) => tab.id),
-      ...quoteFetchManualTabQueueRef.current.filter((queuedTabId) => !seenTabIds.has(queuedTabId)),
+      ...refreshTabs.map((tab) => ({
+        tabId: tab.id,
+        includePausedMarkets: includePausedMarkets
+          || queuedTabRequests.get(tab.id)?.includePausedMarkets === true,
+      })),
+      ...quoteFetchManualTabQueueRef.current.filter((request) => !seenTabIds.has(request.tabId)),
     ];
     quoteFetchAutoSweepRequestedRef.current = true;
     quoteFetchAutoAttemptedTabIdsRef.current.clear();
@@ -3638,6 +3706,28 @@ export default function App() {
 
   const queueWatchlistQuoteRefresh = (tabId: string | null | undefined) => {
     queueWatchlistQuoteRefreshes([tabId]);
+  };
+
+  const requestManualChartRefresh = (symbols: string[] = []) => {
+    manualCandleRefreshSequenceRef.current += 1;
+    symbols.forEach((rawSymbol) => {
+      const normalizedSymbol = normalizeStoredSymbolValue(rawSymbol);
+      if (normalizedSymbol) manualCandleRefreshSymbolsRef.current.add(normalizedSymbol);
+    });
+    // 手動操作は画面を空白にしないことを最優先し、米国市場の停止時間帯も取得対象にする。
+    manualCandleRefreshBypassMarketPauseRef.current = true;
+    forceCandleRefreshRef.current = true;
+    chartMissingDataRefreshRef.current = { signature: '', requestedAt: 0 };
+    setManualChartRefreshInFlight(true);
+    setMoomooStatus('connecting');
+    setMoomooError(null);
+    if (candleFetchInFlightRef.current) {
+      candleFetchPendingRef.current = true;
+    }
+    if (!moomooRealTimeActiveRef.current) {
+      setMoomooRealTimeActive(true);
+    }
+    setTickTrigger((current) => current + 1);
   };
 
   const getWatchlistTabIdsForChartSymbols = (symbols: string[]): string[] => {
@@ -3669,15 +3759,26 @@ export default function App() {
       ? activeWatchlistTabId
       : watchlistTabs[0]?.id;
     queueWatchlistQuoteRefresh(refreshTabId);
+    requestManualChartRefresh();
+  };
+
+  const handleRefreshWatchlistTabData = (tabId: string) => {
+    const tab = watchlistTabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    // タブ内の全銘柄を価格・KLineともに強制取得する。
+    queueWatchlistQuoteRefreshes([tab.id], { includePausedMarkets: true });
+    requestManualChartRefresh(getWatchlistTabSymbols(tab));
+    setWatchlistTabMenu(null);
   };
 
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     const signature = getAutoWatchlistQuoteRefreshSignature(watchlistTabs, watchlistQuoteFetchModes);
     if (watchlistAutoQuoteSignatureRef.current === signature) return;
     watchlistAutoQuoteSignatureRef.current = signature;
     if (!signature) return;
     requestAutoWatchlistQuoteRefresh(true);
-  }, [watchlistTabs, watchlistQuoteFetchModes]);
+  }, [isDiscordAutomationPage, watchlistTabs, watchlistQuoteFetchModes]);
 
   // OpenDへの接続状態はサーバー側ゲートウェイを通して確認する
   const checkMoomooStatus = async () => {
@@ -3709,15 +3810,34 @@ export default function App() {
   // 有効時はサーバー側ゲートウェイから実際のローソク足を取得する
   useEffect(() => {
     if (!moomooRealTimeActive) return;
-    const fetchGeneration = candleFetchGenerationRef.current + 1;
-    candleFetchGenerationRef.current = fetchGeneration;
+    // Discord自動通知用のヘッドレス画面では、実行ジョブが対象パネルを指定するまで
+    // 全画面のKLine取得を開始しない。選択チャートを60秒待機内に確定させるため。
+    if (isDiscordAutomationPage && discordAutomationTargetPanelIds.length === 0) return;
+    // 通常の30秒更新や価格取得完了で進行中のKLine取得を中断すると、
+    // 銘柄数の多いタブが毎回先頭からやり直しになってしまう。
+    // 現在の逐次取得を完走させ、後続要求はpendingとして1回だけ続けて実行する。
     if (candleFetchInFlightRef.current) {
       candleFetchPendingRef.current = true;
       return;
     }
+    const fetchGeneration = candleFetchGenerationRef.current + 1;
+    candleFetchGenerationRef.current = fetchGeneration;
 
     const fetchMoomooCandles = async () => {
       const now = Date.now();
+      const manualRefreshSequence = manualCandleRefreshSequenceRef.current;
+      const manualRefreshSymbols = Array.from<string>(manualCandleRefreshSymbolsRef.current);
+      const bypassMarketPauseForManualRefresh = manualCandleRefreshBypassMarketPauseRef.current;
+      const finishManualRefresh = () => {
+        if (
+          manualRefreshSequence > 0
+          && manualCandleRefreshSequenceRef.current === manualRefreshSequence
+        ) {
+          manualCandleRefreshSymbolsRef.current.clear();
+          manualCandleRefreshBypassMarketPauseRef.current = false;
+          setManualChartRefreshInFlight(false);
+        }
+      };
       const forceRefresh = forceCandleRefreshRef.current || initialVisibleChartRefreshRef.current;
       const requests = new Map<string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }>();
       const activeWatchlistSymbolSet = new Set(
@@ -3743,7 +3863,11 @@ export default function App() {
 
         getStoredSymbolOperands(rawSymbol).forEach((symbol) => {
           const normalizedSymbol = normalizeStoredSymbolValue(symbol);
-          if (shouldPauseUsFetchForJapanSession() && isUsMarketSymbol(normalizedSymbol)) return;
+          if (
+            !bypassMarketPauseForManualRefresh
+            && shouldPauseUsFetchForJapanSession()
+            && isUsMarketSymbol(normalizedSymbol)
+          ) return;
           const key = `${normalizedSymbol}-${timeframe}`;
           const existing = requests.get(key);
           const activePriority = activeWatchlistSymbolSet.has(normalizedSymbol)
@@ -3767,20 +3891,27 @@ export default function App() {
       const valueChainPriorityOffset = appView === 'charts' ? 10_000 : 0;
 
       const mobilePanelIndex = Math.max(0, Math.min(mobileActivePanelIndex, panels.length - 1));
-      const panelsToFetch = isMobileViewport
+      const panelsToFetch = isDiscordAutomationPage
+        ? panels.filter((panel) => discordAutomationTargetPanelIds.includes(panel.id))
+        : isMobileViewport
         ? appView === 'charts' && panels[mobilePanelIndex]
           ? [panels[mobilePanelIndex]]
           : []
         : panels;
 
       panelsToFetch.forEach((panel, panelIndex) => {
-        const chartSymbols = [panel.symbol, ...(panel.comparisonSymbols || [])];
+        // Discord実行でも、通知対象パネルの比較銘柄を含めて取得する。
+        // 主系列だけでは比較チャートが枠・グリッドのみになり、通知画像が実画面と一致しない。
+        const chartSymbols = panel.comparisonOnly
+          ? [...(panel.comparisonSymbols || [])]
+          : [panel.symbol, ...(panel.comparisonSymbols || [])];
         const panelPriorityBase = panelPriorityOffset + panelIndex * 10;
         chartSymbols.forEach((symbol, symbolIndex) => {
           // スマホは主銘柄を比較銘柄より先に描画できるよう、最優先で取得する。
           const symbolPriority = panelPriorityBase
             + (isMobileViewport && symbolIndex === 0 ? -2_000 : symbolIndex);
           addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriority);
+          if (isDiscordAutomationPage) return;
           const displayRangeTimeframe = getDisplayRangeSeedTimeframe(panel.displayRange);
           if (displayRangeTimeframe && displayRangeTimeframe !== DAY_RANGE_OVERVIEW_TIMEFRAME) {
             addCandleRequest(symbol, displayRangeTimeframe, symbolPriority + 1);
@@ -3788,7 +3919,11 @@ export default function App() {
           addCandleRequest(symbol, panel.timeframe, symbolPriority + 2);
         });
       });
-      if (!isMobileViewport || appView !== 'charts') {
+      // タブ右クリックから要求された全銘柄は、現在の表示パネルの取得後に順番にKLineを取得する。
+      manualRefreshSymbols.forEach((symbol, symbolIndex) => {
+        addCandleRequest(symbol, DAY_RANGE_OVERVIEW_TIMEFRAME, 20_000 + symbolIndex);
+      });
+      if (!isDiscordAutomationPage && (!isMobileViewport || appView !== 'charts')) {
         valueChainChartSymbols.forEach((chartSymbol, symbolIndex) => {
           const symbolPriorityBase = valueChainPriorityOffset + symbolIndex * 10;
           addCandleRequest(chartSymbol, DAY_RANGE_OVERVIEW_TIMEFRAME, symbolPriorityBase);
@@ -3815,8 +3950,11 @@ export default function App() {
       );
 
       if (requestsToFetch.length === 0) {
-        forceCandleRefreshRef.current = false;
-        initialVisibleChartRefreshRef.current = false;
+        if (manualCandleRefreshSequenceRef.current === manualRefreshSequence) {
+          forceCandleRefreshRef.current = false;
+          initialVisibleChartRefreshRef.current = false;
+          finishManualRefresh();
+        }
         setMoomooStatus('connected');
         setMoomooError(null);
         return;
@@ -3851,9 +3989,15 @@ export default function App() {
         }
         klineRequestCount += 1;
       };
-      const fetchCandlesForSymbol = async (symbol: string, timeframe: Timeframe) => {
+      const fetchCandlesForSymbol = async (
+        symbol: string,
+        timeframe: Timeframe,
+        skipBatchSlotWait = false,
+      ) => {
         const requestCandles = async () => {
-          await waitForKlineSlot();
+          if (!skipBatchSlotWait) {
+            await waitForKlineSlot();
+          }
           const { response, data } = await fetchJsonWithTimeout('/api/moomoo/kline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3910,45 +4054,84 @@ export default function App() {
         return null;
       };
 
-      try {
-        for (const [key, request] of requestsToFetch) {
-          if (
-            !moomooRealTimeActiveRef.current
-            || candleFetchGenerationRef.current !== fetchGeneration
-          ) break;
-          try {
-            const directResult = await fetchCandlesForSymbol(request.symbol, request.timeframe);
-            if (directResult.candles.length > 0) {
+      const processCandleRequest = async (
+        [key, request]: [string, { symbol: string; timeframe: Timeframe; lookupQueries: string[]; priority: number }],
+        skipBatchSlotWait = false,
+      ) => {
+        if (
+          !moomooRealTimeActiveRef.current
+          || candleFetchGenerationRef.current !== fetchGeneration
+        ) return;
+        try {
+          const directResult = await fetchCandlesForSymbol(
+            request.symbol,
+            request.timeframe,
+            skipBatchSlotWait,
+          );
+          if (directResult.candles.length > 0) {
+            successfulKeys.add(key);
+            commitFetchedCandles({ [key]: directResult.candles });
+            return;
+          }
+
+          let shouldRetryKey = directResult.retryable;
+          const fallbackSymbol = await findFallbackSymbol(request);
+          if (fallbackSymbol) {
+            const fallbackResult = await fetchCandlesForSymbol(
+              fallbackSymbol,
+              request.timeframe,
+              skipBatchSlotWait,
+            );
+            if (fallbackResult.candles.length > 0) {
+              const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
               successfulKeys.add(key);
-              commitFetchedCandles({ [key]: directResult.candles });
-              continue;
+              successfulKeys.add(fallbackKey);
+              commitFetchedCandles({
+                [key]: fallbackResult.candles,
+                [fallbackKey]: fallbackResult.candles,
+              });
+              return;
             }
+            shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
+          }
 
-            let shouldRetryKey = directResult.retryable;
-            const fallbackSymbol = await findFallbackSymbol(request);
-            if (fallbackSymbol) {
-              const fallbackResult = await fetchCandlesForSymbol(fallbackSymbol, request.timeframe);
-              if (fallbackResult.candles.length > 0) {
-                const fallbackKey = `${fallbackSymbol}-${request.timeframe}`;
-                successfulKeys.add(key);
-                successfulKeys.add(fallbackKey);
-                commitFetchedCandles({
-                  [key]: fallbackResult.candles,
-                  [fallbackKey]: fallbackResult.candles,
-                });
-                continue;
-              }
-              shouldRetryKey = shouldRetryKey || fallbackResult.retryable;
+          const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+          failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
+          if (shouldRetryKey) retryableFailedKeys.add(key);
+          firstError ||= failedErrors[key];
+        } catch (error) {
+          const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
+          failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
+          firstError ||= failedErrors[key];
+        }
+      };
+
+      try {
+        if (isDiscordAutomationPage) {
+          // 選択した比較チャートだけを、20件ごとのAPI上限を守りつつ4並列で取得する。
+          // 通常画面は従来どおり逐次取得のままにして、利用中の表示挙動を変えない。
+          for (let offset = 0; offset < requestsToFetch.length; offset += KLINE_FETCH_BATCH_LIMIT) {
+            const batch = requestsToFetch.slice(offset, offset + KLINE_FETCH_BATCH_LIMIT);
+            let nextIndex = 0;
+            await Promise.all(Array.from(
+              { length: Math.min(DISCORD_AUTOMATION_KLINE_CONCURRENCY, batch.length) },
+              async () => {
+                while (nextIndex < batch.length) {
+                  const request = batch[nextIndex];
+                  nextIndex += 1;
+                  await processCandleRequest(request, true);
+                }
+              },
+            ));
+            if (offset + KLINE_FETCH_BATCH_LIMIT < requestsToFetch.length) {
+              setMoomooStatus('connecting');
+              setMoomooError(`KLine制限待機中: ${Math.ceil(KLINE_FETCH_BATCH_COOLDOWN_MS / 1000)}秒後に次の${KLINE_FETCH_BATCH_LIMIT}件を取得します。`);
+              await sleep(KLINE_FETCH_BATCH_COOLDOWN_MS);
             }
-
-            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
-            failedErrors[key] = directResult.error ? `${message}（${directResult.error}）` : message;
-            if (shouldRetryKey) retryableFailedKeys.add(key);
-            firstError ||= failedErrors[key];
-          } catch (error) {
-            const message = formatCandleLookupError(request.lookupQueries[0] || request.symbol);
-            failedErrors[key] = `${message}（${error instanceof Error ? error.message : String(error)}）`;
-            firstError ||= failedErrors[key];
+          }
+        } else {
+          for (const request of requestsToFetch) {
+            await processCandleRequest(request);
           }
         }
 
@@ -3988,18 +4171,22 @@ export default function App() {
         const shouldRefetch = candleFetchPendingRef.current
           || candleFetchGenerationRef.current !== fetchGeneration;
         candleFetchPendingRef.current = false;
-        forceCandleRefreshRef.current = false;
-        initialVisibleChartRefreshRef.current = false;
         if (shouldRefetch) {
           setTickTrigger((current) => current + 1);
+        } else if (manualCandleRefreshSequenceRef.current === manualRefreshSequence) {
+          // 取得途中の再クリックで入った新しい強制更新要求を消さない。
+          forceCandleRefreshRef.current = false;
+          initialVisibleChartRefreshRef.current = false;
+          finishManualRefresh();
         }
       }
     };
 
     fetchMoomooCandles();
-  }, [activeWatchlistTabId, appView, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, appView, discordAutomationTargetPanelIds, isDiscordAutomationPage, isMobileViewport, mobileActivePanelIndex, panels, valueChainChartState.displayRange, valueChainChartState.timeframe, valueChainChartSymbols, moomooRealTimeActive, tickTrigger]);
 
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     if (!moomooRealTimeActive) {
       quoteFetchManualTabQueueRef.current = [];
       quoteFetchAutoSweepRequestedRef.current = false;
@@ -4022,10 +4209,11 @@ export default function App() {
       source: WatchlistQuoteFetchSource;
     } | null => {
       while (quoteFetchManualTabQueueRef.current.length > 0) {
-        const tabId = quoteFetchManualTabQueueRef.current.shift();
-        const tab = watchlistTabs.find((item) => item.id === tabId);
+        const queuedRequest = quoteFetchManualTabQueueRef.current.shift();
+        if (!queuedRequest) continue;
+        const tab = watchlistTabs.find((item) => item.id === queuedRequest.tabId);
         if (!tab) continue;
-        const symbols = getWatchlistTabQuoteOperands(tab);
+        const symbols = getWatchlistTabQuoteOperands(tab, queuedRequest.includePausedMarkets);
         if (symbols.length === 0) continue;
         return { tab, symbols, source: 'manual' };
       }
@@ -4212,11 +4400,12 @@ export default function App() {
     };
 
     fetchMoomooQuotes();
-  }, [activeWatchlistTabId, watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger]);
+  }, [activeWatchlistTabId, watchlistTabs, watchlistQuoteFetchModes, quoteCache, moomooRealTimeActive, tickTrigger, isDiscordAutomationPage]);
 
   // --- REAL-TIME DATA SIMULATOR IN BACKGROUND ---
   // Periodically triggers updates. Mutates simulated candles only when moomoo API is disabled
   useEffect(() => {
+    if (isDiscordAutomationPage) return;
     const interval = setInterval(() => {
       setTickTrigger(prev => prev + 1);
       setNetworkLatency(moomooRealTimeActive ? 12 : Math.floor(15 + Math.random() * 20));
@@ -4266,7 +4455,7 @@ export default function App() {
     }, 3500);
 
     return () => clearInterval(interval);
-  }, [panels, moomooRealTimeActive, watchlistTabs, watchlistQuoteFetchModes]);
+  }, [panels, moomooRealTimeActive, watchlistTabs, watchlistQuoteFetchModes, isDiscordAutomationPage]);
 
   // --- HISTORICAL CANDLE GENERATOR RESOLVER ---
   // デモモードでのみ疑似ローソク足を生成する
@@ -6472,6 +6661,10 @@ export default function App() {
       };
     }
 
+    if (isDiscordAutomationPage && discordAutomationUnavailableQuoteOperands.includes(symbol)) {
+      return null;
+    }
+
     const ticker = tickerStatsBySymbol.get(symbol);
     const tickerPrice = Number(ticker?.currentPrice);
     const tickerChangePct = Number(ticker?.computedChange);
@@ -6603,6 +6796,10 @@ export default function App() {
 
   useEffect(() => {
     if (!moomooRealTimeActive) return;
+    // Discord自動通知は選択パネルだけを一度の取得世代で完走させる。
+    // 通常画面用の全パネル不足データ補完が並行すると、tickTriggerが更新されて
+    // 比較式・バスケットのKLine取得が途中でキャンセルされてしまう。
+    if (isDiscordAutomationPage) return;
 
     const missingRequests: string[] = [];
     const missingSymbols = new Set<string>();
@@ -6656,6 +6853,7 @@ export default function App() {
     candlesCache,
     quoteCache,
     moomooRealTimeActive,
+    isDiscordAutomationPage,
     watchlistTabs,
     activeWatchlistTabId,
   ]);
@@ -7212,17 +7410,212 @@ export default function App() {
     }
   };
 
-  const refreshChartsForDiscordAutomation = () => {
-    // 画面の更新操作と同じく、ローソク足・ウォッチリスト価格を強制再取得する。
-    forceCandleRefreshRef.current = true;
-    if (candleFetchInFlightRef.current) {
-      candleFetchPendingRef.current = true;
+  const refreshChartsForDiscordAutomation = async (targetPanelIds: string[]) => {
+    // 状態更新だけに任せると、ヘッドレス実行では対象確定前のuseEffectが空振りすることがある。
+    // 画面の更新と同じ強制KLineキューへ対象銘柄を直接積み、取得開始を確認してから待機へ進む。
+    const normalizedPanelIds = Array.from(new Set(targetPanelIds));
+    const fetchGenerationBeforeRefresh = candleFetchGenerationRef.current;
+    setDiscordAutomationTargetPanelIds(normalizedPanelIds);
+    requestManualChartRefresh(getDiscordAutomationDailyQuoteOperands(normalizedPanelIds));
+
+    const deadline = Date.now() + 15_000;
+    while (
+      candleFetchGenerationRef.current <= fetchGenerationBeforeRefresh
+      && !candleFetchInFlightRef.current
+      && Date.now() < deadline
+    ) {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await sleep(50);
     }
-    if (!moomooRealTimeActiveRef.current) {
-      setMoomooRealTimeActive(true);
+    if (
+      candleFetchGenerationRef.current <= fetchGenerationBeforeRefresh
+      && !candleFetchInFlightRef.current
+    ) {
+      // データ元が一時的に応答しなくても、画面に残る数値ラベルを使って定時通知を続ける。
+      console.warn('Discord自動通知のローソク足取得開始を確認できませんでした。120秒後に表示済み対象だけを送信します。');
     }
-    requestAutoWatchlistQuoteRefresh(true);
-    setTickTrigger((current) => current + 1);
+  };
+
+  const getDiscordAutomationDailyQuoteOperands = (panelIds: string[]): string[] => {
+    const selectedPanelIds = new Set(panelIds);
+    const operands = new Set<string>();
+    const visitedBasketIds = new Set<string>();
+
+    const addQuoteOperands = (rawSymbol: string) => {
+      const symbol = normalizeStoredSymbolValue(rawSymbol);
+      if (!symbol) return;
+      if (symbol.startsWith('BASKET:')) {
+        const sectionId = symbol.slice(7);
+        if (visitedBasketIds.has(sectionId)) return;
+        visitedBasketIds.add(sectionId);
+        const section = watchlistTabs
+          .flatMap((tab) => tab.sections)
+          .find((candidate) => candidate.id === sectionId);
+        if (!section) {
+          console.warn(`Discord自動通知では存在しないバスケット「${sectionId}」を除外します。`);
+          return;
+        }
+        section.symbols.forEach(addQuoteOperands);
+        return;
+      }
+      getStoredSymbolOperands(symbol).forEach((operand) => {
+        const normalizedOperand = normalizeTickerSymbolForStorage(operand);
+        if (normalizedOperand) operands.add(normalizedOperand);
+      });
+    };
+
+    panels
+      .filter((panel) => selectedPanelIds.has(panel.id) && panel.displayRange === 'd')
+      .forEach((panel) => {
+        if (!panel.comparisonOnly) addQuoteOperands(panel.symbol);
+        (panel.comparisonSymbols || []).forEach(addQuoteOperands);
+      });
+
+    return orderMarketFetchSymbols(Array.from(operands));
+  };
+
+  const refreshDiscordAutomationDailyQuotes = async (symbols: string[]): Promise<Set<string>> => {
+    if (symbols.length === 0) {
+      setDiscordAutomationUnavailableQuoteOperands([]);
+      return new Set<string>();
+    }
+    const updatedQuotes: Record<string, MoomooTickerQuote | null> = {};
+    const failedQuotes: string[] = [];
+    const failedQuoteOperands = new Set<string>();
+
+    const requestQuoteBatch = async (
+      quoteSymbols: string[],
+      retryAllowed = true,
+    ): Promise<Record<string, MoomooBatchQuoteResult>> => {
+      const { response, data } = await fetchJsonWithTimeout('/api/moomoo/quotes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols: quoteSymbols }),
+      }, 90_000);
+      const errorMessage = data.error ? String(data.error) : response.ok ? '' : `HTTP ${response.status}`;
+      if (!response.ok || !data.success || !data.quotes) {
+        if (retryAllowed && (response.status === 429 || isMoomooRateLimitMessage(errorMessage))) {
+          await sleep(WATCHLIST_QUOTE_RATE_LIMIT_RETRY_MS);
+          return requestQuoteBatch(quoteSymbols, false);
+        }
+        throw new Error(errorMessage || 'Discord自動通知に必要な1D価格を取得できませんでした。');
+      }
+      return data.quotes as Record<string, MoomooBatchQuoteResult>;
+    };
+
+    for (const quoteBatch of chunkArray(symbols, WATCHLIST_QUOTE_BATCH_LIMIT)) {
+      const batchQuotes = await requestQuoteBatch(quoteBatch);
+      const returnedSymbols = new Set<string>();
+      Object.entries(batchQuotes).forEach(([quoteKey, quote]) => {
+        const symbol = normalizeTickerSymbolForStorage(String(quote.symbol || quoteKey || ''));
+        if (!symbol) return;
+        returnedSymbols.add(symbol);
+        const price = Number(quote.price);
+        const changePct = Number(quote.changePct);
+        if (quote.success && Number.isFinite(price) && price > 0 && Number.isFinite(changePct)) {
+          updatedQuotes[symbol] = {
+            name: quote.name || symbol,
+            price,
+            changePct,
+            marketCap: Number.isFinite(Number(quote.marketCap)) && Number(quote.marketCap) > 0
+              ? Number(quote.marketCap)
+              : undefined,
+          };
+          return;
+        }
+        updatedQuotes[symbol] = null;
+        failedQuoteOperands.add(symbol);
+        failedQuotes.push(`${symbol}: ${quote.error || '現在値または日次騰落率が不正です。'}`);
+      });
+      quoteBatch.forEach((symbol) => {
+        if (returnedSymbols.has(symbol)) return;
+        updatedQuotes[symbol] = null;
+        failedQuoteOperands.add(symbol);
+        failedQuotes.push(`${symbol}: 価格応答に含まれていません。`);
+      });
+    }
+
+    setQuoteCache((currentQuotes) => ({ ...currentQuotes, ...updatedQuotes }));
+    setDiscordAutomationUnavailableQuoteOperands(Array.from(failedQuoteOperands));
+    if (failedQuotes.length > 0) {
+      console.warn(
+        `Discord自動通知では取得不能な比較銘柄を除外します。${failedQuotes.slice(0, 8).join(' / ')}`,
+      );
+    }
+    return failedQuoteOperands;
+  };
+
+  const assertDiscordAutomationPrimaryQuotesAvailable = (
+    panelIds: string[],
+    failedQuoteOperands: Set<string>,
+  ) => {
+    const selectedPanelIds = new Set(panelIds);
+    const failedPrimarySymbols = panels
+      .filter((panel) => selectedPanelIds.has(panel.id) && !panel.comparisonOnly && panel.displayRange === 'd')
+      .map((panel) => normalizeStoredSymbolValue(panel.symbol))
+      .filter((symbol) => symbol && !symbol.startsWith('BASKET:'))
+      .filter((symbol) => getStoredSymbolOperands(symbol).some((operand) => (
+        failedQuoteOperands.has(normalizeTickerSymbolForStorage(operand))
+      )));
+    if (failedPrimarySymbols.length > 0) {
+      // 一部銘柄の当日株価が取れなくても、表示済みの数値・チャートを通知に使う。
+      // ここで例外にすると、ほかの取得済みチャートまでDiscord通知されなくなる。
+      console.warn(
+        `Discord自動通知では主要系列の未取得分を除外して続行します。${failedPrimarySymbols.join(' / ')}`,
+      );
+    }
+  };
+
+  const waitForDiscordAutomationCharts = async (
+    panelIds: string[],
+    deadline = Date.now() + DISCORD_AUTOMATION_CHART_READY_TIMEOUT_MS,
+  ): Promise<string[]> => {
+    let pendingDetails: string[] = [];
+    while (Date.now() < deadline) {
+      const panelElements = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'),
+      );
+      pendingDetails = panelIds.flatMap((panelId) => {
+        const panelElement = panelElements.find(
+          (element) => element.dataset.chartExportPanelId === panelId,
+        );
+        if (!panelElement) return [`${panelId}: パネルなし`];
+        const reasons: string[] = [];
+        if (panelElement.dataset.chartCandleDataReady !== 'true') reasons.push('ローソク足未取得');
+        if (panelElement.dataset.chartDailyChangeReady !== 'true') reasons.push('日次騰落率未取得');
+        return reasons.length > 0 ? [`${panelId}: ${reasons.join('・')}`] : [];
+      });
+      if (pendingDetails.length === 0) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        return panelIds;
+      }
+      await sleep(DISCORD_AUTOMATION_CHART_READY_POLL_MS);
+    }
+    const panelElements = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'),
+    );
+    // 120秒時点でローソク足が未完でも、画面上にカードと見出しがあればキャプチャ対象にする。
+    // 個別株は価格ラベルだけでもGeminiとDiscordに渡せるため、完全描画を通知の必須条件にしない。
+    const availablePanelIds = panelIds.filter((panelId) => {
+      const panelElement = panelElements.find(
+        (element) => element.dataset.chartExportPanelId === panelId,
+      );
+      const header = panelElement?.querySelector<HTMLElement>('[data-chart-export-panel-header="true"]');
+      if (!panelElement || !header) return false;
+      const panelRect = panelElement.getBoundingClientRect();
+      const headerRect = header.getBoundingClientRect();
+      return panelRect.width > 0 && panelRect.height > 0 && headerRect.width > 0 && headerRect.height > 0;
+    });
+    if (availablePanelIds.length > 0) {
+      console.warn(
+        `Discord自動通知は更新開始から120秒で待機を終了し、表示済み${availablePanelIds.length}件だけで続行します。${pendingDetails.join(' / ')}`,
+      );
+      return availablePanelIds;
+    }
+    throw new Error(
+      `Discord自動通知のチャートデータを取得できませんでした。${pendingDetails.join(' / ')}`,
+    );
   };
 
   const fileToDiscordAutomationArtifact = async (file: File) => {
@@ -7239,58 +7632,207 @@ export default function App() {
     };
   };
 
-  const runDiscordAutomationInBrowser = async (job: DiscordAutomationJob) => {
+  const resolveDiscordAutomationPanelIds = (job: DiscordAutomationJob) => {
+    const resolveSelection = (selection: DiscordAutomationSelection) => {
+      if (selection.mode === 'all') return panels.map((panel) => panel.id);
+
+      const availablePanelIds = new Set(panels.map((panel) => panel.id));
+      const resolvedPanelIds: string[] = [];
+      const addPanelId = (panelId: string | undefined) => {
+        if (panelId && availablePanelIds.has(panelId) && !resolvedPanelIds.includes(panelId)) {
+          resolvedPanelIds.push(panelId);
+        }
+      };
+
+      // まず従来どおりIDで解決する。IDが変わった場合は、保存時の銘柄・名前・表示順で復元する。
+      selection.panelIds.forEach((panelId, selectionIndex) => {
+        addPanelId(panelId);
+        if (availablePanelIds.has(panelId)) return;
+        // 旧サーバーが保存した設定にはpanelRefsが存在しない。IDだけの設定でも例外にせず、
+        // 下の表示順フォールバックで通知を継続する。
+        const panelRefs = selection.panelRefs ?? [];
+        const reference = panelRefs.find((candidate) => candidate.panelId === panelId)
+          ?? panelRefs[selectionIndex];
+        if (!reference) return;
+        const symbol = normalizeStoredSymbolValue(reference.symbol);
+        const matchedPanel = panels.find((panel) => (
+          !resolvedPanelIds.includes(panel.id)
+          && ((symbol && normalizeStoredSymbolValue(panel.symbol) === symbol)
+            || (reference.name && panel.name === reference.name))
+        )) ?? panels[reference.index];
+        addPanelId(matchedPanel?.id);
+      });
+
+      // 旧形式（IDのみ）の設定は旧IDを復元不能なため、同じ枚数だけ現在の表示順で補完する。
+      // 通知停止を防ぎつつ、次回の保存時に銘柄・表示順付きの設定へ更新される。
+      const requestedCount = Math.min(12, selection.panelIds.length);
+      if (requestedCount > 0 && resolvedPanelIds.length < requestedCount) {
+        panels.forEach((panel) => {
+          if (resolvedPanelIds.length < requestedCount) addPanelId(panel.id);
+        });
+      }
+      return resolvedPanelIds;
+    };
+    const imagePanelIds = resolveSelection(job.imageSelection);
+    const videoPanelIds = resolveSelection(job.videoSelection);
+    if (imagePanelIds.length === 0 && videoPanelIds.length === 0) {
+      throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
+    }
+    return {
+      imagePanelIds,
+      videoPanelIds,
+      targetPanelIds: Array.from(new Set([...imagePanelIds, ...videoPanelIds])),
+    };
+  };
+
+  const refreshDiscordAutomationChartsInBrowser = async (job: DiscordAutomationJob) => {
     if (chartExportStatus || chartAiStatus) {
       throw new Error('別のチャート出力またはAI分析が実行中です。');
     }
-    const resolveAutomationPanelIds = (selection: DiscordAutomationSelection) => resolveChartExportPanelIds(
-      {
-        mode: selection.mode,
-        firstCount: 1,
-        panelIds: selection.panelIds,
-      },
-      panels.map((panel) => panel.id),
-    );
-    const imagePanelIds = resolveAutomationPanelIds(job.imageSelection);
-    const videoPanelIds = resolveAutomationPanelIds(job.videoSelection);
-    if (imagePanelIds.length === 0 || videoPanelIds.length === 0) {
-      throw new Error('Discord自動通知の画像または動画の対象チャートを1つ以上選択してください。');
+    const { targetPanelIds } = resolveDiscordAutomationPanelIds(job);
+    setChartAiStatus({ stage: 'capturing', progress: 0 });
+    setChartExportError(null);
+    try {
+      const chartDeadline = Date.now() + DISCORD_AUTOMATION_CHART_READY_TIMEOUT_MS;
+      // 更新開始から120秒を上限にする。日次株価の通信は通知の待機時間を延長させない。
+      await refreshChartsForDiscordAutomation(targetPanelIds);
+      void refreshDiscordAutomationDailyQuotes(
+        getDiscordAutomationDailyQuoteOperands(targetPanelIds),
+      ).then((failedQuoteOperands) => {
+        assertDiscordAutomationPrimaryQuotesAvailable(targetPanelIds, failedQuoteOperands);
+      }).catch((error) => {
+        console.warn('Discord自動通知の日次株価更新に失敗しました。表示済み対象だけで続行します。', error);
+      });
+      await waitForDiscordAutomationCharts(targetPanelIds, chartDeadline);
+    } finally {
+      setChartAiStatus(null);
+      setChartExportStatus(null);
+      setChartExportPlayback(null);
     }
-    if (!job.prompt.trim()) {
-      throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
+  };
+
+  const prepareDiscordAutomationInBrowser = async (
+    job: DiscordAutomationJob,
+  ): Promise<DiscordAutomationPreparation> => {
+    if (chartExportStatus || chartAiStatus) {
+      throw new Error('別のチャート出力またはAI分析が実行中です。');
+    }
+    const {
+      imagePanelIds: requestedImagePanelIds,
+      videoPanelIds: requestedVideoPanelIds,
+      targetPanelIds,
+    } = resolveDiscordAutomationPanelIds(job);
+    // Discord自動通知も「AI分析の設定」のプロンプトを一字も変更せず使用する。
+    const prompt = chartAiPrompt;
+    const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
+    if (!prompt.trim()) {
+      throw new Error('AI分析の設定にGeminiプロンプトを入力してください。');
     }
 
     setChartAiStatus({ stage: 'capturing', progress: 0 });
     setChartExportError(null);
     try {
-      // 最新チャートを確定させるため、必ず更新処理を開始してから60秒待機する。
-      refreshChartsForDiscordAutomation();
-      await sleep(60_000);
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      const chartDeadline = Date.now() + DISCORD_AUTOMATION_CHART_READY_TIMEOUT_MS;
+      // 日次株価の取得失敗や遅延では止めず、更新開始から120秒で表示済み対象を確定する。
+      await refreshChartsForDiscordAutomation(targetPanelIds);
+      void refreshDiscordAutomationDailyQuotes(
+        getDiscordAutomationDailyQuoteOperands(targetPanelIds),
+      ).then((failedQuoteOperands) => {
+        assertDiscordAutomationPrimaryQuotesAvailable(targetPanelIds, failedQuoteOperands);
+      }).catch((error) => {
+        console.warn('Discord自動通知の日次株価更新に失敗しました。表示済み対象だけで続行します。', error);
+      });
+      const readyPanelIds = new Set(await waitForDiscordAutomationCharts(targetPanelIds, chartDeadline));
+      const readyImagePanelIds = requestedImagePanelIds.filter((panelId) => readyPanelIds.has(panelId));
+      const readyVideoPanelIds = requestedVideoPanelIds.filter((panelId) => readyPanelIds.has(panelId));
+      if (readyImagePanelIds.length === 0 && readyVideoPanelIds.length === 0) {
+        throw new Error('Discord自動通知に使用できるチャートがありません。');
+      }
 
-      const imageFiles = await exportChartImage(
+      const collectFullyRenderedPanelIds = (requestedPanelIds: string[]) => {
+        const panelsById = new Map(
+          Array.from(document.querySelectorAll<HTMLElement>('[data-chart-export-panel-id]'))
+            .map((element) => [element.dataset.chartExportPanelId, element] as const),
+        );
+        return requestedPanelIds.filter((panelId) => {
+          const panelElement = panelsById.get(panelId);
+          const header = panelElement?.querySelector<HTMLElement>('[data-chart-export-panel-header="true"]');
+          if (!panelElement || !header) return false;
+          const panelRect = panelElement.getBoundingClientRect();
+          const headerRect = header.getBoundingClientRect();
+          // 数値ラベルが見えている段階でも通知を止めない。スクリーンショットはカード全体を取得する。
+          return panelRect.width > 0 && panelRect.height > 0 && headerRect.width > 0 && headerRect.height > 0;
+        });
+      };
+      const waitForFullyRenderedPanelIds = async (requestedPanelIds: string[]) => {
+        // 比較銘柄が多いチャートでは、データ準備完了後にも描画が続く場合がある。
+        // 枠だけの画像を送るより、全選択パネルで比較線が十分に描画されるまで待つ。
+        // 定時通知は完全描画を待ち続けず、30秒で取得済みのチャートだけを送る。
+        const deadline = Date.now() + 30_000;
+        let renderedPanelIds = collectFullyRenderedPanelIds(requestedPanelIds);
+        while (renderedPanelIds.length < requestedPanelIds.length && Date.now() < deadline) {
+          await sleep(1_000);
+          renderedPanelIds = collectFullyRenderedPanelIds(requestedPanelIds);
+        }
+        return renderedPanelIds;
+      };
+      const [imagePanelIds, videoPanelIds] = await Promise.all([
+        waitForFullyRenderedPanelIds(readyImagePanelIds),
+        waitForFullyRenderedPanelIds(readyVideoPanelIds),
+      ]);
+      if (imagePanelIds.length === 0 && videoPanelIds.length === 0) {
+        throw new Error('Discord自動通知に使用できる描画済みチャートがありません。');
+      }
+      return {
+        prompt,
+        model,
         imagePanelIds,
-        (progress) => setChartAiStatus({ stage: 'capturing', progress }),
-        { download: false },
-      );
-      setChartAiStatus({ stage: 'requesting', progress: 1 });
-      const aiResult = await requestChartAiAnalysis(job.prompt, imageFiles, job.model);
+        videoPanelIds,
+        sendImagesToGemini: job.sendImagesToGemini,
+        sendVideosToGemini: job.sendVideosToGemini,
+        videoDurationSeconds: job.videoDurationSeconds,
+        videoFrameRate: job.videoFrameRate,
+        videoResolutionId: job.videoResolutionId,
+      };
+    } catch (error) {
+      setChartAiStatus(null);
+      setChartExportStatus(null);
+      setChartExportPlayback(null);
+      throw error;
+    }
+  };
 
+  const completeDiscordAutomationInBrowser = async (
+    preparation: DiscordAutomationPreparation,
+    screenshots: DiscordAutomationArtifact[],
+  ) => {
+    if (screenshots.length !== preparation.imagePanelIds.length) {
+      throw new Error('Discord添付用のチャート画像を取得できませんでした。');
+    }
+    const imageFiles = screenshots.map((artifact) => {
+      const binary = window.atob(artifact.base64);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      return new File([bytes], artifact.name, {
+        type: artifact.mimeType || 'image/png',
+        lastModified: Date.now(),
+      });
+    });
+
+    try {
       const resolution = CHART_EXPORT_RESOLUTIONS.find(
-        (candidate) => candidate.id === job.videoResolutionId,
+        (candidate) => candidate.id === preparation.videoResolutionId,
       ) ?? CHART_EXPORT_RESOLUTIONS[0];
       const videoFiles: File[] = [];
-      setChartAiStatus(null);
       setChartExportStatus({ kind: 'video', progress: 0 });
-      for (let index = 0; index < videoPanelIds.length; index += 1) {
-        const panelId = videoPanelIds[index];
+      for (let index = 0; index < preparation.videoPanelIds.length; index += 1) {
+        const panelId = preparation.videoPanelIds[index];
         const panelNumber = panels.findIndex((panel) => panel.id === panelId) + 1;
         const videoFile = await exportChartVideo({
           width: resolution.width,
           height: resolution.height,
           panelIds: [panelId],
-          durationSeconds: job.videoDurationSeconds,
-          frameRate: job.videoFrameRate,
+          durationSeconds: preparation.videoDurationSeconds,
+          frameRate: preparation.videoFrameRate,
           fileNumber: panelNumber > 0 ? panelNumber : index + 1,
           download: false,
           beforeFrame: async (progress) => {
@@ -7299,17 +7841,31 @@ export default function App() {
           },
           onProgress: (progress) => setChartExportStatus({
             kind: 'video',
-            progress: (index + progress) / videoPanelIds.length,
+            progress: (index + progress) / preparation.videoPanelIds.length,
           }),
         });
         videoFiles.push(videoFile);
       }
-
+      const geminiMediaFiles = [
+        ...(preparation.sendImagesToGemini ? imageFiles : []),
+        ...(preparation.sendVideosToGemini ? videoFiles : []),
+      ];
+      if (geminiMediaFiles.length === 0) {
+        throw new Error('Geminiへ送付する画像または動画をONにしてください。');
+      }
+      // ONにした添付種別だけをGeminiへ渡し、Discordには常に選択済み動画→画像を添付する。
+      setChartExportStatus(null);
+      setChartAiStatus({ stage: 'requesting', progress: 1 });
+      const aiResult = await requestChartAiAnalysis(
+        preparation.prompt,
+        geminiMediaFiles,
+        preparation.model,
+      );
       return {
         text: aiResult.text,
         model: aiResult.model,
         videos: await Promise.all(videoFiles.map(fileToDiscordAutomationArtifact)),
-        images: await Promise.all(imageFiles.map(fileToDiscordAutomationArtifact)),
+        images: screenshots,
       };
     } finally {
       setChartAiStatus(null);
@@ -7319,12 +7875,18 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (workspacePersistenceMode === 'checking') {
+    const renderedPanelCount = document.querySelectorAll('[data-chart-export-panel-id]').length;
+    const automationPanelsReady = !isDiscordAutomationPage || renderedPanelCount > 0;
+    // 共有ワークスペースの復元中にブリッジを公開すると、古いパネルIDで実行が始まり
+    // 直後のDOM差し替えで画像・ローソク足の対象を失う。実チャートの初回描画後だけ受け付ける。
+    if (workspacePersistenceMode === 'checking' || !automationPanelsReady) {
       delete window.mooviewDiscordAutomation;
       return;
     }
     window.mooviewDiscordAutomation = {
-      run: runDiscordAutomationInBrowser,
+      prepare: prepareDiscordAutomationInBrowser,
+      refresh: refreshDiscordAutomationChartsInBrowser,
+      complete: completeDiscordAutomationInBrowser,
     };
     return () => {
       delete window.mooviewDiscordAutomation;
@@ -7334,7 +7896,10 @@ export default function App() {
     chartExportStatus,
     panels,
     requestAutoWatchlistQuoteRefresh,
-    runDiscordAutomationInBrowser,
+    completeDiscordAutomationInBrowser,
+    prepareDiscordAutomationInBrowser,
+    refreshDiscordAutomationChartsInBrowser,
+    isDiscordAutomationPage,
     workspacePersistenceMode,
   ]);
 
@@ -7353,7 +7918,11 @@ export default function App() {
           || 'Discord自動通知設定を読み込めませんでした。',
         );
       }
-      setDiscordAutomationSettings(normalizeDiscordAutomationSettings(settingsPayload));
+      const loadedSettings = normalizeDiscordAutomationSettings(settingsPayload);
+      setDiscordAutomationSettings({
+        ...loadedSettings,
+        jobs: loadedSettings.jobs.map((job) => ({ ...job, prompt: chartAiPrompt })),
+      });
       if (runsResponse.ok && Array.isArray(runsPayload)) {
         setDiscordAutomationRuns(runsPayload as DiscordAutomationRunRecord[]);
       }
@@ -7391,10 +7960,17 @@ export default function App() {
   };
 
   const saveDiscordAutomationSettings = async (): Promise<DiscordAutomationSettings> => {
+    const settingsToSave: DiscordAutomationSettings = {
+      ...discordAutomationSettings,
+      jobs: discordAutomationSettings.jobs.map((job) => ({
+        ...job,
+        prompt: chartAiPrompt,
+      })),
+    };
     const response = await fetch(DISCORD_AUTOMATION_SETTINGS_ENDPOINT, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: discordAutomationSettings }),
+      body: JSON.stringify({ settings: settingsToSave }),
     });
     const payload = await response.json().catch(() => null) as unknown;
     if (!response.ok) {
@@ -7409,14 +7985,25 @@ export default function App() {
   };
 
   const handleSaveDiscordAutomationSettings = async () => {
+    if (discordAutomationSaveFeedbackTimerRef.current !== null) {
+      window.clearTimeout(discordAutomationSaveFeedbackTimerRef.current);
+      discordAutomationSaveFeedbackTimerRef.current = null;
+    }
+    setDiscordAutomationSaveFeedback(null);
     setDiscordAutomationSaving(true);
     try {
       await saveDiscordAutomationSettings();
       setDiscordAutomationMessage('Discord自動通知設定をサーバーへ保存しました。');
+      setDiscordAutomationSaveFeedback('success');
+      discordAutomationSaveFeedbackTimerRef.current = window.setTimeout(() => {
+        setDiscordAutomationSaveFeedback(null);
+        discordAutomationSaveFeedbackTimerRef.current = null;
+      }, 5_000);
     } catch (error) {
       setDiscordAutomationMessage(
         error instanceof Error ? error.message : 'Discord自動通知設定を保存できませんでした。',
       );
+      setDiscordAutomationSaveFeedback('error');
     } finally {
       setDiscordAutomationSaving(false);
     }
@@ -7457,8 +8044,9 @@ export default function App() {
         times: ['12:00'],
         prompt: chartAiPrompt || DEFAULT_CHART_AI_PROMPT,
         model: chartAiModel,
-        imageSelection: { mode: 'all', panelIds: [] },
-        videoSelection: { mode: 'all', panelIds: [] },
+        useCurrentChartAiSettings: true,
+        imageSelection: { mode: 'all', panelIds: [], panelRefs: [] },
+        videoSelection: { mode: 'all', panelIds: [], panelRefs: [] },
         videoDurationSeconds: 5,
         videoFrameRate: 30,
         videoResolutionId: 'square-720',
@@ -7885,7 +8473,20 @@ export default function App() {
                 >
                   {col.map((panel, pIdx) => {
                     const panelSymbol = normalizeStoredSymbolValue(panel.symbol);
-                    const panelComparisonSymbols = panel.comparisonSymbols || [];
+                    const panelComparisonSymbols = (panel.comparisonSymbols || []).filter((symbol) => {
+                      if (!isDiscordAutomationPage) return true;
+                      if (symbol.startsWith('BASKET:')) {
+                        const sectionId = symbol.slice(7);
+                        return watchlistTabs.some((tab) => (
+                          tab.sections.some((section) => section.id === sectionId)
+                        ));
+                      }
+                      return getStoredSymbolOperands(symbol).every((operand) => (
+                        !discordAutomationUnavailableQuoteOperands.includes(
+                          normalizeTickerSymbolForStorage(operand),
+                        )
+                      ));
+                    });
                     const panelComparisonOnly = Boolean(panel.comparisonOnly);
                     const panelShowPrimaryCandles = panel.showPrimaryCandles !== false;
                     const panelComparisonCandles = panelComparisonSymbols.reduce((acc, compSym) => {
@@ -7936,12 +8537,28 @@ export default function App() {
                       ].filter(Boolean),
                     ));
                     const panelUsesJapanYahooFallback = chartDisplaySymbols.some(isJapaneseMarketSymbolInput);
+                    const chartDailyChangeOverrides = createChartChangePctOverrides(
+                      chartDisplaySymbols,
+                      panel.displayRange,
+                    );
+                    const chartDailyChangeReady = panel.displayRange !== 'd'
+                      || chartDisplaySymbols.every((symbol) => Number.isFinite(chartDailyChangeOverrides[symbol]));
+                    const chartCandleDataReady = chartDisplaySymbols.length > 0
+                      && chartDisplaySymbols.every((symbol) => resolveChartCandlesForSymbol(
+                        symbol,
+                        panel.timeframe,
+                        panel.displayRange,
+                        false,
+                        false,
+                      ).length > 0);
 
                     return (
                       <React.Fragment key={panel.id}>
                         <div
                           id={`chart-panel-container-${panel.id}`}
                           data-chart-export-panel-id={panel.id}
+                          data-chart-candle-data-ready={isTvEmbed || chartCandleDataReady ? 'true' : 'false'}
+                          data-chart-daily-change-ready={isTvEmbed || chartDailyChangeReady ? 'true' : 'false'}
                           style={{
                             height: isMobileViewport
                               ? '100%'
@@ -8489,10 +9106,7 @@ export default function App() {
                                     handleUpdatePanel(panel.id, { comparisonLabelRankSpacingScale })
                                   }
                                   symbolDisplayNames={createChartSymbolDisplayNames(chartDisplaySymbols)}
-                                  changePctOverrides={createChartChangePctOverrides(
-                                    chartDisplaySymbols,
-                                    panel.displayRange,
-                                  )}
+                                  changePctOverrides={chartDailyChangeOverrides}
                                   comparisonCandles={panelComparisonCandles}
                                   emptyMessage={panelIsEmpty
                                     ? panelComparisonOnly
@@ -8637,11 +9251,13 @@ export default function App() {
             <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[10px] font-bold">
               <span
                 className={`min-w-0 truncate ${
-                  quoteFetchInFlight ? 'text-cyan-300' : 'text-gray-500'
+                  quoteFetchInFlight || manualChartRefreshInFlight ? 'text-cyan-300' : 'text-gray-500'
                 }`}
                 title={activeWatchlistQuoteProgress.title}
               >
-                {quoteFetchInFlight
+                {manualChartRefreshInFlight
+                  ? '表示チャートと価格を更新中'
+                  : quoteFetchInFlight
                   ? `${activeWatchlistQuoteProgress.scopeLabel} を更新中`
                   : ''}
               </span>
@@ -8668,13 +9284,13 @@ export default function App() {
                   type="button"
                   onClick={handleRefreshWatchlistQuotes}
                   className={`h-4 px-1.5 border text-[10px] leading-none font-bold transition ${
-                    quoteFetchInFlight
+                    quoteFetchInFlight || manualChartRefreshInFlight
                       ? 'border-cyan-700 bg-cyan-950/50 text-cyan-200'
                       : 'border-[#303030] bg-[#101010] text-gray-300 hover:text-white hover:border-emerald-500 hover:bg-emerald-950/40'
                   }`}
-                  title="ウォッチリストの価格データを再取得"
+                  title="表示中チャートのKLineと選択中ウォッチリストの価格を強制再取得"
                 >
-                  {quoteFetchInFlight ? '更新中' : '更新'}
+                  {manualChartRefreshInFlight ? 'チャート更新中' : quoteFetchInFlight ? '更新中' : '更新'}
                 </button>
               </div>
             </div>
@@ -9117,10 +9733,18 @@ export default function App() {
 
             {watchlistTabMenu && (
               <div
-                className="fixed z-50 w-44 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
+                className="fixed z-50 w-56 bg-[#080808] border border-[#343434] shadow-2xl py-1 text-[10px] text-gray-200"
                 style={{ left: watchlistTabMenu.x, top: watchlistTabMenu.y }}
                 onClick={(event) => event.stopPropagation()}
               >
+                <button
+                  type="button"
+                  onClick={() => handleRefreshWatchlistTabData(watchlistTabMenu.tabId)}
+                  className="w-full px-2.5 py-1.5 text-left text-emerald-200 hover:bg-emerald-950/40"
+                >
+                  このタブの価格・チャートを強制更新
+                </button>
+                <div className="my-1 h-px bg-[#242424]" />
                 <button
                   type="button"
                   onClick={() => toggleWatchlistTabQuoteFetchMode(watchlistTabMenu.tabId)}
@@ -10728,7 +11352,7 @@ export default function App() {
                   Discord自動通知の設定
                 </h2>
                 <p className="mt-0.5 text-[10px] leading-relaxed text-gray-500">
-                  更新後に60秒待機し、Gemini本文 → 動画 → 画像の順でサーバーから通知します。Webhookはこの画面に保存・表示しません。
+                  更新開始から最大120秒待機し、未取得チャートは除外してGemini本文 → 動画 → 画像の順でサーバーから通知します。Webhookはこの画面に保存・表示しません。
                 </p>
               </div>
               <button
@@ -10741,7 +11365,34 @@ export default function App() {
               </button>
             </header>
 
+            <nav className="flex border-b border-[#322645] bg-[#09070d] px-3 pt-2 md:px-4" aria-label="Discord自動通知の表示切替">
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationActiveTab('settings')}
+                className={`relative -mb-px h-9 border border-b-0 px-4 text-[10px] font-bold ${
+                  discordAutomationActiveTab === 'settings'
+                    ? 'border-violet-600 bg-[#080808] text-violet-100'
+                    : 'border-transparent text-gray-500 hover:bg-[#15121a] hover:text-gray-300'
+                }`}
+              >
+                通知設定
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiscordAutomationActiveTab('history')}
+                className={`relative -mb-px h-9 border border-b-0 px-4 text-[10px] font-bold ${
+                  discordAutomationActiveTab === 'history'
+                    ? 'border-violet-600 bg-[#080808] text-violet-100'
+                    : 'border-transparent text-gray-500 hover:bg-[#15121a] hover:text-gray-300'
+                }`}
+              >
+                実行履歴{discordAutomationRuns.length > 0 ? `（${discordAutomationRuns.length}）` : ''}
+              </button>
+            </nav>
+
             <div className="min-h-0 flex-1 overflow-y-auto p-3 md:p-4">
+              {discordAutomationActiveTab === 'settings' ? (
+                <>
               <div className="mb-4 flex flex-col gap-3 border border-violet-800/70 bg-violet-950/25 p-3 sm:flex-row sm:items-center">
                 <div className="min-w-0 flex-1">
                   <div className="font-bold text-violet-100">Discord通知</div>
@@ -10780,7 +11431,7 @@ export default function App() {
                   disabled={discordAutomationLoading || discordAutomationSaving}
                   className="h-7 border border-[#3d3d3d] px-2.5 text-[10px] text-gray-300 hover:bg-[#171717] disabled:opacity-40"
                 >
-                  {discordAutomationLoading ? '再読込中…' : '実行履歴を更新'}
+                  {discordAutomationLoading ? '再読込中…' : '設定を再読込'}
                 </button>
               </div>
 
@@ -10812,6 +11463,14 @@ export default function App() {
                     setDiscordAutomationSelection(job.id, field, {
                       mode: 'custom',
                       panelIds: nextIds,
+                      panelRefs: panels
+                        .map((panel, index) => ({
+                          panelId: panel.id,
+                          index,
+                          symbol: normalizeStoredSymbolValue(panel.symbol),
+                          name: panel.name || '',
+                        }))
+                        .filter((reference) => nextIds.includes(reference.panelId)),
                     });
                   };
                   const selectionControls = (
@@ -10820,43 +11479,39 @@ export default function App() {
                     color: 'emerald' | 'cyan',
                   ) => {
                     const selection = job[field];
+                    const geminiField = field === 'imageSelection'
+                      ? 'sendImagesToGemini'
+                      : 'sendVideosToGemini';
+                    const sendToGemini = job[geminiField];
                     const selectedIds = selection.mode === 'all'
                       ? panels.map((panel) => panel.id)
                       : selection.panelIds;
-                    const activeClass = color === 'emerald'
-                      ? 'border-emerald-600 bg-emerald-950/60 text-emerald-100'
-                      : 'border-cyan-600 bg-cyan-950/60 text-cyan-100';
                     return (
                       <div className="border border-[#303030] bg-[#0d0d0d] p-2.5">
                         <div className="mb-2 flex items-center justify-between gap-2">
                           <span className="font-bold text-gray-200">{label}</span>
-                          <div className="flex gap-1">
-                            <button
-                              type="button"
-                              onClick={() => setDiscordAutomationSelection(job.id, field, {
-                                mode: 'all',
-                                panelIds: [],
-                              })}
-                              className={`h-6 border px-2 text-[9px] ${
-                                selection.mode === 'all' ? activeClass : 'border-[#3a3a3a] text-gray-400'
-                              }`}
-                            >
-                              全て
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDiscordAutomationSelection(job.id, field, {
-                                mode: 'custom',
-                                panelIds: selection.mode === 'custom' ? selection.panelIds : [],
-                              })}
-                              className={`h-6 border px-2 text-[9px] ${
-                                selection.mode === 'custom' ? activeClass : 'border-[#3a3a3a] text-gray-400'
-                              }`}
-                            >
-                              個別指定
-                            </button>
-                          </div>
+                          <button
+                            type="button"
+                            aria-pressed={sendToGemini}
+                            onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                              ...current,
+                              [geminiField]: !current[geminiField],
+                            }))}
+                            className={`flex h-7 items-center gap-1.5 border px-2 text-[9px] font-bold ${
+                              sendToGemini
+                                ? color === 'emerald'
+                                  ? 'border-emerald-600 bg-emerald-950/60 text-emerald-100'
+                                  : 'border-cyan-600 bg-cyan-950/60 text-cyan-100'
+                                : 'border-[#3a3a3a] bg-[#111] text-gray-500'
+                            }`}
+                          >
+                            <span className={`h-2 w-2 rounded-full ${
+                              sendToGemini ? (color === 'emerald' ? 'bg-emerald-400' : 'bg-cyan-400') : 'bg-gray-600'
+                            }`} />
+                            Geminiへ送付: {sendToGemini ? 'ON' : 'OFF'}
+                          </button>
                         </div>
+                        <div className="mb-1 text-[9px] text-gray-500">チェックしたチャートだけをDiscordへ添付します。</div>
                         <div className="max-h-32 overflow-y-auto border border-[#252525]">
                           {panels.map((panel, index) => {
                             const selected = selectedIds.includes(panel.id);
@@ -11027,12 +11682,20 @@ export default function App() {
                           <label className="block text-[10px]">
                             <span className="mb-1 block font-bold text-gray-300">Geminiモデル</span>
                             <select
-                              value={job.model}
-                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
-                                ...current,
-                                model: normalizeGeminiChartModelId(event.target.value),
-                              }))}
-                              className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none"
+                              value={job.useCurrentChartAiSettings ? chartAiModel : job.model}
+                              onChange={(event) => {
+                                const model = normalizeGeminiChartModelId(event.target.value);
+                                if (job.useCurrentChartAiSettings) {
+                                  // ON時は右クリックAI設定を直接更新し、通知実行時も同じモデルを使用する。
+                                  setChartAiModel(model);
+                                  return;
+                                }
+                                updateDiscordAutomationJob(job.id, (current) => ({
+                                  ...current,
+                                  model,
+                                }));
+                              }}
+                              className="h-8 w-full border border-[#493b66] bg-[#111] px-2 text-[10px] text-violet-100 outline-none focus:border-violet-500"
                             >
                               {GEMINI_CHART_MODELS.map((model) => (
                                 <option key={model.id} value={model.id}>{model.label}</option>
@@ -11042,34 +11705,44 @@ export default function App() {
                               選択モデルで失敗した場合はGemini 2.5 Flashへ自動切替します。
                             </span>
                           </label>
+                          <button
+                            type="button"
+                            aria-pressed={job.useCurrentChartAiSettings}
+                            onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
+                              ...current,
+                              useCurrentChartAiSettings: !current.useCurrentChartAiSettings,
+                            }))}
+                            className={`w-full border px-2 py-2 text-left text-[10px] leading-relaxed ${
+                              job.useCurrentChartAiSettings
+                                ? 'border-emerald-700 bg-emerald-950/45 text-emerald-100'
+                                : 'border-[#3a3a3a] bg-[#111] text-gray-400'
+                            }`}
+                          >
+                            <span className="block font-bold">
+                              右クリックAI分析のモデルを使用: {job.useCurrentChartAiSettings ? 'ON' : 'OFF'}
+                            </span>
+                            <span className="mt-0.5 block text-[9px] opacity-80">
+                              ONでは「AI分析の設定」のGeminiモデルも使用します。プロンプトは常に「AI分析の設定」と同一です。
+                            </span>
+                          </button>
                         </div>
 
                         <div className="space-y-3">
                           <label className="block">
                             <span className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-gray-300">
                               Geminiへの指示
-                              <button
-                                type="button"
-                                onClick={() => updateDiscordAutomationJob(job.id, (current) => ({
-                                  ...current,
-                                  prompt: chartAiPrompt,
-                                  model: chartAiModel,
-                                }))}
-                                className="font-normal text-violet-300 hover:text-violet-100"
-                              >
-                                現在のAI設定を反映
-                              </button>
+                              <span className="font-normal text-violet-300">AI分析の設定と常に同期</span>
                             </span>
                             <textarea
-                              value={job.prompt}
-                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
-                                ...current,
-                                prompt: event.target.value,
-                              }))}
+                              value={chartAiPrompt}
+                              readOnly
                               maxLength={30_000}
                               spellCheck={false}
-                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
+                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#0d0d0d] p-2 font-mono text-[10px] leading-relaxed text-gray-300 outline-none"
                             />
+                            <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
+                              変更は上部メニューの「AI分析の設定」で行います。Discord通知時もその内容を一字も変更せず使用します。
+                            </span>
                           </label>
                           <div className="grid gap-3 xl:grid-cols-2">
                             {selectionControls('imageSelection', 'Discordへ添付する画像', 'emerald')}
@@ -11139,28 +11812,60 @@ export default function App() {
                 通知設定を追加
               </button>
 
-              {discordAutomationRuns.length > 0 && (
-                <div className="mt-5 border border-[#302b35] bg-[#0d0d0d]">
-                  <div className="border-b border-[#302b35] px-3 py-2 text-[10px] font-bold text-gray-300">
-                    直近のサーバー実行履歴
+                </>
+              ) : (
+                <section className="border border-[#302b35] bg-[#0d0d0d]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#302b35] px-3 py-2.5">
+                    <div>
+                      <div className="text-[11px] font-bold text-gray-200">直近のサーバー実行履歴</div>
+                      <div className="mt-0.5 text-[9px] text-gray-500">完了・失敗時刻は日本時間（Asia/Tokyo）で表示します。</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void loadDiscordAutomationSettings()}
+                      disabled={discordAutomationLoading || discordAutomationSaving}
+                      className="h-7 border border-[#3d3d3d] px-2.5 text-[10px] text-gray-300 hover:bg-[#171717] disabled:opacity-40"
+                    >
+                      {discordAutomationLoading ? '更新中…' : '実行履歴を更新'}
+                    </button>
                   </div>
-                  <div className="max-h-40 overflow-y-auto">
-                    {discordAutomationRuns.slice(0, 8).map((run) => (
-                      <div key={run.id} className="grid grid-cols-[5.5rem_1fr] gap-2 border-b border-[#242424] px-3 py-2 text-[9px] last:border-b-0">
-                        <span className={
-                          run.status === 'succeeded' ? 'text-emerald-300'
-                            : run.status === 'failed' ? 'text-red-300'
-                              : 'text-amber-300'
-                        }>
-                          {run.status === 'succeeded' ? '完了' : run.status === 'failed' ? '失敗' : '実行中'}
-                        </span>
-                        <span className="min-w-0 break-words text-gray-400">
-                          {run.scheduledFor} — {run.message}{run.model ? `（${run.model}）` : ''}
-                        </span>
+                  {discordAutomationRuns.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-[10px] text-gray-500">実行履歴はまだありません。</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[52rem]">
+                        <div className="grid grid-cols-[5rem_11rem_11rem_8rem_minmax(18rem,1fr)] gap-2 border-b border-[#302b35] bg-[#121212] px-3 py-2 text-[9px] font-bold text-gray-400">
+                          <span>状態</span>
+                          <span>完了・失敗（日本時間）</span>
+                          <span>実行予定（日本時間）</span>
+                          <span>Geminiモデル</span>
+                          <span>詳細・エラー</span>
+                        </div>
+                        <div className="max-h-[min(52vh,34rem)] overflow-y-auto">
+                          {discordAutomationRuns.slice(0, 50).map((run) => (
+                            <div key={run.id} className="grid grid-cols-[5rem_11rem_11rem_8rem_minmax(18rem,1fr)] gap-2 border-b border-[#242424] px-3 py-2 text-[10px] last:border-b-0">
+                              <span className={
+                                run.status === 'succeeded' ? 'font-bold text-emerald-300'
+                                  : run.status === 'failed' ? 'font-bold text-red-300'
+                                    : 'font-bold text-amber-300'
+                              }>
+                                {run.status === 'succeeded' ? '完了' : run.status === 'failed' ? '失敗' : '実行中'}
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-300">
+                                {formatDiscordAutomationJapanDateTime(run.completedAt)}
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-400">
+                                {formatDiscordAutomationJapanDateTime(run.scheduledFor)}
+                              </span>
+                              <span className="break-words text-[9px] text-violet-200">{run.model || '—'}</span>
+                              <span className="min-w-0 whitespace-pre-wrap break-words text-[9px] leading-relaxed text-gray-400">{run.message}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                    </div>
+                  )}
+                </section>
               )}
             </div>
 
@@ -11176,9 +11881,21 @@ export default function App() {
                 type="button"
                 onClick={() => void handleSaveDiscordAutomationSettings()}
                 disabled={discordAutomationSaving || discordAutomationLoading}
-                className="h-9 border border-violet-700 bg-violet-950/60 px-4 text-[11px] font-bold text-violet-100 hover:bg-violet-900/60 disabled:cursor-wait disabled:opacity-50"
+                className={`h-9 border px-4 text-[11px] font-bold disabled:cursor-wait disabled:opacity-50 ${
+                  discordAutomationSaveFeedback === 'success'
+                    ? 'border-emerald-600 bg-emerald-950/70 text-emerald-100'
+                    : discordAutomationSaveFeedback === 'error'
+                      ? 'border-red-700 bg-red-950/60 text-red-100'
+                      : 'border-violet-700 bg-violet-950/60 text-violet-100 hover:bg-violet-900/60'
+                }`}
               >
-                {discordAutomationSaving ? '保存中…' : 'サーバーへ保存'}
+                {discordAutomationSaving
+                  ? '保存中…'
+                  : discordAutomationSaveFeedback === 'success'
+                    ? '保存済み ✓'
+                    : discordAutomationSaveFeedback === 'error'
+                      ? '保存に失敗'
+                      : 'サーバーへ保存'}
               </button>
             </footer>
           </section>
@@ -11232,6 +11949,27 @@ export default function App() {
               使用モデル: {chartAiResult.model}
             </footer>
           </section>
+        </div>
+      )}
+
+      {discordAutomationSaveFeedback && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-2 z-[140] flex max-w-sm items-start gap-2 border px-3 py-2 text-[11px] shadow-2xl md:bottom-12 md:right-14 ${
+            discordAutomationSaveFeedback === 'success'
+              ? 'border-emerald-700 bg-emerald-950/95 text-emerald-100'
+              : 'border-red-800 bg-red-950/95 text-red-100'
+          }`}
+        >
+          {discordAutomationSaveFeedback === 'success'
+            ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            : <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+          <span className="min-w-0 leading-relaxed">
+            {discordAutomationSaveFeedback === 'success'
+              ? 'Discord自動通知設定をサーバーへ保存しました。'
+              : discordAutomationMessage || 'Discord自動通知設定を保存できませんでした。'}
+          </span>
         </div>
       )}
 

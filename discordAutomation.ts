@@ -8,9 +8,18 @@ export type DiscordAutomationDayMode = 'weekdays' | 'weekends' | 'everyday' | 'c
 export type DiscordAutomationVideoResolution = 'square-720' | 'landscape-720' | 'landscape-1080';
 export type DiscordAutomationVideoFrameRate = 30 | 60;
 
+export interface DiscordAutomationPanelReference {
+  panelId: string;
+  index: number;
+  symbol: string;
+  name: string;
+}
+
 export interface DiscordAutomationSelection {
   mode: 'all' | 'custom';
   panelIds: string[];
+  // 保存後にパネルIDが変わっても、銘柄・表示順で通知対象を復元する。
+  panelRefs: DiscordAutomationPanelReference[];
 }
 
 export interface DiscordAutomationDays {
@@ -26,8 +35,14 @@ export interface DiscordAutomationJob {
   times: string[];
   prompt: string;
   model: GeminiChartModelId;
+  // 右クリックAI分析と同期できるのはGeminiモデルだけ。
+  // プロンプトは常にこの通知設定固有のpromptを使用する。
+  useCurrentChartAiSettings: boolean;
   imageSelection: DiscordAutomationSelection;
   videoSelection: DiscordAutomationSelection;
+  // Geminiへ渡す対象はDiscord添付対象とは独立して切り替える。
+  sendImagesToGemini: boolean;
+  sendVideosToGemini: boolean;
   videoDurationSeconds: number;
   videoFrameRate: DiscordAutomationVideoFrameRate;
   videoResolutionId: DiscordAutomationVideoResolution;
@@ -49,6 +64,10 @@ export interface DiscordAutomationRunRecord {
   status: 'running' | 'succeeded' | 'failed' | 'skipped';
   message: string;
   model: string | null;
+  // 定時実行の初回失敗だけ、更新後10分に一度だけ再試行するための状態。
+  attempt?: number;
+  retryPreparedAt?: string | null;
+  retryScheduledAt?: string | null;
 }
 
 export interface DiscordAutomationArtifact {
@@ -64,23 +83,44 @@ export interface DiscordAutomationArtifacts {
   images: DiscordAutomationArtifact[];
 }
 
+export interface DiscordAutomationPreparation {
+  prompt: string;
+  model: GeminiChartModelId;
+  imagePanelIds: string[];
+  videoPanelIds: string[];
+  sendImagesToGemini: boolean;
+  sendVideosToGemini: boolean;
+  videoDurationSeconds: number;
+  videoFrameRate: DiscordAutomationVideoFrameRate;
+  videoResolutionId: DiscordAutomationVideoResolution;
+}
+
+export const DISCORD_AUTOMATION_FOOTER_HASHTAGS = '#デイトレ #日本株 #日経平均 #FX #米国株 #資産運用 #ドル円 #高配当ETF #投資初心者 #ブルバ';
+
+const DISCORD_AUTOMATION_FOOTER_INSTRUCTION = `
+
+投稿末尾のハッシュタグは必ず次の一行だけに統一してください。
+${DISCORD_AUTOMATION_FOOTER_HASHTAGS}`;
+
 export const DEFAULT_DISCORD_AUTOMATION_PROMPT = `#日本株 フロー分析
 
-添付した最新チャートを読み取り、強いセクター・弱いセクター・注目個別銘柄を簡潔に分析してください。本文だけを出力し、前置きは不要です。`;
+添付した最新チャートを読み取り、強いセクター・弱いセクター・注目個別銘柄を簡潔に分析してください。本文だけを出力し、前置きは不要です。${DISCORD_AUTOMATION_FOOTER_INSTRUCTION}`;
 
-export const DEFAULT_US_SECTOR_AUTOMATION_PROMPT = `#米国市場 セクターフロー分析
+export const DEFAULT_US_SECTOR_AUTOMATION_PROMPT = `#米国株 フロー分析
 
-添付した最新チャートを読み取り、米国市場の強いセクター・弱いセクター・主要ETFと注目個別銘柄を簡潔に分析してください。本文だけを出力し、前置きは不要です。`;
+添付した最新チャートを読み取り、米国市場の強いセクター・弱いセクター・主要ETFと注目個別銘柄を簡潔に分析してください。本文だけを出力し、前置きは不要です。${DISCORD_AUTOMATION_FOOTER_INSTRUCTION}`;
 
 const DEFAULT_SELECTION: DiscordAutomationSelection = {
   mode: 'all',
   panelIds: [],
+  panelRefs: [],
 };
 
 function cloneSelection(selection: DiscordAutomationSelection = DEFAULT_SELECTION): DiscordAutomationSelection {
   return {
     mode: selection.mode,
     panelIds: [...selection.panelIds],
+    panelRefs: selection.panelRefs.map((reference) => ({ ...reference })),
   };
 }
 
@@ -98,8 +138,11 @@ function createDefaultJob(
     times,
     prompt,
     model: DEFAULT_GEMINI_CHART_MODEL,
+    useCurrentChartAiSettings: true,
     imageSelection: cloneSelection(),
     videoSelection: cloneSelection(),
+    sendImagesToGemini: true,
+    sendVideosToGemini: false,
     videoDurationSeconds: 5,
     videoFrameRate: 30,
     videoResolutionId: 'square-720',
@@ -143,6 +186,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeSelection(value: unknown): DiscordAutomationSelection {
   const source = isRecord(value) ? value : {};
+  const panelRefs = Array.isArray(source.panelRefs)
+    ? source.panelRefs
+      .filter((reference): reference is Record<string, unknown> => isRecord(reference))
+      .map((reference) => ({
+        panelId: typeof reference.panelId === 'string' ? reference.panelId.slice(0, 160) : '',
+        index: typeof reference.index === 'number' && Number.isInteger(reference.index)
+          ? Math.max(0, Math.min(99, reference.index))
+          : 0,
+        symbol: typeof reference.symbol === 'string' ? reference.symbol.slice(0, 160) : '',
+        name: typeof reference.name === 'string' ? reference.name.slice(0, 160) : '',
+      }))
+      .filter((reference) => reference.panelId.length > 0)
+      .slice(0, 12)
+    : [];
   return {
     mode: source.mode === 'custom' ? 'custom' : 'all',
     panelIds: Array.isArray(source.panelIds)
@@ -150,6 +207,7 @@ function normalizeSelection(value: unknown): DiscordAutomationSelection {
         typeof panelId === 'string' && panelId.length > 0 && panelId.length <= 160
       )))).slice(0, 12)
       : [],
+    panelRefs,
   };
 }
 
@@ -194,8 +252,11 @@ function normalizeJob(value: unknown, fallback: DiscordAutomationJob, index: num
     times,
     prompt,
     model,
+    useCurrentChartAiSettings: source.useCurrentChartAiSettings !== false,
     imageSelection: normalizeSelection(source.imageSelection),
     videoSelection: normalizeSelection(source.videoSelection),
+    sendImagesToGemini: source.sendImagesToGemini !== false,
+    sendVideosToGemini: source.sendVideosToGemini === true,
     videoDurationSeconds: Number.isFinite(duration)
       ? Math.max(1, Math.min(30, Math.round(duration)))
       : fallback.videoDurationSeconds,

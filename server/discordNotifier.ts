@@ -97,8 +97,8 @@ export async function notifyDiscordWithAutomationArtifacts(
 ): Promise<void> {
   const webhookUrl = getDiscordWebhookUrl();
   if (!text.trim()) throw new Error('Discordへ送信するGemini本文が空です。');
-  if (videos.length === 0 || images.length === 0) {
-    throw new Error('Discordへ送信する動画または画像がありません。');
+  if (videos.length === 0 && images.length === 0) {
+    throw new Error('Discordへ送信する動画・画像がありません。');
   }
 
   for (const part of splitDiscordText(text)) {

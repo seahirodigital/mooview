@@ -7734,9 +7734,15 @@ export default function App() {
       videoPanelIds: requestedVideoPanelIds,
       targetPanelIds,
     } = resolveDiscordAutomationPanelIds(job);
-    // 市場別のDiscord通知は、右クリックAI分析とは独立したジョブ固有の指示を使う。
+    // プロンプトと実行時刻は、Discord自動通知の設定に保存されたジョブ固有値を使う。
     const prompt = job.prompt;
-    const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
+    // Discord用ブラウザはクラウド設定をLocalStorageへ復元してから実行されるため、
+    // ON時は初期stateではなく復元済みの「AI分析の設定」モデルを読み直す。
+    const model = job.useCurrentChartAiSettings
+      ? normalizeGeminiChartModelId(
+          readStoredValue(CHART_AI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_CHART_MODEL),
+        )
+      : job.model;
     if (!prompt.trim()) {
       throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
     }

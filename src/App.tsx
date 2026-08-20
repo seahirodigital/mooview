@@ -7634,7 +7634,26 @@ export default function App() {
 
   const resolveDiscordAutomationPanelIds = (job: DiscordAutomationJob) => {
     const resolveSelection = (selection: DiscordAutomationSelection) => {
-      if (selection.mode === 'all') return panels.map((panel) => panel.id);
+      const panelMatchesJobMarket = (panelId: string) => {
+        const panel = panels.find((candidate) => candidate.id === panelId);
+        if (!panel) return false;
+        const explicitSymbols = [panel.symbol, ...(panel.comparisonSymbols ?? [])]
+          .flatMap((symbol) => getStoredSymbolOperands(symbol))
+          .filter((symbol) => symbol && !symbol.startsWith('BASKET:'));
+        if (job.id.startsWith('japan-market-flow-')) {
+          return explicitSymbols.length === 0 || explicitSymbols.every(isJapaneseMarketSymbol);
+        }
+        if (job.id === 'us-market-sector') {
+          return explicitSymbols.length === 0 || explicitSymbols.every((symbol) => (
+            !isJapaneseMarketSymbol(symbol)
+          ));
+        }
+        return true;
+      };
+
+      if (selection.mode === 'all') {
+        return panels.map((panel) => panel.id).filter(panelMatchesJobMarket);
+      }
 
       const availablePanelIds = new Set(panels.map((panel) => panel.id));
       const resolvedPanelIds: string[] = [];
@@ -7659,19 +7678,12 @@ export default function App() {
           !resolvedPanelIds.includes(panel.id)
           && ((symbol && normalizeStoredSymbolValue(panel.symbol) === symbol)
             || (reference.name && panel.name === reference.name))
-        )) ?? panels[reference.index];
+        ));
         addPanelId(matchedPanel?.id);
       });
 
-      // 旧形式（IDのみ）の設定は旧IDを復元不能なため、同じ枚数だけ現在の表示順で補完する。
-      // 通知停止を防ぎつつ、次回の保存時に銘柄・表示順付きの設定へ更新される。
-      const requestedCount = Math.min(12, selection.panelIds.length);
-      if (requestedCount > 0 && resolvedPanelIds.length < requestedCount) {
-        panels.forEach((panel) => {
-          if (resolvedPanelIds.length < requestedCount) addPanelId(panel.id);
-        });
-      }
-      return resolvedPanelIds;
+      // 消えたパネルを表示順で補うと別市場の画像が混入するため、解決できた同一市場だけを使う。
+      return resolvedPanelIds.filter(panelMatchesJobMarket);
     };
     const imagePanelIds = resolveSelection(job.imageSelection);
     const videoPanelIds = resolveSelection(job.videoSelection);
@@ -7722,11 +7734,11 @@ export default function App() {
       videoPanelIds: requestedVideoPanelIds,
       targetPanelIds,
     } = resolveDiscordAutomationPanelIds(job);
-    // Discord自動通知も「AI分析の設定」のプロンプトを一字も変更せず使用する。
-    const prompt = chartAiPrompt;
+    // 市場別のDiscord通知は、右クリックAI分析とは独立したジョブ固有の指示を使う。
+    const prompt = job.prompt;
     const model = job.useCurrentChartAiSettings ? chartAiModel : job.model;
     if (!prompt.trim()) {
-      throw new Error('AI分析の設定にGeminiプロンプトを入力してください。');
+      throw new Error('Discord自動通知のGeminiプロンプトを入力してください。');
     }
 
     setChartAiStatus({ stage: 'capturing', progress: 0 });
@@ -7919,10 +7931,7 @@ export default function App() {
         );
       }
       const loadedSettings = normalizeDiscordAutomationSettings(settingsPayload);
-      setDiscordAutomationSettings({
-        ...loadedSettings,
-        jobs: loadedSettings.jobs.map((job) => ({ ...job, prompt: chartAiPrompt })),
-      });
+      setDiscordAutomationSettings(loadedSettings);
       if (runsResponse.ok && Array.isArray(runsPayload)) {
         setDiscordAutomationRuns(runsPayload as DiscordAutomationRunRecord[]);
       }
@@ -7960,13 +7969,7 @@ export default function App() {
   };
 
   const saveDiscordAutomationSettings = async (): Promise<DiscordAutomationSettings> => {
-    const settingsToSave: DiscordAutomationSettings = {
-      ...discordAutomationSettings,
-      jobs: discordAutomationSettings.jobs.map((job) => ({
-        ...job,
-        prompt: chartAiPrompt,
-      })),
-    };
+    const settingsToSave: DiscordAutomationSettings = discordAutomationSettings;
     const response = await fetch(DISCORD_AUTOMATION_SETTINGS_ENDPOINT, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -11722,26 +11725,26 @@ export default function App() {
                               右クリックAI分析のモデルを使用: {job.useCurrentChartAiSettings ? 'ON' : 'OFF'}
                             </span>
                             <span className="mt-0.5 block text-[9px] opacity-80">
-                              ONでは「AI分析の設定」のGeminiモデルも使用します。プロンプトは常に「AI分析の設定」と同一です。
+                              ONでは「AI分析の設定」のGeminiモデルだけを使用します。プロンプトは通知ごとに独立しています。
                             </span>
                           </button>
                         </div>
 
                         <div className="space-y-3">
                           <label className="block">
-                            <span className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-gray-300">
-                              Geminiへの指示
-                              <span className="font-normal text-violet-300">AI分析の設定と常に同期</span>
-                            </span>
+                            <span className="mb-1 block text-[10px] font-bold text-gray-300">Geminiへの指示</span>
                             <textarea
-                              value={chartAiPrompt}
-                              readOnly
+                              value={job.prompt}
+                              onChange={(event) => updateDiscordAutomationJob(job.id, (current) => ({
+                                ...current,
+                                prompt: event.target.value,
+                              }))}
                               maxLength={30_000}
                               spellCheck={false}
-                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#0d0d0d] p-2 font-mono text-[10px] leading-relaxed text-gray-300 outline-none"
+                              className="h-32 w-full resize-y border border-[#3f3a49] bg-[#111] p-2 font-mono text-[10px] leading-relaxed text-gray-100 outline-none focus:border-violet-600"
                             />
                             <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
-                              変更は上部メニューの「AI分析の設定」で行います。Discord通知時もその内容を一字も変更せず使用します。
+                              この通知設定だけに使用します。右クリックAI分析のプロンプトには反映しません。
                             </span>
                           </label>
                           <div className="grid gap-3 xl:grid-cols-2">

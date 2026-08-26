@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@layer base {
+  .high-dividend-page {
+    --editorial-paper: #F9F7F2;
+    --editorial-cream: #FDFCFB;
+    --editorial-ink: #1A1A1A;
+    --editorial-muted: #666666;
+    --editorial-border: rgba(26, 26, 26, 0.12);
+    --editorial-orange: #EA580C;
+  }
+
+  .high-dividend-page {
+    background-color: var(--editorial-paper);
+    color: var(--editorial-ink);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  .high-dividend-page h1,
+  .high-dividend-page h2,
+  .high-dividend-page h3,
+  .high-dividend-page .font-editorial {
+    font-family: 'Newsreader', 'Playfair Display', Georgia, serif;
+  }
+
+  .high-dividend-page .font-mono,
+  .high-dividend-page .font-mono-code {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* 高配当シミュレーター専用の編集画面スタイル */
+.high-dividend-page .editorial-card {
+  background-color: #ffffff;
+  border: 1px solid rgba(26, 26, 26, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.high-dividend-page .editorial-card-cream {
+  background-color: #FDFCFB;
+  border: 1px solid rgba(26, 26, 26, 0.12);
+}
+
+.high-dividend-page .editorial-card-ink {
+  background-color: #1A1A1A;
+  color: #FFFFFF;
+  border: 1px solid #1A1A1A;
+}
+
+.high-dividend-page .editorial-divider {
+  border-color: rgba(26, 26, 26, 0.12);
+}
+
+.high-dividend-page .editorial-tag {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}

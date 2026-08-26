@@ -42,6 +42,9 @@ import { ValueChainMap } from './components/ValueChainMap';
 import { MacroFlowMap, getMacroFlowDefaultWatchlistChain } from './components/MacroFlowMap';
 import { DisclosureDatabase } from './components/DisclosureDatabase';
 import { DisclosureSettingsPanel } from './components/DisclosureSettingsPanel';
+import { WorkspaceMenuOverlay } from './components/WorkspaceMenuOverlay';
+import { HighDividendApp } from './highDividend/App';
+import { APP_VIEW_ORDER, type AppView } from './appView';
 import {
   calculateExpressionQuote,
   combineExpressionCandles,
@@ -115,7 +118,6 @@ type WatchlistTransferMenuLayer = 'root' | 'import' | 'export';
 type WatchlistQuoteFetchMode = 'manual' | 'auto';
 type WatchlistQuoteFetchSource = 'manual' | 'auto';
 type WatchlistTabDropPosition = 'before' | 'after';
-type AppView = 'charts' | 'value-chain' | 'macro-flow' | 'disclosures';
 type WorkspacePersistenceMode = 'checking' | 'local' | 'shared';
 type DisplayTickerStat = TickerInfo & {
   currentPrice: number | null;
@@ -123,7 +125,6 @@ type DisplayTickerStat = TickerInfo & {
   marketCap?: number;
 };
 
-const APP_VIEW_ORDER: AppView[] = ['charts', 'value-chain', 'macro-flow', 'disclosures'];
 const WATCHLIST_IMPORT_CONCURRENCY = 8;
 const CANDLES_CACHE_STORAGE_KEY = 'tv_dashboard_candles_cache_v1';
 const CANDLES_CACHE_META_STORAGE_KEY = 'tv_dashboard_candles_cache_meta_v1';
@@ -8238,6 +8239,25 @@ export default function App() {
     setHeaderTickerMenu(null);
   };
 
+  const selectWorkspaceView = (view: AppView) => {
+    setAppView(view);
+    setWorkspaceMenuOpen(false);
+  };
+
+  if (appView === 'high-dividend') {
+    return (
+      <>
+        <HighDividendApp onOpenWorkspaceMenu={() => setWorkspaceMenuOpen(true)} />
+        <WorkspaceMenuOverlay
+          isOpen={workspaceMenuOpen}
+          currentView={appView}
+          onClose={() => setWorkspaceMenuOpen(false)}
+          onSelect={selectWorkspaceView}
+        />
+      </>
+    );
+  }
+
   return (
     <div
       className="h-[100dvh] min-h-0 overflow-hidden bg-[#050505] text-[#d1d4dc] font-sans flex flex-col antialiased selection:bg-emerald-500/25 md:h-auto md:min-h-screen md:overflow-visible"
@@ -8368,63 +8388,12 @@ export default function App() {
         </div>
       </div>
 
-      {workspaceMenuOpen && (
-        <div className="fixed inset-0 z-50" onClick={() => setWorkspaceMenuOpen(false)}>
-          <div
-            className="absolute left-4 top-11 w-64 bg-[#080808] border border-[#303030] shadow-2xl py-2 text-xs"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="px-3 pb-2 border-b border-[#242424]">
-              <div className="font-bold text-white">MooView メニュー</div>
-              <div className="text-[10px] text-gray-500 mt-0.5">分析画面を切り替えます</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setAppView('charts');
-                setWorkspaceMenuOpen(false);
-              }}
-              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'charts' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
-            >
-              <span>チャートビュー</span>
-              {appView === 'charts' && <span className="text-[9px]">表示中</span>}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAppView('value-chain');
-                setWorkspaceMenuOpen(false);
-              }}
-              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'value-chain' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
-            >
-              <span>バリューチェーンマップ</span>
-              {appView === 'value-chain' && <span className="text-[9px]">表示中</span>}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAppView('macro-flow');
-                setWorkspaceMenuOpen(false);
-              }}
-              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'macro-flow' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
-            >
-              <span>マクロ資金フロー</span>
-              {appView === 'macro-flow' && <span className="text-[9px]">表示中</span>}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAppView('disclosures');
-                setWorkspaceMenuOpen(false);
-              }}
-              className={`w-full px-3 py-2.5 text-left flex items-center justify-between hover:bg-[#171717] ${appView === 'disclosures' ? 'text-emerald-300 bg-[#10251f]' : 'text-gray-200'}`}
-            >
-              <span>企業開示DB</span>
-              {appView === 'disclosures' && <span className="text-[9px]">表示中</span>}
-            </button>
-          </div>
-        </div>
-      )}
+      <WorkspaceMenuOverlay
+        isOpen={workspaceMenuOpen}
+        currentView={appView}
+        onClose={() => setWorkspaceMenuOpen(false)}
+        onSelect={selectWorkspaceView}
+      />
 
       {/* Main Multi-Chart Workspace Container and Indicator Sidebar Controls split */}
       {appView === 'value-chain' ? (

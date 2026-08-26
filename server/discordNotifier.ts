@@ -3,8 +3,7 @@ import type { DiscordAutomationArtifact } from '../discordAutomation';
 const DISCORD_MESSAGE_LIMIT = 2_000;
 const DISCORD_FILES_PER_MESSAGE = 10;
 
-function getDiscordWebhookUrl(): string {
-  const value = process.env.DISCORD_WEBHOOK_URL?.trim() || '';
+function validateDiscordWebhookUrl(value: string): string {
   if (!value) {
     throw new Error('Discord Webhook URLがサーバーに設定されていません。');
   }
@@ -22,6 +21,10 @@ function getDiscordWebhookUrl(): string {
     throw new Error('Discord Webhook URLはDiscord公式ドメインのHTTPS Webhookを指定してください。');
   }
   return url.toString();
+}
+
+function getDiscordWebhookUrl(): string {
+  return validateDiscordWebhookUrl(process.env.DISCORD_WEBHOOK_URL?.trim() || '');
 }
 
 function splitDiscordText(text: string): string[] {
@@ -79,6 +82,11 @@ async function sendDiscordFiles(
 
 export async function notifyDiscordText(text: string): Promise<void> {
   const webhookUrl = getDiscordWebhookUrl();
+  await notifyDiscordTextToWebhook(text, webhookUrl);
+}
+
+export async function notifyDiscordTextToWebhook(text: string, webhookUrlValue: string): Promise<void> {
+  const webhookUrl = validateDiscordWebhookUrl(webhookUrlValue.trim());
   const normalized = text.trim();
   if (!normalized) throw new Error('Discordへ送信する本文が空です。');
   for (const part of splitDiscordText(normalized)) {

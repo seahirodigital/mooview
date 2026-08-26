@@ -294,6 +294,14 @@ Webhook URLは、Git、ブラウザのLocalStorage、共有設定ファイルへ
 /usr/bin/sudo /usr/bin/python3 /opt/mooview/app/oci-server/scripts/configure-discord-webhook.py
 ```
 
+高配当シミュレーター専用のWebhookは既存通知先を上書きせず、次のコマンドで
+`HIGH_DIVIDEND_DISCORD_WEBHOOK_URL` として保存します。Webhook URLだけを標準入力へ貼り付け、
+最後に `Ctrl-D` を入力してください。
+
+```bash
+/usr/bin/sudo /usr/bin/python3 /opt/mooview/app/oci-server/scripts/configure-discord-webhook.py --target high-dividend
+```
+
 この機能はPlaywrightのChromiumを使い、画面と同じチャート出力処理をOCI上で実行します。初回または更新時は、明示的な許可の後で次のインストールスクリプトを実行してください。Chromium本体と依存ライブラリを追加するため、数百MB程度のディスク容量が必要です。
 
 ```bash

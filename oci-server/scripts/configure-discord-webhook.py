@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import grp
+import argparse
 import os
 import sys
 import tempfile
@@ -27,18 +27,25 @@ def validate_webhook_url(raw_value: str) -> str:
         or "\n" in value
         or "\r" in value
         or parsed.scheme != "https"
-        or parsed.netloc != "discord.com"
+        or parsed.netloc not in {"discord.com", "discordapp.com"}
         or not parsed.path.startswith("/api/webhooks/")
     ):
         fail("Discord Webhook URLの形式が正しくありません。")
     return value
 
 
-def update_env_text(current_text: str, webhook_url: str) -> str:
-    replacements = {
-        "DISCORD_WEBHOOK_URL": webhook_url,
-        "MOOVIEW_DISCORD_AUTOMATION_ENABLED": "true",
-    }
+def update_env_text(current_text: str, webhook_url: str, target: str) -> str:
+    replacements = (
+        {
+            "HIGH_DIVIDEND_DISCORD_WEBHOOK_URL": webhook_url,
+            "MOOVIEW_HIGH_DIVIDEND_AUTOMATION_ENABLED": "true",
+        }
+        if target == "high-dividend"
+        else {
+            "DISCORD_WEBHOOK_URL": webhook_url,
+            "MOOVIEW_DISCORD_AUTOMATION_ENABLED": "true",
+        }
+    )
     output_lines: list[str] = []
     replaced: set[str] = set()
     for line in current_text.splitlines():
@@ -55,13 +62,27 @@ def update_env_text(current_text: str, webhook_url: str) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Discord Webhook URLをOCIの秘密設定へ保存します。")
+    parser.add_argument(
+        "--target",
+        choices=("main", "high-dividend"),
+        default="main",
+        help="保存先。mainは既存通知、high-dividendは高配当シミュレーター専用です。",
+    )
+    args = parser.parse_args()
     if os.geteuid() != 0:
         fail("管理者権限が必要です。実行許可を得た後、rootとして実行してください。")
     if not ENV_PATH.is_file():
         fail(f"秘密設定ファイルがありません: {ENV_PATH}")
 
     webhook_url = validate_webhook_url(sys.stdin.read())
-    updated_text = update_env_text(ENV_PATH.read_text(encoding="utf-8"), webhook_url)
+    updated_text = update_env_text(
+        ENV_PATH.read_text(encoding="utf-8"),
+        webhook_url,
+        args.target,
+    )
+    import grp
+
     mooview_group_id = grp.getgrnam("mooview").gr_gid
     temporary_path: Path | None = None
     try:
@@ -83,7 +104,8 @@ def main() -> None:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
-    print("Discord Webhook URLを /etc/mooview/mooview.env へ保存しました。")
+    target_label = "高配当シミュレーター" if args.target == "high-dividend" else "既存通知"
+    print(f"{target_label}用Discord Webhook URLを /etc/mooview/mooview.env へ保存しました。")
     print("Webhook URLの値は表示していません。")
 
 

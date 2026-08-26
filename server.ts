@@ -13,6 +13,10 @@ import { resolveMoomooGatewayKey } from './server/moomooClient.js';
 import { handleGeminiChartAnalysis } from './server/geminiHandler.js';
 import { registerDisclosureRoutes } from './server/disclosureRoutes.js';
 import { initializeDisclosureService } from './server/disclosureService.js';
+import {
+  registerHighDividendRoutes,
+  startHighDividendScheduler,
+} from './server/highDividendService.js';
 import { configureSystemTlsTrust } from './server/systemTlsTrust.js';
 import {
   startDiscordAutomationScheduler,
@@ -136,6 +140,27 @@ app.use('/api/disclosures', (request, response, next) => {
 });
 
 registerDisclosureRoutes(app);
+
+app.use(['/api/high-dividend', '/api/fetch-etf-data'], (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin) {
+    if (!workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+      response.status(403).json({ error: '許可されていないオリジンです。' });
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,PUT,POST,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (request.method === 'OPTIONS') {
+    response.status(204).end();
+    return;
+  }
+  next();
+});
+
+registerHighDividendRoutes(app);
 
 app.use('/api/discord-automation', (request, response, next) => {
   const origin = request.get('origin');
@@ -405,6 +430,7 @@ async function startServer(): Promise<void> {
   app.listen(port, host, () => {
     console.log(`MooViewサーバー起動: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`);
     startDiscordAutomationScheduler({ port });
+    startHighDividendScheduler();
   });
 }
 

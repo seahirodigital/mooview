@@ -9,6 +9,7 @@ coverage/
 !.env.example
 gemini_key
 .vercel
+.codex-tmp/
 data/TEST_backet_import/
 data/TEST_backet_import_backup/
 CSVリスト/

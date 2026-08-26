@@ -76,8 +76,8 @@ export async function callMoomooGateway(
 ): Promise<{ status: number; data: MoomooGatewayResult }> {
   const controller = new AbortController();
   const timeoutMs =
-    action === 'quotes' ? 30000
-    : action === 'kline' || action === 'search' ? 20000
+    action === 'quotes' || action === 'kline' ? 90000
+    : action === 'search' ? 20000
     : 10000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 

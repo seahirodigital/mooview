@@ -1,0 +1,9 @@
+# 認証情報と配布物はリポジトリへ保存しない
+OpenD.xml
+mooview.env
+*.key
+*.pem
+*.tar.gz
+*.7z
+__pycache__/
+*.pyc

@@ -1,0 +1,38 @@
+[Unit]
+Description=MooView Webアプリケーション
+Requires=moomoo-gateway.service
+After=moomoo-gateway.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mooview
+Group=mooview
+WorkingDirectory=/opt/mooview/app
+EnvironmentFile=/etc/mooview/mooview.env
+Environment=MOOVIEW_SHARED_SETTINGS=true
+Environment=MOOVIEW_DATA_DIR=/var/lib/mooview
+Environment=HOST=127.0.0.1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/mooview/ms-playwright
+ExecStart=/usr/bin/node /opt/mooview/app/dist/server.cjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+# Gemini APIへの外向きHTTPS通信を許可し、待受はHOSTでlocalhostに限定する。
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/mooview
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

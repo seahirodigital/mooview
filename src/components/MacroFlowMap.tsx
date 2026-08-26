@@ -414,9 +414,11 @@ const MACRO_FLOW_CACHE_EXPORT_VERSION = 1;
 const MACRO_KLINE_DB_NAME = 'mooview_macro_flow_kline_cache_v1';
 const MACRO_KLINE_DB_STORE = 'kline';
 const MACRO_KLINE_DB_VERSION = 1;
-const SNAPSHOT_BATCH_SIZE = 200;
-const KLINE_BATCH_SIZE = 60;
+const SNAPSHOT_BATCH_SIZE = 80;
+const KLINE_BATCH_SIZE = 20;
 const KLINE_BATCH_INTERVAL_MS = 30_000;
+const JAPAN_US_FETCH_PAUSE_START_MINUTES = 9 * 60;
+const JAPAN_US_FETCH_PAUSE_END_MINUTES = 22 * 60 + 30;
 const MACRO_ALL_SCOPE_ID = 'macro-all';
 const FLOW_ROW_GAP = 4;
 const FLOW_PANEL_PADDING_Y = 34;
@@ -440,6 +442,11 @@ const SIDE_PANEL_MIN_WIDTH = 340;
 const SIDE_PANEL_MAX_WIDTH = 680;
 const SIDE_PANEL_NAV_WIDTH = 44;
 const CHART_TIMEFRAME_OPTIONS: Timeframe[] = ['1m', '3m', '5m', '10m', '30m', '1h', '4h', '1d', '1w', '1mo'];
+const JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS: Partial<Record<Timeframe, string>> = {
+  '3m': '2m',
+  '10m': '15m',
+  '4h': '60m',
+};
 const REGIONAL_MARKET_DEFS: RegionalMarketDefinition[] = [
   { id: 'us-market', label: 'US market', displaySymbol: 'VT', symbol: 'VT', baseVolume: 65_200_000 },
   { id: 'jp-market', label: 'JP', displaySymbol: 'EWJ', symbol: 'EWJ', baseVolume: 8_100_000 },
@@ -769,6 +776,47 @@ function isUnsupportedDataSymbol(symbol: string): boolean {
   return normalizeSymbol(symbol).startsWith('__UNSUPPORTED_');
 }
 
+function getJapanMinutesOfDay(date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
+  return (hour % 24) * 60 + minute;
+}
+
+function shouldPauseUsFetchForJapanSession(date = new Date()): boolean {
+  const minutes = getJapanMinutesOfDay(date);
+  return minutes >= JAPAN_US_FETCH_PAUSE_START_MINUTES
+    && minutes < JAPAN_US_FETCH_PAUSE_END_MINUTES;
+}
+
+function isUsMarketSymbol(symbol: string): boolean {
+  const normalized = normalizeSymbol(symbol);
+  return Boolean(normalized) && !normalized.includes('.') && !isUnsupportedDataSymbol(normalized);
+}
+
+function getMarketFetchRank(symbol: string): number {
+  const normalized = normalizeSymbol(symbol);
+  if (normalized.startsWith('JP.')) return 0;
+  if (isUsMarketSymbol(normalized)) return 2;
+  return 1;
+}
+
+function orderMarketFetchSymbols(symbols: string[]): string[] {
+  const pauseUsFetch = shouldPauseUsFetchForJapanSession();
+  return Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)))
+    .filter((symbol) => !isUnsupportedDataSymbol(symbol))
+    .filter((symbol) => !(pauseUsFetch && isUsMarketSymbol(symbol)))
+    .sort((first, second) =>
+      getMarketFetchRank(first) - getMarketFetchRank(second)
+      || first.localeCompare(second),
+    );
+}
+
 function formatPct(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
@@ -806,6 +854,21 @@ function formatTimeframeLabel(timeframe: Timeframe): string {
   if (timeframe === '1d') return 'day';
   if (timeframe === '1w') return 'Week';
   return timeframe;
+}
+
+function formatChartTimeframeLabel(timeframe: Timeframe, usesJapanYahooFallback: boolean): string {
+  return usesJapanYahooFallback && JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    ? JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe]
+    : formatTimeframeLabel(timeframe);
+}
+
+function getChartTimeframeButtonTitle(
+  timeframe: Timeframe,
+  usesJapanYahooFallback: boolean,
+): string | undefined {
+  const effectiveLabel = JP_YAHOO_EFFECTIVE_TIMEFRAME_LABELS[timeframe];
+  if (!usesJapanYahooFallback || !effectiveLabel) return undefined;
+  return `JP銘柄はYahooの実効足種で取得します: ${formatTimeframeLabel(timeframe)} → ${effectiveLabel}`;
 }
 
 function isJapanStock(symbol: string): boolean {
@@ -2808,11 +2871,11 @@ export function MacroFlowMap({
     () => (isSemiconductorScope(macroScope, macroScopeOptions, rawBaskets) ? SEMICONDUCTOR_SECTOR_ETF_DEFS : MACRO_SECTOR_ETF_DEFS),
     [macroScope, macroScopeOptions, rawBaskets],
   );
-  const macroQuoteSymbols = useMemo(() => Array.from(new Set([
+  const macroQuoteSymbols = useMemo(() => orderMarketFetchSymbols([
     ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
     ...sectorEtfDefs.map((item) => normalizeSymbol(item.symbol)),
     ...baskets.flatMap((basket) => basket.stocks.map((stock) => normalizeSymbol(stock.symbol))),
-  ].filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [baskets, sectorEtfDefs]);
+  ]), [baskets, sectorEtfDefs]);
   const macroQuoteSignature = macroQuoteSymbols.join('|');
   const tickerQuoteMap = useMemo(() => {
     const map = new Map<string, MacroQuote>();
@@ -2971,9 +3034,9 @@ export function MacroFlowMap({
       const totalSymbols = macroQuoteSymbols.length;
       const historyAtStart = macroQuoteHistoryRef.current;
       const cacheAtStart = macroQuoteCacheRef.current;
-      const targetSymbols = macroQuoteSymbols.filter((symbol) => (
+      const targetSymbols = orderMarketFetchSymbols(macroQuoteSymbols.filter((symbol) => (
         !getStoredQuoteForDate(symbol, FLOW_END_DATE, historyAtStart, cacheAtStart)
-      ));
+      )));
       const pendingSymbols = new Set(targetSymbols);
       const totalBatches = Math.max(1, Math.ceil(targetSymbols.length / SNAPSHOT_BATCH_SIZE));
       const cachedSymbols = totalSymbols - pendingSymbols.size;
@@ -3012,7 +3075,7 @@ export function MacroFlowMap({
         setMacroQuoteCache((current) => ({ ...current, ...quotes }));
       };
       const fetchSingleQuotes = async (symbols: string[]): Promise<Record<string, MacroQuote | null>> => {
-        const singleBatchSize = 8;
+        const singleBatchSize = 2;
         const resolvedQuotes: Record<string, MacroQuote | null> = {};
         for (let index = 0; index < symbols.length; index += singleBatchSize) {
           const singleBatch = symbols.slice(index, index + singleBatchSize);
@@ -3060,24 +3123,23 @@ export function MacroFlowMap({
             if (!response.ok || !data.success || !data.quotes) {
               throw new Error(data.error || 'quotes fetch failed');
             }
-            const resolvedSymbols = new Set<string>();
+            const returnedSymbols = new Set<string>();
             const batchQuotes: Record<string, MacroQuote | null> = {};
             Object.entries(data.quotes as Record<string, MacroQuoteResult>).forEach(([key, quote]) => {
               const requestKey = normalizeSymbol(String(key));
               const quoteKey = normalizeSymbol(String(quote.symbol || ''));
               const normalized = batch.includes(quoteKey) ? quoteKey : requestKey || quoteKey;
               if (!normalized) return;
+              returnedSymbols.add(normalized);
               const parsed = parseMacroQuoteResult(quote, normalized);
               if (parsed) {
                 batchQuotes[normalized] = parsed;
-                resolvedSymbols.add(normalized);
               }
             });
             commitQuotes(batchQuotes);
-            const missingSymbols = batch.filter((symbol) => !resolvedSymbols.has(symbol));
+            const missingSymbols = batch.filter((symbol) => !returnedSymbols.has(symbol));
             await fetchSingleQuotes(missingSymbols);
           } catch {
-            await fetchSingleQuotes(batch);
           }
           setProgress(currentBatch === totalBatches
             ? pendingSymbols.size === 0 ? 'done' : 'partial'
@@ -3460,6 +3522,8 @@ export function MacroFlowMap({
     setChartComparisonSymbols((current) => current.filter((symbol) => normalizeSymbol(symbol) !== activeNormalized));
   }, [activeSymbol]);
 
+  const chartUsesJapanYahooFallback = [activeSymbol, ...chartComparisonSymbols].some(isJapanStock);
+
   useEffect(() => {
     const symbols = Array.from(new Set([
       activeSymbol,
@@ -3675,11 +3739,11 @@ export function MacroFlowMap({
       ))
       .map(([symbol]) => symbol);
   }, [baskets]);
-  const sparklineSymbols = useMemo(() => Array.from(new Set([
+  const sparklineSymbols = useMemo(() => orderMarketFetchSymbols([
     ...stockKlineSymbols,
     ...sectorEtfDefs.map((item) => normalizeSymbol(item.symbol)),
     ...REGIONAL_MARKET_DEFS.map((region) => normalizeSymbol(region.symbol)),
-  ].filter((symbol) => Boolean(symbol) && !isUnsupportedDataSymbol(symbol)))), [sectorEtfDefs, stockKlineSymbols]);
+  ]), [sectorEtfDefs, stockKlineSymbols]);
   const sparklineSymbolSignature = sparklineSymbols.join('|');
   const sparklineReqNum = getSparklineReqNum(rangeStartDate, rangeEndDate);
   const sectorRollupCandles = useMemo(() => {
@@ -3763,9 +3827,9 @@ export function MacroFlowMap({
         setSparklineCache((current) => ({ ...current, ...cachedCandles }));
       }
 
-      const remainingSymbols = sparklineSymbols.filter((symbol) => (
+      const remainingSymbols = orderMarketFetchSymbols(sparklineSymbols.filter((symbol) => (
         !hasCandlesForRequestedRange(cacheWithStored[symbol], rangeStartDate, rangeEndDate)
-      ));
+      )));
       if (remainingSymbols.length === 0) {
         setKlineFetchProgress({
           status: 'done',
@@ -3805,7 +3869,11 @@ export function MacroFlowMap({
         });
 
         const batch = remainingSymbols.slice(batchIndex * KLINE_BATCH_SIZE, (batchIndex + 1) * KLINE_BATCH_SIZE);
-        const results = await Promise.all(batch.map(fetchKline));
+        const results: Array<readonly [string, Candle[], string] | null> = [];
+        for (const symbol of batch) {
+          if (cancelled || klineQueueRunIdRef.current !== runId) return;
+          results.push(await fetchKline(symbol));
+        }
         if (cancelled || klineQueueRunIdRef.current !== runId) return;
 
         const next: Record<string, Candle[]> = {};
@@ -4442,9 +4510,9 @@ export function MacroFlowMap({
     const needsHistoryBackfill = (symbol: string, date: string) => (
       shouldReplaceStoredQuoteWithKline(getStoredQuoteForDate(symbol, date, historyAtStart, latestQuotes), date)
     );
-    const targetSymbols = macroQuoteSymbols.filter((symbol) => (
+    const targetSymbols = orderMarketFetchSymbols(macroQuoteSymbols.filter((symbol) => (
       datesNewestFirst.some((date) => needsHistoryBackfill(symbol, date))
-    ));
+    )));
     const totalMissing = targetSymbols.reduce((sum, symbol) => (
       sum + datesNewestFirst.filter((date) => needsHistoryBackfill(symbol, date)).length
     ), 0);
@@ -4520,11 +4588,13 @@ export function MacroFlowMap({
       });
 
       const batch = targetSymbols.slice(batchIndex * KLINE_BATCH_SIZE, (batchIndex + 1) * KLINE_BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map(async (symbol) => {
+      const batchResults: Array<readonly [string, Candle[]] | null> = [];
+      for (const symbol of batch) {
         const normalizedSymbol = normalizeSymbol(symbol);
         const cachedCandles = await readStoredKlineCandles(normalizedSymbol, backfillReqNum);
         if (cachedCandles && hasCandlesForRequestedRange(cachedCandles, rangeStartDate, rangeEndDate)) {
-          return [normalizedSymbol, cachedCandles] as const;
+          batchResults.push([normalizedSymbol, cachedCandles] as const);
+          continue;
         }
         try {
           const response = await fetch('/api/moomoo/kline', {
@@ -4537,13 +4607,16 @@ export function MacroFlowMap({
           const candles = Array.isArray(data.candles)
             ? (data.candles as Candle[]).filter((candle) => Number.isFinite(candle.close) && candle.close > 0)
             : [];
-          if (!response.ok || !data.success || candles.length === 0) return null;
+          if (!response.ok || !data.success || candles.length === 0) {
+            batchResults.push(null);
+            continue;
+          }
           await writeStoredKlineCandles(normalizedSymbol, backfillReqNum, candles);
-          return [normalizedSymbol, candles] as const;
+          batchResults.push([normalizedSymbol, candles] as const);
         } catch {
-          return null;
+          batchResults.push(null);
         }
-      }));
+      }
       if (historyBackfillRunIdRef.current !== runId) return;
 
       const updates: Record<string, Record<string, MacroQuote | null>> = {};
@@ -6002,13 +6075,14 @@ export function MacroFlowMap({
                           key={timeframe}
                           type="button"
                           onClick={() => onChartTimeframeChange(timeframe)}
+                          title={getChartTimeframeButtonTitle(timeframe, chartUsesJapanYahooFallback)}
                           className={`px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
                             chartTimeframe === timeframe
                               ? 'bg-emerald-500 text-black'
                               : 'text-gray-400 hover:text-white hover:bg-[#111111]'
                           }`}
                         >
-                          {formatTimeframeLabel(timeframe)}
+                          {formatChartTimeframeLabel(timeframe, chartUsesJapanYahooFallback)}
                         </button>
                       ))}
                     </div>

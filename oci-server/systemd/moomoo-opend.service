@@ -1,0 +1,32 @@
+[Unit]
+Description=MooView用 Moomoo OpenD
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mooview
+Group=mooview
+WorkingDirectory=/opt/mooview/opend/current
+ExecStart=/opt/mooview/opend/current/OpenD -cfg_file=/etc/mooview/OpenD.xml -console=1 -api_ip=127.0.0.1 -api_port=11111 -lang=en -log_level=info -auto_hold_quote_right=1
+StandardInput=null
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077
+ReadWritePaths=/opt/mooview/opend/releases /var/lib/mooview
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=MooView Discord automation worker
+After=network-online.target moomoo-gateway.service
+Wants=network-online.target
+Requires=moomoo-gateway.service
+
+[Service]
+Type=simple
+User=mooview
+Group=mooview
+WorkingDirectory=/opt/mooview/app
+EnvironmentFile=/etc/mooview/mooview.env
+Environment=NODE_ENV=production
+Environment=MOOVIEW_SHARED_SETTINGS=true
+Environment=MOOVIEW_DATA_DIR=/var/lib/mooview
+Environment=MOOVIEW_DISCORD_AUTOMATION_ENABLED=true
+Environment=MOOVIEW_AUTOMATION_BASE_URL=http://127.0.0.1:3001
+Environment=MOOVIEW_DISCORD_AUTOMATION_WORKER_PORT=3001
+ExecStart=/usr/bin/node /opt/mooview/app/dist/discord-automation-worker.cjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

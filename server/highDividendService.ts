@@ -12,11 +12,13 @@ import {
   type HighDividendAutomationState,
 } from '../highDividend';
 import type { ETFDataRow } from '../src/highDividend/types';
-import { notifyDiscordTextToWebhook } from './discordNotifier';
+import { notifyDiscordTextAndFilesToWebhook } from './discordNotifier';
+import { renderHighDividendDiscordCharts } from './highDividendChartRenderer';
 import { resolveWorkspaceSettingsDirectory } from './workspaceSettingsStore';
 
 const CSV_URL = 'https://www.daiwa-am.co.jp/gxj/management_result_csv.php?code=1165&lang=ja';
 const FUND_URL = 'https://globalxetfs.co.jp/funds/563A/index.html';
+const MOOVIEW_URL = 'https://mooview-oci.taild87712.ts.net/';
 const JAPAN_TIME_ZONE = 'Asia/Tokyo';
 const SETTINGS_FILE_NAME = 'high-dividend-automation-settings.json';
 const STATE_FILE_NAME = 'high-dividend-automation-state.json';
@@ -209,6 +211,7 @@ export function buildHighDividendDiscordMessage(
   const latest = data[data.length - 1];
   if (!latest) throw new Error('Discord通知に使用する563Aデータがありません。');
   const previousDividend = findPreviousDividendRow(data, latest);
+  const previousDay = data[data.length - 2];
   const latestUnits = latest.nav > 0 ? latest.net_assets / latest.nav : 0;
   const previousUnits = previousDividend.nav > 0
     ? previousDividend.net_assets / previousDividend.nav
@@ -217,14 +220,22 @@ export function buildHighDividendDiscordMessage(
     ? ((latestUnits / previousUnits) - 1) * 100
     : 0;
   const sign = unitsChangePercent >= 0 ? '+' : '';
+  const previousDayUnits = previousDay && previousDay.nav > 0
+    ? previousDay.net_assets / previousDay.nav
+    : 0;
+  const dailyUnitsChangePercent = previousDayUnits > 0
+    ? ((latestUnits / previousDayUnits) - 1) * 100
+    : 0;
+  const dailySign = dailyUnitsChangePercent >= 0 ? '+' : '';
   const dividendDate = previousDividend.date.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3');
   return [
     `${notificationDate}の563A`,
     `基準価額：${Math.round(latest.nav).toLocaleString('ja-JP')} (/100円)`,
     `純資産：${(latest.net_assets / 100_000_000).toFixed(2)} (億円)`,
-    `総発行口数：${Math.round(latestUnits).toLocaleString('ja-JP')}(口)`,
+    `総発行口数：${Math.round(latestUnits).toLocaleString('ja-JP')}(口)（前日比：${dailySign}${dailyUnitsChangePercent.toFixed(2)}%）`,
     `前回配当(${dividendDate})比 口数増減: **${sign}${unitsChangePercent.toFixed(2)}%**`,
     `URL：${FUND_URL}`,
+    `MooView：${MOOVIEW_URL}`,
   ].join('\n');
 }
 
@@ -261,8 +272,10 @@ async function runScheduledExtraction(clock: JapanClock): Promise<void> {
     if (!webhookUrl) {
       throw new Error('高配当シミュレーター用Discord Webhook URLが設定されていません。');
     }
-    await notifyDiscordTextToWebhook(
+    const charts = await renderHighDividendDiscordCharts(snapshot.data);
+    await notifyDiscordTextAndFilesToWebhook(
       buildHighDividendDiscordMessage(snapshot.data, clock.date),
+      charts,
       webhookUrl,
     );
     await writeHighDividendAutomationState({

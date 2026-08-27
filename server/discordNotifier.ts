@@ -95,6 +95,28 @@ export async function notifyDiscordTextToWebhook(text: string, webhookUrlValue: 
 }
 
 /**
+ * 指定Webhookへ本文を先に送り、その後に添付ファイルを送信する。
+ * 高配当シミュレーターはサーバーで生成したPNGをメモリ上のまま渡すため、
+ * 一時ファイルやブラウザ自動操作を必要としない。
+ */
+export async function notifyDiscordTextAndFilesToWebhook(
+  text: string,
+  files: DiscordAutomationArtifact[],
+  webhookUrlValue: string,
+): Promise<void> {
+  const webhookUrl = validateDiscordWebhookUrl(webhookUrlValue.trim());
+  const normalized = text.trim();
+  if (!normalized) throw new Error('Discordへ送信する本文が空です。');
+  if (files.length === 0) throw new Error('Discordへ送信する画像がありません。');
+  for (const part of splitDiscordText(normalized)) {
+    await sendDiscordJson(webhookUrl, part);
+  }
+  for (let index = 0; index < files.length; index += DISCORD_FILES_PER_MESSAGE) {
+    await sendDiscordFiles(webhookUrl, files.slice(index, index + DISCORD_FILES_PER_MESSAGE));
+  }
+}
+
+/**
  * Gemini本文を先に送信し、その後は動画、画像の順で添付する。
  * Discordの2,000文字制限を超える本文は、内容を変更せず連続メッセージへ分割する。
  */

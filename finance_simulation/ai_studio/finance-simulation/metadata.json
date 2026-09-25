@@ -1,0 +1,6 @@
+{
+  "name": "Finance Simulation",
+  "description": "統合型 家計・資産・配当シミュレーションツール (Finance Simulation)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -17,6 +17,12 @@ interface ChartPoint {
   secondary?: number;
 }
 
+interface DistributionEvent {
+  date: string;
+  amount: number;
+  sequence: number;
+}
+
 function escapeXml(value: string): string {
   return value.replace(/[<>&'\"]/g, (character) => ({
     '<': '&lt;',
@@ -82,6 +88,56 @@ function dateLabelsSvg(points: ChartPoint[]): string {
   )).join('');
 }
 
+function distributionEvents(rows: ETFDataRow[]): DistributionEvent[] {
+  const amountsByDate = new Map<string, number>();
+  for (const row of rows) {
+    const date = row.last_div_date.replace(/[^\d]/g, '');
+    if (/^\d{8}$/.test(date) && row.last_div > 0) {
+      amountsByDate.set(date, row.last_div);
+    }
+  }
+  // 画面と同じく、直近の配当イベントを第1回・第2回として重ねる。
+  return [...amountsByDate.entries()]
+    .filter(([date]) => date >= rows[0].date && date <= rows[rows.length - 1].date)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(-2)
+    .map(([date, amount], index) => ({ date, amount, sequence: index + 1 }));
+}
+
+function indexForDistributionDate(points: ChartPoint[], date: string): number | null {
+  const exact = points.findIndex((point) => point.date === date);
+  if (exact >= 0) return exact;
+  const before = points.reduce<number>((candidate, point, index) => (
+    point.date <= date ? index : candidate
+  ), -1);
+  return before >= 0 ? before : null;
+}
+
+function distributionMarkersSvg(points: ChartPoint[], events: DistributionEvent[]): string {
+  return events.map((event) => {
+    const index = indexForDistributionDate(points, event.date);
+    if (index === null) return '';
+    const x = xFor(index, points.length);
+    const label = `第${event.sequence}回 ${Math.round(event.amount).toLocaleString('ja-JP')}円`;
+    const nearRight = x > PLOT.left + PLOT.width - 150;
+    return [
+      `<line x1="${x}" y1="${PLOT.top}" x2="${x}" y2="${PLOT.top + PLOT.height}" stroke="${ORANGE}" stroke-width="2" stroke-dasharray="6 6" opacity="0.9"/>`,
+      `<text x="${nearRight ? x - 8 : x + 8}" y="${PLOT.top + PLOT.height - 18}" text-anchor="${nearRight ? 'end' : 'start'}" class="distribution">${escapeXml(label)}</text>`,
+    ].join('');
+  }).join('');
+}
+
+function nextDistributionDate(events: DistributionEvent[]): string | null {
+  const latest = events.at(-1)?.date;
+  if (!latest) return null;
+  const year = Number(latest.slice(0, 4));
+  const month = Number(latest.slice(4, 6));
+  const day = latest.slice(6, 8);
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const nextYear = month === 12 ? year + 1 : year;
+  return `${nextYear}${String(nextMonth).padStart(2, '0')}${day}`;
+}
+
 function baseSvg(title: string, legend: string, content: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
     <style>
@@ -90,6 +146,7 @@ function baseSvg(title: string, legend: string, content: string): string {
       .axis { font-family: Arial, 'Noto Sans JP', sans-serif; font-size: 16px; fill: #6b7280; }
       .note { font-family: Arial, 'Noto Sans JP', sans-serif; font-size: 17px; fill: #4b5563; }
       .value { font-family: Arial, 'Noto Sans JP', sans-serif; font-size: 22px; font-weight: 700; fill: ${BLACK}; }
+      .distribution { font-family: Arial, 'Noto Sans JP', sans-serif; font-size: 17px; font-weight: 700; fill: ${ORANGE}; }
     </style>
     <rect width="100%" height="100%" fill="#ffffff"/>
     <rect x="18" y="18" width="1244" height="684" fill="#ffffff" stroke="#e5e7eb" stroke-width="2"/>
@@ -117,6 +174,11 @@ export async function renderHighDividendDiscordCharts(
   }));
   const navScale = range(navPoints.flatMap((point) => [point.primary, point.secondary || point.primary]));
   const navLatest = navPoints[navPoints.length - 1];
+  const distributions = distributionEvents(rows);
+  const distributionHistory = distributions
+    .map((event) => `第${event.sequence}回 ${Math.round(event.amount).toLocaleString('ja-JP')}円`)
+    .join(' → ');
+  const nextDistribution = nextDistributionDate(distributions);
   const navSvg = baseSvg(
     '基準価額（NAV）推移',
     '■ 基準価額　― 再投資NAV',
@@ -126,8 +188,10 @@ export async function renderHighDividendDiscordCharts(
      <path d="${linePath(navPoints.map((point) => point.primary), navScale)}" fill="none" stroke="${BLACK}" stroke-width="4"/>
      <path d="${linePath(navPoints.map((point) => point.secondary || point.primary), navScale)}" fill="none" stroke="${GREEN}" stroke-width="4"/>
      <circle cx="${xFor(navPoints.length - 1, navPoints.length)}" cy="${yFor(navLatest.primary, navScale)}" r="6" fill="${BLACK}"/>
+     ${distributionMarkersSvg(navPoints, distributions)}
      ${dateLabelsSvg(navPoints)}
-     <text x="52" y="647" class="note">最新基準価額</text>
+     <text x="52" y="647" class="note">決算履歴：${escapeXml(distributionHistory || '—')}</text>
+     <text x="1165" y="647" text-anchor="end" class="distribution">${nextDistribution ? `次回決算：${displayDate(nextDistribution)}` : ''}</text>
      <text x="52" y="680" class="value">¥${Math.round(navLatest.primary).toLocaleString('ja-JP')}</text>
      <text x="1165" y="680" text-anchor="end" class="note">基準日：${displayDate(navLatest.date)}</text>`,
   );
@@ -159,6 +223,7 @@ export async function renderHighDividendDiscordCharts(
      <path d="${linePath(unitsPoints.map((point) => point.primary), unitsScale)}" fill="none" stroke="${ORANGE}" stroke-width="5"/>
      <path d="${linePath(unitsPoints.map((point) => point.secondary || 0), assetsScale)}" fill="none" stroke="${BLACK}" stroke-width="3" stroke-dasharray="10 8"/>
      <circle cx="${xFor(unitsPoints.length - 1, unitsPoints.length)}" cy="${yFor(latest.primary, unitsScale)}" r="7" fill="${ORANGE}"/>
+     ${distributionMarkersSvg(unitsPoints, distributions)}
      ${dateLabelsSvg(unitsPoints)}
      <rect x="735" y="85" width="430" height="45" rx="4" fill="#fff7ed" stroke="#fed7aa"/>
      <text x="755" y="115" class="value" fill="${ORANGE}">前日比 口数増減：${sign}${dailyChange.toFixed(2)}%</text>

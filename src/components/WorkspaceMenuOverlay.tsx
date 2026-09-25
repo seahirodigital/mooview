@@ -10,6 +10,7 @@ interface WorkspaceMenuOverlayProps {
 }
 
 const MENU_ITEMS: Array<{ view: AppView; label: string }> = [
+  { view: 'finance-simulation', label: '財務シミュレーション' },
   { view: 'charts', label: 'チャートビュー' },
   { view: 'value-chain', label: 'バリューチェーンマップ' },
   { view: 'macro-flow', label: 'マクロ資金フロー' },

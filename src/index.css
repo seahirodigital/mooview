@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 財務シミュレーション画面のモバイル下部ナビゲーション用。 */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+
 :root,
 body {
   background: #050505;
@@ -21,6 +28,17 @@ body,
     height: 100%;
     overflow: hidden;
     overscroll-behavior: none;
+  }
+
+  /* 財務シミュレーションだけは固定チャートではなく、表全体を縦にスクロールする。 */
+  html.finance-simulation-scroll,
+  body.finance-simulation-scroll,
+  html.finance-simulation-scroll #root {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
   }
 }
 

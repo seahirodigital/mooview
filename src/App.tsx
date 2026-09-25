@@ -44,6 +44,7 @@ import { DisclosureDatabase } from './components/DisclosureDatabase';
 import { DisclosureSettingsPanel } from './components/DisclosureSettingsPanel';
 import { WorkspaceMenuOverlay } from './components/WorkspaceMenuOverlay';
 import { HighDividendApp } from './highDividend/App';
+import FinanceSimulationApp from '../finance_simulation/ai_studio/finance-simulation/src/App';
 import { APP_VIEW_ORDER, type AppView } from './appView';
 import {
   calculateExpressionQuote,
@@ -8244,10 +8245,14 @@ export default function App() {
     setWorkspaceMenuOpen(false);
   };
 
-  if (appView === 'high-dividend') {
+  if (appView === 'high-dividend' || appView === 'finance-simulation') {
     return (
       <>
-        <HighDividendApp onOpenWorkspaceMenu={() => setWorkspaceMenuOpen(true)} />
+        {appView === 'high-dividend' ? (
+          <HighDividendApp onOpenWorkspaceMenu={() => setWorkspaceMenuOpen(true)} />
+        ) : (
+          <FinanceSimulationApp onOpenWorkspaceMenu={() => setWorkspaceMenuOpen(true)} />
+        )}
         <WorkspaceMenuOverlay
           isOpen={workspaceMenuOpen}
           currentView={appView}

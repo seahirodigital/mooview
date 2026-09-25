@@ -33,6 +33,12 @@ import {
   sharedWorkspaceSettingsEnabled,
   writeSharedWorkspaceSettings,
 } from './server/workspaceSettingsStore.js';
+import {
+  readFinanceCloudSnapshot,
+  subscribeFinanceCloud,
+  writeFinanceCloudSnapshot,
+} from './server/financeSimulationCloudStore.js';
+import { fetchYahooFinanceQuote } from './server/yahooFinanceClient.js';
 
 configureSystemTlsTrust();
 
@@ -42,6 +48,11 @@ const host = process.env.HOST?.trim() || '0.0.0.0';
 let gatewayProcess: ChildProcess | null = null;
 
 app.use(express.json({ limit: '20mb' }));
+
+// 起動直後に元帳を温め、最初に開くスマホ・Webで Apps Script のコールドスタートを待たせない。
+void readFinanceCloudSnapshot().catch((error) => {
+  console.error('財務クラウド元帳の起動時読込に失敗しました:', error instanceof Error ? error.message : error);
+});
 
 function workspaceSettingsOriginAllowed(origin: string, requestHost: string): boolean {
   try {
@@ -72,6 +83,113 @@ app.use('/api/workspace-settings', (request, response, next) => {
     return;
   }
   next();
+});
+
+app.use('/api/finance-simulation', (request, response, next) => {
+  const origin = request.get('origin');
+  if (origin) {
+    if (!workspaceSettingsOriginAllowed(origin, request.get('host') || '')) {
+      response.status(403).json({ error: '許可されていないオリジンです。' });
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,PUT,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (request.method === 'OPTIONS') {
+    response.status(204).end();
+    return;
+  }
+  next();
+});
+
+app.get('/api/finance-simulation/sync', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  try {
+    const snapshot = await readFinanceCloudSnapshot(String(request.query.spreadsheetId || '').trim() || undefined);
+    response.json({
+      ok: true,
+      state: snapshot.state,
+      revision: snapshot.revision,
+      updatedAt: snapshot.updatedAt,
+      spreadsheetId: snapshot.spreadsheetId,
+      message: 'クラウド元帳から最新データを読み込みました。',
+    });
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : 'スプレッドシートの読み込みに失敗しました。' });
+  }
+});
+
+// AIや外部分析ツールがURLだけで最新の財務元帳を読める共有JSON。
+app.get('/share/finance-simulation.json', async (_request, response) => {
+  response.type('application/json');
+  response.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  try {
+    const snapshot = await readFinanceCloudSnapshot();
+    response.json({
+      schemaVersion: 2,
+      kind: 'mooview-finance-simulation',
+      revision: snapshot.revision,
+      updatedAt: snapshot.updatedAt,
+      state: snapshot.state,
+    });
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : '共有JSONの読み込みに失敗しました。' });
+  }
+});
+
+app.put('/api/finance-simulation/sync', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  if (!request.body?.state) {
+    response.status(400).json({ error: '保存データを指定してください。' });
+    return;
+  }
+  try {
+    const snapshot = await writeFinanceCloudSnapshot(
+      request.body.state,
+      String(request.body?.spreadsheetId || '').trim() || undefined,
+    );
+    response.json({
+      ok: true,
+      state: snapshot.state,
+      revision: snapshot.revision,
+      updatedAt: snapshot.updatedAt,
+      spreadsheetId: snapshot.spreadsheetId,
+      message: 'クラウド元帳へ保存しました。',
+    });
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : 'スプレッドシートへの保存に失敗しました。' });
+  }
+});
+
+// 同じ財務元帳を開いているPC・スマホへ、保存直後に再読込を通知する。
+app.get('/api/finance-simulation/events', async (_request, response) => {
+  response.status(200);
+  response.setHeader('Content-Type', 'text/event-stream');
+  response.setHeader('Cache-Control', 'no-cache, no-transform');
+  response.setHeader('Connection', 'keep-alive');
+  response.flushHeaders();
+  response.write(': connected\n\n');
+  const unsubscribe = subscribeFinanceCloud(response);
+  const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 25_000);
+  response.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
+
+// 財務シミュレーションの現在値はOpenD/MoomooではなくYahoo Financeを利用する。
+app.post('/api/yahoo/quote', async (request, response) => {
+  try {
+    const quote = await fetchYahooFinanceQuote(request.body?.symbol || request.body?.ticker);
+    response.json({ success: true, ...quote });
+  } catch (error) {
+    response.status(502).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Yahoo Financeから現在値を取得できません。',
+    });
+  }
 });
 
 app.get('/api/workspace-settings', async (request, response) => {

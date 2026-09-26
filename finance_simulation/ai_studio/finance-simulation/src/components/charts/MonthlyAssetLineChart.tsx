@@ -26,7 +26,7 @@ interface MonthlyAssetLineChartProps {
   masked?: boolean;
 }
 
-// 表と同じ月次元帳を使用し、凡例の選択系列を基準に縦軸スケールを切り替える。
+// 表と同じ月次元帳を使用し、ONになっている系列全体に合わせて縦軸を切り替える。
 export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ data, masked = false }) => {
   const [visibleKeys, setVisibleKeys] = useState<SeriesKey[]>(['netWorth']);
   const [activeKey, setActiveKey] = useState<SeriesKey>('netWorth');
@@ -44,12 +44,12 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
   const padding = { top: 30, right: 28, bottom: 58, left: 74 };
   const graphWidth = width - padding.left - padding.right;
   const graphHeight = height - padding.top - padding.bottom;
-  const activeValues = data.map((point) => point[activeKey]);
-  const activeMinimum = Math.min(...activeValues);
-  const activeMaximum = Math.max(...activeValues);
-  const activeRange = Math.max(activeMaximum - activeMinimum, Math.abs(activeMaximum) * 0.08, 1);
-  const minY = activeMinimum - activeRange * 0.16;
-  const maxY = activeMaximum + activeRange * 0.16;
+  const visibleValues = data.flatMap((point) => visibleSeries.map((series) => point[series.key]));
+  const visibleMinimum = Math.min(...visibleValues);
+  const visibleMaximum = Math.max(...visibleValues);
+  const visibleRange = Math.max(visibleMaximum - visibleMinimum, Math.abs(visibleMaximum) * 0.08, 1);
+  const minY = visibleMinimum - visibleRange * 0.16;
+  const maxY = visibleMaximum + visibleRange * 0.16;
   const getX = (index: number) => padding.left + (index / Math.max(data.length - 1, 1)) * graphWidth;
   const getY = (value: number) => padding.top + graphHeight - ((value - minY) / Math.max(maxY - minY, 1)) * graphHeight;
   const createPath = (key: SeriesKey) => data
@@ -74,13 +74,11 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
   };
 
   return (
-    <section className="border border-black/10 bg-[#f5f5f7]/80 p-5 transition-colors dark:border-white/10 dark:bg-white/5 sm:p-7">
-      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <section className="-mt-4 border-0 bg-transparent p-5 transition-colors sm:p-7">
+      <div className="mb-4">
         <div>
           <h2 className="text-base font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]">月次資産推移</h2>
-          <p className="mt-1 text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">横軸：月次　縦軸：金額（万円）。選択中の系列に合わせて縦軸を拡大します。</p>
         </div>
-        <span className="font-mono text-xs font-semibold text-[#0071e3] dark:text-[#2997ff]">{currentPoint.label}</span>
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2" aria-label="表示する資産系列">

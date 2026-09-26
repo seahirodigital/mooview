@@ -686,10 +686,8 @@ export const AssetManagementTab: React.FC = () => {
   const monthlyAssetChartData = timelineColumns.map((column) => {
     const coreStocks = Number(monthlyOverrides.prog_core_stocks?.[column.id] ?? coreStocksTotal) || 0;
     const dividendStocks = Number(monthlyOverrides.prog_dividend_stocks?.[column.id] ?? totalInvestedDividends) || 0;
+    const cash = Number(cashPoolByCol[column.id] ?? cashTotal) || 0;
     const investmentCapacity = Number(cumulativeSurplusByCol[column.id] ?? 0) || 0;
-    // 現金余力には投資余力の累積分も含まれるため、積み上げ時の二重計上を避ける。
-    const cashPool = Number(cashPoolByCol[column.id] ?? cashTotal) || 0;
-    const cash = Math.round((cashPool - investmentCapacity) * 10) / 10;
     return {
       label: labelFor(`header_month_${column.id}`, column.label),
       netWorth: Math.round((netWorthTotal + investmentCapacity) * 10) / 10,

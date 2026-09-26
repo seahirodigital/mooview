@@ -19,8 +19,6 @@ const SERIES: Array<{ key: SeriesKey; label: string; color: string }> = [
   { key: 'investmentCapacity', label: '投資余力（累積余剰）', color: '#5ac8fa' },
 ];
 
-const STACKED_SERIES: SeriesKey[] = ['coreStocks', 'dividendStocks', 'cash', 'investmentCapacity'];
-
 const formatAmount = (value: number, masked: boolean) => masked ? '***' : `${Math.round(value).toLocaleString()}万円`;
 
 interface MonthlyAssetLineChartProps {
@@ -39,16 +37,18 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
     [visibleKeys],
   );
 
-  // 総資産推計以外は、資産を下から順に積み上げた累積値として描画する。
+  // ONになっている系列だけを、ONにした順序で下から積み上げる。
+  // 総資産推計は比較用の単独線として、累積対象から除外する。
   const chartData = useMemo(() => data.map((point) => {
     let cumulative = 0;
     const stackedPoint = { ...point };
-    STACKED_SERIES.forEach((key) => {
+    visibleKeys.forEach((key) => {
+      if (key === 'netWorth') return;
       cumulative += point[key];
       stackedPoint[key] = cumulative;
     });
     return stackedPoint;
-  }), [data]);
+  }), [data, visibleKeys]);
 
   if (data.length === 0) return null;
 

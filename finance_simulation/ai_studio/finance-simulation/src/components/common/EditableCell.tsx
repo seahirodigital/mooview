@@ -91,7 +91,7 @@ export const EditableCell: React.FC<EditableCellProps> = ({
           onChange={(e) => setTempValue(e.target.value)}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
-          className="bg-white dark:bg-[var(--color-finance-dark-surface)] text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] text-xs border border-[var(--color-finance-accent)] rounded-lg px-2 py-1 outline-none font-medium shadow-xs"
+          className="bg-white dark:bg-[#2c2c2e] text-[#1d1d1f] dark:text-[#f5f5f7] text-xs border border-[#0071e3] rounded-lg px-2 py-1 outline-none font-medium shadow-xs"
         >
           {options.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -104,7 +104,7 @@ export const EditableCell: React.FC<EditableCellProps> = ({
 
     return (
       <div className={`flex items-center gap-1 ${alignClass}`}>
-        {prefix && <span className="text-[11px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 select-none">{prefix}</span>}
+        {prefix && <span className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 select-none">{prefix}</span>}
         <input
           ref={inputRef as React.RefObject<HTMLInputElement>}
           type={type === 'number' ? 'number' : 'text'}
@@ -115,9 +115,9 @@ export const EditableCell: React.FC<EditableCellProps> = ({
           onChange={(e) => setTempValue(e.target.value)}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
-          className={`bg-white dark:bg-[var(--color-finance-dark-surface)] text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] text-xs border border-[var(--color-finance-accent)] rounded-lg px-2 py-0.5 outline-none font-mono font-bold w-full min-w-[60px] shadow-xs ${alignClass}`}
+          className={`bg-white dark:bg-[#2c2c2e] text-[#1d1d1f] dark:text-[#f5f5f7] text-xs border border-[#0071e3] rounded-lg px-2 py-0.5 outline-none font-mono font-bold w-full min-w-[60px] shadow-xs ${alignClass}`}
         />
-        {suffix && <span className="text-[11px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 select-none">{suffix}</span>}
+        {suffix && <span className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 select-none">{suffix}</span>}
       </div>
     );
   }
@@ -132,14 +132,14 @@ export const EditableCell: React.FC<EditableCellProps> = ({
     <div
       onDoubleClick={handleDoubleClick}
       title="ダブルクリックで直接編集"
-      className={`group cursor-pointer hover:bg-[var(--color-finance-accent)]/10 hover:ring-1 hover:ring-[var(--color-finance-accent)]/30 rounded-lg px-1.5 py-0.5 -mx-1 transition-all flex items-center ${alignClass} ${className}`}
+      className={`group cursor-pointer hover:bg-[#0071e3]/10 hover:ring-1 hover:ring-[#0071e3]/30 rounded-lg px-1.5 py-0.5 -mx-1 transition-all flex items-center ${alignClass} ${className}`}
     >
       <span className={`tabular-nums ${textClassName}`}>
         {prefix}
         {displayVal}
         {suffix}
       </span>
-      <span className="opacity-0 group-hover:opacity-70 text-[10px] text-[var(--color-finance-accent)] ml-1 select-none shrink-0 font-sans">
+      <span className="opacity-0 group-hover:opacity-70 text-[10px] text-[#0071e3] ml-1 select-none shrink-0 font-sans">
         ✎
       </span>
     </div>

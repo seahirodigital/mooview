@@ -21,7 +21,7 @@ export const DividendTimeline: React.FC = () => {
       onClick={(event) => event.stopPropagation()}
       className={`z-20 grid grid-cols-2 gap-2 border p-2 text-xs ${
         compact ? 'col-span-3' : 'absolute top-8 left-1/2 w-44 -translate-x-1/2 p-3 shadow-xl'
-      } ${isDark ? 'border-white/15 bg-[var(--color-finance-ink)] text-white' : 'border-black/10 bg-white text-[var(--color-finance-ink)]'}`}
+      } ${isDark ? 'border-white/15 bg-[#1d1d1f] text-white' : 'border-black/10 bg-white text-[#1d1d1f]'}`}
     >
       <label className="space-y-1">
         <span className="block text-[10px] opacity-60">支払日</span>
@@ -64,8 +64,8 @@ export const DividendTimeline: React.FC = () => {
   return (
     <div className="-mt-4 bg-transparent p-0 transition-colors">
       <div className="flex items-center gap-2">
-        <Calendar className="h-4 w-4 text-[var(--color-finance-accent)]" />
-        <h2 className={`text-sm font-semibold sm:text-base ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+        <Calendar className="h-4 w-4 text-[#0071e3]" />
+        <h2 className={`text-sm font-semibold sm:text-base ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
           配当日程：合計: +{totalMonthlyDividend.toFixed(1)}万円/月
         </h2>
       </div>
@@ -91,7 +91,7 @@ export const DividendTimeline: React.FC = () => {
                       <button
                         onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                         title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
-                        className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-finance-accent)] text-[8px] font-bold text-white shadow-md"
+                        className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0071e3] text-[8px] font-bold text-white shadow-md"
                       >
                         {day}
                       </button>
@@ -100,10 +100,10 @@ export const DividendTimeline: React.FC = () => {
                       onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                       className="absolute left-1/2 top-7 flex -translate-x-1/2 cursor-pointer flex-col items-center whitespace-nowrap text-center"
                     >
-                      <span className="max-w-28 truncate text-[10px] font-semibold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]" title={stock.name || stock.ticker}>
+                      <span className="max-w-28 truncate text-[10px] font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
                         {stock.name || stock.ticker}
                       </span>
-                      <span className="mt-0.5 font-mono text-base font-bold leading-none text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">
+                      <span className="mt-0.5 font-mono text-base font-bold leading-none text-[#0071e3] dark:text-[#2997ff]">
                         +{monthlyNet.toFixed(1)}万
                       </span>
                     </div>
@@ -124,14 +124,14 @@ export const DividendTimeline: React.FC = () => {
               <button
                 onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                 title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
-                className="flex h-7 w-7 items-center justify-center justify-self-center rounded-full bg-[var(--color-finance-accent)] text-[9px] font-bold text-white"
+                className="flex h-7 w-7 items-center justify-center justify-self-center rounded-full bg-[#0071e3] text-[9px] font-bold text-white"
               >
                 {day}
               </button>
-              <span className="min-w-0 truncate text-xs font-semibold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]" title={stock.name || stock.ticker}>
+              <span className="min-w-0 truncate text-xs font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
                 {stock.name || stock.ticker}
               </span>
-              <span className="whitespace-nowrap font-mono text-sm font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">+{monthlyNet.toFixed(1)}万</span>
+              <span className="whitespace-nowrap font-mono text-sm font-bold text-[#0071e3] dark:text-[#2997ff]">+{monthlyNet.toFixed(1)}万</span>
               {isEditing && renderEditor(stock, day, true)}
             </div>
           );

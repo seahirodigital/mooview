@@ -43,7 +43,7 @@ export const SimulationTab: React.FC = () => {
   const [newScenario, setNewScenario] = useState<{ name: string; rate: number; color: string }>({
     name: '強気＋ (Ultra)',
     rate: 20,
-    color: 'var(--color-finance-accent-mid)',
+    color: '#af52de',
   });
 
   // Calculate actual initial principal based on linked tab or custom setting
@@ -260,13 +260,13 @@ export const SimulationTab: React.FC = () => {
       <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-black/10 dark:border-white/10">
         <div className="flex flex-wrap items-center gap-2">
           {/* Capital Link Status Selector */}
-          <div className="flex items-center gap-1.5 px-3 py-1 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)] dark:bg-white/5 text-xs">
-            <LinkIcon className="w-3.5 h-3.5 text-[var(--color-finance-accent)]" />
-            <span className="text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">初期元本連動:</span>
+          <div className="flex items-center gap-1.5 px-3 py-1 border border-black/10 dark:border-white/10 bg-[#f5f5f7] dark:bg-white/5 text-xs">
+            <LinkIcon className="w-3.5 h-3.5 text-[#0071e3]" />
+            <span className="text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">初期元本連動:</span>
             <select
               value={capitalSource}
               onChange={(e) => setCapitalSource(e.target.value as any)}
-              className="bg-transparent font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] cursor-pointer outline-hidden"
+              className="bg-transparent font-bold text-[#0071e3] dark:text-[#2997ff] cursor-pointer outline-hidden"
             >
               <option value="core" className="text-black">コア株式のみ ({coreStocksTotal.toLocaleString()}万)</option>
               <option value="core_plus_cash" className="text-black">コア株式＋現金 ({(coreStocksTotal + cashTotal).toLocaleString()}万)</option>
@@ -283,7 +283,7 @@ export const SimulationTab: React.FC = () => {
               setEditingLumpSum(null);
               setShowLumpSumModal(true);
             }}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)] transition-all shadow-xs"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#0071e3] hover:bg-[#0077ed] transition-all shadow-xs"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>一時収入 (退職金・ボーナス等)</span>
@@ -298,31 +298,31 @@ export const SimulationTab: React.FC = () => {
 
       {/* Lump Sum Items Quick Strip (If any configured) */}
       {lumpSums.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 p-2.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/60 dark:bg-white/5 text-xs">
-          <span className="text-[11px] font-semibold text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">
+        <div className="flex flex-wrap items-center gap-2 p-2.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/60 dark:bg-white/5 text-xs">
+          <span className="text-[11px] font-semibold text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">
             登録済み一時収入:
           </span>
           {lumpSums.map((item) => (
             <div
               key={item.id}
-              className="flex items-center gap-1.5 px-2.5 py-1 border border-black/10 dark:border-white/10 bg-white dark:bg-[var(--color-finance-dark-surface)]"
+              className="flex items-center gap-1.5 px-2.5 py-1 border border-black/10 dark:border-white/10 bg-white dark:bg-[#1a1a1c]"
             >
-              <span className="font-bold text-[var(--color-finance-accent)]">{item.year}年目</span>
+              <span className="font-bold text-[#0071e3]">{item.year}年目</span>
               <span>{item.label}:</span>
-              <span className="font-mono font-bold text-[var(--color-finance-positive)]">+{item.amount.toLocaleString()}万円</span>
+              <span className="font-mono font-bold text-[#34c759]">+{item.amount.toLocaleString()}万円</span>
               <button
                 onClick={() => {
                   setEditingLumpSum(item);
                   setShowLumpSumModal(true);
                 }}
-                className="text-[var(--color-finance-ink)]/40 dark:text-[var(--color-finance-surface)]/40 hover:text-[var(--color-finance-accent)] ml-1"
+                className="text-[#1d1d1f]/40 dark:text-[#f5f5f7]/40 hover:text-[#0071e3] ml-1"
                 title="編集"
               >
                 <Edit3 className="w-3 h-3" />
               </button>
               <button
                 onClick={() => handleDeleteLumpSum(item.id)}
-                className="text-[var(--color-finance-ink)]/40 dark:text-[var(--color-finance-surface)]/40 hover:text-finance-negative"
+                className="text-[#1d1d1f]/40 dark:text-[#f5f5f7]/40 hover:text-red-500"
                 title="削除"
               >
                 <Trash2 className="w-3 h-3" />
@@ -335,9 +335,9 @@ export const SimulationTab: React.FC = () => {
       {/* Main Grid: Parameters Control & Scenario Results */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left Column: Editable Parameters */}
-        <div className="lg:col-span-1 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/50 dark:bg-white/5 p-5 space-y-4 transition-colors">
+        <div className="lg:col-span-1 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 p-5 space-y-4 transition-colors">
           <div className="pb-2 border-b border-black/5 dark:border-white/10">
-            <h2 className={`text-sm font-semibold ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+            <h2 className={`text-sm font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
               試算パラメータ
             </h2>
           </div>
@@ -345,7 +345,7 @@ export const SimulationTab: React.FC = () => {
           <div className="space-y-3.5 text-xs">
             {/* Simulation Years (0〜10年後) */}
             <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-              <label className="text-[10px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block mb-1">
+              <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block mb-1">
                 試算期間 (0〜10年後)
               </label>
               <div className="flex items-center justify-between">
@@ -356,7 +356,7 @@ export const SimulationTab: React.FC = () => {
                   max={10}
                   suffix=" 年間"
                   onSave={(val) => updateSimulationConfig({ years: Math.min(10, Math.max(0, Number(val) || 0)) })}
-                  textClassName={`text-base font-bold font-mono ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}
+                  textClassName={`text-base font-bold font-mono ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                 />
                 <input
                   type="range"
@@ -365,7 +365,7 @@ export const SimulationTab: React.FC = () => {
                   step="1"
                   value={simulationYears}
                   onChange={(e) => updateSimulationConfig({ years: Number(e.target.value) })}
-                  className="w-20 accent-[var(--color-finance-accent)] cursor-pointer"
+                  className="w-20 accent-[#0071e3] cursor-pointer"
                 />
               </div>
             </div>
@@ -373,10 +373,10 @@ export const SimulationTab: React.FC = () => {
             {/* Current Initial Principal */}
             <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block">
+                <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block">
                   初期元本 (万円)
                 </label>
-                <span className="text-[9px] text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] font-sans font-medium">
+                <span className="text-[9px] text-[#0071e3] dark:text-[#2997ff] font-sans font-medium">
                   {capitalSource === 'core' && 'コア株式連動'}
                   {capitalSource === 'core_plus_cash' && 'コア＋現金連動'}
                   {capitalSource === 'net_worth' && '総純資産連動'}
@@ -394,27 +394,27 @@ export const SimulationTab: React.FC = () => {
                   setCategoryTotal('core_stocks', amount);
                   updateSimulationConfig({ currentCoreAmount: amount });
                 }}
-                textClassName="text-base font-bold font-mono text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]"
+                textClassName="text-base font-bold font-mono text-[#0071e3] dark:text-[#2997ff]"
               />
             </div>
 
             {/* Monthly Investment */}
             <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-              <label className="text-[10px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block mb-1">
+              <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block mb-1">
                 毎月積立額 (資産管理表CF連動)
               </label>
-              <div className="text-base font-bold font-mono text-[var(--color-finance-positive)]">{currentMonthlySurplus.toFixed(1)} 万円/月</div>
+              <div className="text-base font-bold font-mono text-[#34c759]">{currentMonthlySurplus.toFixed(1)} 万円/月</div>
             </div>
 
             {/* Scenario Yield Rates with Plus Button */}
             <div className="space-y-2 pt-1">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70">
+                <span className="text-[11px] font-medium text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70">
                   シナリオ利回り設定 (%)
                 </span>
                 <button
                   onClick={() => setShowAddScenarioModal(true)}
-                  className="flex items-center gap-1 text-[11px] font-bold text-[var(--color-finance-accent)] hover:underline"
+                  className="flex items-center gap-1 text-[11px] font-bold text-[#0071e3] hover:underline"
                   title="追加利回りシナリオを作成"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -425,7 +425,7 @@ export const SimulationTab: React.FC = () => {
               <div className="grid grid-cols-3 gap-1.5 text-center font-mono">
                 {/* Base */}
                 <div className="p-2 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-                  <span className="text-[10px] text-[var(--color-finance-positive)] font-sans font-bold block">標準 (Base)</span>
+                  <span className="text-[10px] text-[#34c759] font-sans font-bold block">標準 (Base)</span>
                   <EditableCell
                     value={baseReturnRate}
                     type="number"
@@ -438,13 +438,13 @@ export const SimulationTab: React.FC = () => {
                         baseAnnualRate: Number(val) || 7,
                       })
                     }
-                    textClassName="font-bold text-[var(--color-finance-positive)]"
+                    textClassName="font-bold text-[#34c759]"
                   />
                 </div>
 
                 {/* Bull */}
                 <div className="p-2 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-                  <span className="text-[10px] text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] font-sans font-bold block">強気 (Bull)</span>
+                  <span className="text-[10px] text-[#0071e3] dark:text-[#2997ff] font-sans font-bold block">強気 (Bull)</span>
                   <EditableCell
                     value={bullReturnRate}
                     type="number"
@@ -457,13 +457,13 @@ export const SimulationTab: React.FC = () => {
                         bullAnnualRate: Number(val) || 15,
                       })
                     }
-                    textClassName="font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]"
+                    textClassName="font-bold text-[#0071e3] dark:text-[#2997ff]"
                   />
                 </div>
 
                 {/* Bear */}
                 <div className="p-2 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-                  <span className="text-[10px] text-[var(--color-finance-negative)] font-sans font-bold block">弱気 (Bear)</span>
+                  <span className="text-[10px] text-[#ff3b30] font-sans font-bold block">弱気 (Bear)</span>
                   <EditableCell
                     value={bearReturnRate}
                     type="number"
@@ -476,17 +476,17 @@ export const SimulationTab: React.FC = () => {
                         bearAnnualRate: Number(val) || -5,
                       })
                     }
-                    textClassName="font-bold text-[var(--color-finance-negative)]"
+                    textClassName="font-bold text-[#ff3b30]"
                   />
                 </div>
               </div>
 
               {/* コア株式・高配当ポートフォリオの個別成長率 */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
-                <div className="p-2.5 border border-[var(--color-finance-accent-mid)]/30 bg-[var(--color-finance-accent-mid)]/5">
+                <div className="p-2.5 border border-[#af52de]/30 bg-[#af52de]/5">
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-[10px] font-sans font-bold text-[var(--color-finance-accent-mid)]">コア株式 ({coreGrowthRate}%)</label>
-                    <span className="text-[10px] font-mono text-[var(--color-finance-accent-mid)]">0〜40%</span>
+                    <label className="text-[10px] font-sans font-bold text-[#af52de]">コア株式 ({coreGrowthRate}%)</label>
+                    <span className="text-[10px] font-mono text-[#af52de]">0〜40%</span>
                   </div>
                   <input
                     type="range"
@@ -495,14 +495,14 @@ export const SimulationTab: React.FC = () => {
                     step="1"
                     value={coreGrowthRate}
                     onChange={(e) => updateSimulationConfig({ coreGrowthRate: Number(e.target.value) })}
-                    className="w-full accent-[var(--color-finance-accent-mid)] cursor-pointer"
+                    className="w-full accent-[#af52de] cursor-pointer"
                     aria-label="コア株式の成長率"
                   />
                 </div>
-                <div className="p-2.5 border border-[var(--color-finance-accent-mid)]/30 bg-[var(--color-finance-accent-mid)]/5">
+                <div className="p-2.5 border border-[#af52de]/30 bg-[#af52de]/5">
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-[10px] font-sans font-bold text-[var(--color-finance-accent-mid)]">高配当ポートフォリオ ({dividendGrowthRate}%)</label>
-                    <span className="text-[10px] font-mono text-[var(--color-finance-accent-mid)]">0〜40%</span>
+                    <label className="text-[10px] font-sans font-bold text-[#af52de]">高配当ポートフォリオ ({dividendGrowthRate}%)</label>
+                    <span className="text-[10px] font-mono text-[#af52de]">0〜40%</span>
                   </div>
                   <input
                     type="range"
@@ -511,7 +511,7 @@ export const SimulationTab: React.FC = () => {
                     step="1"
                     value={dividendGrowthRate}
                     onChange={(e) => updateSimulationConfig({ dividendGrowthRate: Number(e.target.value) })}
-                    className="w-full accent-[var(--color-finance-accent-mid)] cursor-pointer"
+                    className="w-full accent-[#af52de] cursor-pointer"
                     aria-label="高配当ポートフォリオの成長率"
                   />
                 </div>
@@ -532,7 +532,7 @@ export const SimulationTab: React.FC = () => {
                     </span>
                     <button
                       onClick={() => setCustomScenarios(customScenarios.filter((s) => s.id !== sc.id))}
-                      className="text-black/40 dark:text-white/40 hover:text-finance-negative"
+                      className="text-black/40 dark:text-white/40 hover:text-red-500"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -551,7 +551,7 @@ export const SimulationTab: React.FC = () => {
           />
 
           {/* 年次純資産試算: 年次を横方向へ並べ、S&P500試算とその他資産を合算 */}
-          <div className="border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/50 dark:bg-white/5 overflow-hidden">
+          <div className="border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 overflow-hidden">
             <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
               <h3 className="text-sm font-semibold">年次純資産試算 (万円)</h3>
             </div>
@@ -559,7 +559,7 @@ export const SimulationTab: React.FC = () => {
               <table className="w-full min-w-[760px] text-xs font-mono tabular-nums">
                 <thead className="bg-black/5 dark:bg-white/5">
                   <tr>
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold">シナリオ</th>
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">シナリオ</th>
                     {chartData.map((row) => (
                       <th key={row.year} className="px-4 py-2 text-right font-semibold whitespace-nowrap">
                         {row.label}
@@ -569,27 +569,27 @@ export const SimulationTab: React.FC = () => {
                 </thead>
                 <tbody>
                   <tr className="border-t border-black/5 dark:border-white/10">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold">積立元本（余剰累積）</th>
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">積立元本（余剰累積）</th>
                     {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right whitespace-nowrap">{row.invested.toLocaleString()} 万円</td>)}
                   </tr>
-                  <tr className="border-t border-black/5 dark:border-white/10 bg-[var(--color-finance-positive)]/5">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold text-[var(--color-finance-positive)]">{formatScenarioRate(baseReturnRate)}</th>
-                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[var(--color-finance-positive)] whitespace-nowrap">{row.base.toLocaleString()} 万円</td>)}
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#34c759]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#34c759]">{formatScenarioRate(baseReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#34c759] whitespace-nowrap">{row.base.toLocaleString()} 万円</td>)}
                   </tr>
-                  <tr className="border-t border-black/5 dark:border-white/10 bg-[var(--color-finance-accent)]/5">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">{formatScenarioRate(bullReturnRate)}</th>
-                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] whitespace-nowrap">{row.bull.toLocaleString()} 万円</td>)}
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#0071e3]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#0071e3] dark:text-[#2997ff]">{formatScenarioRate(bullReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#0071e3] dark:text-[#2997ff] whitespace-nowrap">{row.bull.toLocaleString()} 万円</td>)}
                   </tr>
-                  <tr className="border-t border-black/5 dark:border-white/10 bg-[var(--color-finance-negative)]/5">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold text-[var(--color-finance-negative)]">{formatScenarioRate(bearReturnRate)}</th>
-                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[var(--color-finance-negative)] whitespace-nowrap">{row.bear.toLocaleString()} 万円</td>)}
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#ff3b30]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#ff3b30]">{formatScenarioRate(bearReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#ff3b30] whitespace-nowrap">{row.bear.toLocaleString()} 万円</td>)}
                   </tr>
-                  <tr className="border-t border-black/5 dark:border-white/10 bg-[var(--color-finance-accent-mid)]/5">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold text-[var(--color-finance-accent-mid)]">コア株式 ({coreGrowthRate}%) / 高配当ポートフォリオ ({dividendGrowthRate}%)</th>
-                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[var(--color-finance-accent-mid)] whitespace-nowrap">{(row.split ?? 0).toLocaleString()} 万円</td>)}
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#af52de]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#af52de]">コア株式 ({coreGrowthRate}%) / 高配当ポートフォリオ ({dividendGrowthRate}%)</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#af52de] whitespace-nowrap">{(row.split ?? 0).toLocaleString()} 万円</td>)}
                   </tr>
                   <tr className="border-t-2 border-black/10 dark:border-white/10">
-                    <th className="sticky left-0 z-10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-surface)] px-4 py-2 text-left font-semibold">年齢（歳）</th>
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">年齢（歳）</th>
                     {chartData.map((row) => {
                       const monthKey = currentMonthKey === null ? null : currentMonthKey + (row.year * 12);
                       const age = ageAtMonthKey(monthKey);
@@ -604,61 +604,61 @@ export const SimulationTab: React.FC = () => {
           {/* 3 Outcome Milestone Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {/* Base Scenario Card */}
-            <div className="border border-black/10 dark:border-white/10 p-5 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-              <div className="flex items-center justify-between text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">
-                <span className="font-semibold text-[var(--color-finance-positive)] flex items-center gap-1.5">
-                  <span className="w-2 h-2 bg-[var(--color-finance-positive)]" />
+            <div className="border border-black/10 dark:border-white/10 p-5 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+              <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
+                <span className="font-semibold text-[#34c759] flex items-center gap-1.5">
+                  <span className="w-2 h-2 bg-[#34c759]" />
                   {formatScenarioRate(baseReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[var(--color-finance-positive)] tabular-nums mt-1">
+              <div className="text-2xl font-bold font-mono text-[#34c759] tabular-nums mt-1">
                 {(finalYearData.base / 10000).toFixed(2)} 億円
               </div>
-              <div className="text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mt-1 font-mono">
+              <div className="text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mt-1 font-mono">
                 {finalYearData.base.toLocaleString()} 万円
               </div>
-              <div className="text-[11px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
+              <div className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
                 元本: {finalYearData.invested.toLocaleString()}万 / 利益: +{(finalYearData.base - finalYearData.invested).toLocaleString()}万
               </div>
             </div>
 
             {/* Bull Scenario Card */}
-            <div className="border border-black/10 dark:border-white/10 p-5 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-              <div className="flex items-center justify-between text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">
-                <span className="font-semibold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] flex items-center gap-1.5">
+            <div className="border border-black/10 dark:border-white/10 p-5 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+              <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
+                <span className="font-semibold text-[#0071e3] dark:text-[#2997ff] flex items-center gap-1.5">
                   <ArrowUpRight className="w-3.5 h-3.5" />
                   {formatScenarioRate(bullReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] tabular-nums mt-1">
+              <div className="text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
                 {(finalYearData.bull / 10000).toFixed(2)} 億円
               </div>
-              <div className="text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mt-1 font-mono">
+              <div className="text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mt-1 font-mono">
                 {finalYearData.bull.toLocaleString()} 万円
               </div>
-              <div className="text-[11px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
+              <div className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
                 元本: {finalYearData.invested.toLocaleString()}万 / 利益: +{(finalYearData.bull - finalYearData.invested).toLocaleString()}万
               </div>
             </div>
 
             {/* Bear Scenario Card */}
-            <div className="border border-black/10 dark:border-white/10 p-5 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-              <div className="flex items-center justify-between text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">
-                <span className="font-semibold text-[var(--color-finance-negative)] flex items-center gap-1.5">
-                  <span className="w-2 h-2 bg-[var(--color-finance-negative)]" />
+            <div className="border border-black/10 dark:border-white/10 p-5 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+              <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
+                <span className="font-semibold text-[#ff3b30] flex items-center gap-1.5">
+                  <span className="w-2 h-2 bg-[#ff3b30]" />
                   {formatScenarioRate(bearReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>
-              <div className="text-2xl font-bold font-mono text-[var(--color-finance-negative)] tabular-nums mt-1">
+              <div className="text-2xl font-bold font-mono text-[#ff3b30] tabular-nums mt-1">
                 {(finalYearData.bear / 10000).toFixed(2)} 億円
               </div>
-              <div className="text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mt-1 font-mono">
+              <div className="text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mt-1 font-mono">
                 {finalYearData.bear.toLocaleString()} 万円
               </div>
-              <div className="text-[11px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
+              <div className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-3 pt-2 border-t border-black/5 dark:border-white/10">
                 元本: {finalYearData.invested.toLocaleString()}万 / 損益: {finalYearData.bear - finalYearData.invested >= 0 ? '+' : ''}{(finalYearData.bear - finalYearData.invested).toLocaleString()}万
               </div>
             </div>
@@ -671,7 +671,7 @@ export const SimulationTab: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
           <div
             className={`w-full max-w-md p-6 border shadow-2xl transition-colors ${
-              isDark ? 'bg-[var(--color-finance-dark-surface)] border-white/15 text-[var(--color-finance-surface)]' : 'bg-white border-black/10 text-[var(--color-finance-ink)]'
+              isDark ? 'bg-[#1c1c1e] border-white/15 text-[#f5f5f7]' : 'bg-white border-black/10 text-[#1d1d1f]'
             }`}
           >
             <div className="flex items-center justify-between pb-3 border-b border-black/10 dark:border-white/10">
@@ -750,14 +750,14 @@ export const SimulationTab: React.FC = () => {
                           setNewLumpSum((prev) => ({ ...prev, amount: val }));
                         }
                       }}
-                      className="w-full p-2 border border-black/15 dark:border-white/15 bg-transparent font-mono font-bold text-[var(--color-finance-accent)]"
+                      className="w-full p-2 border border-black/15 dark:border-white/15 bg-transparent font-mono font-bold text-[#0071e3]"
                     />
                     <span className="shrink-0 text-xs">万円</span>
                   </div>
                 </div>
               </div>
 
-              <div className="p-2.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)] dark:bg-white/5 text-[11px] text-black/60 dark:text-white/60">
+              <div className="p-2.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7] dark:bg-white/5 text-[11px] text-black/60 dark:text-white/60">
                 ※ 指定された年次に元本へ加算され、その後の全将来シミュレーション複利計算へダイレクトに反映されます。
               </div>
 
@@ -774,7 +774,7 @@ export const SimulationTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-[var(--color-finance-accent)] text-white font-semibold hover:bg-[var(--color-finance-accent-strong)]"
+                  className="px-4 py-2 bg-[#0071e3] text-white font-semibold hover:bg-[#0077ed]"
                 >
                   {editingLumpSum ? '更新して反映' : '追加して反映'}
                 </button>
@@ -789,7 +789,7 @@ export const SimulationTab: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
           <div
             className={`w-full max-w-sm p-6 border shadow-2xl transition-colors ${
-              isDark ? 'bg-[var(--color-finance-dark-surface)] border-white/15 text-[var(--color-finance-surface)]' : 'bg-white border-black/10 text-[var(--color-finance-ink)]'
+              isDark ? 'bg-[#1c1c1e] border-white/15 text-[#f5f5f7]' : 'bg-white border-black/10 text-[#1d1d1f]'
             }`}
           >
             <div className="flex items-center justify-between pb-3 border-b border-black/10 dark:border-white/10">
@@ -846,7 +846,7 @@ export const SimulationTab: React.FC = () => {
                     ]);
                     setShowAddScenarioModal(false);
                   }}
-                  className="px-4 py-2 bg-[var(--color-finance-accent)] text-white font-semibold"
+                  className="px-4 py-2 bg-[#0071e3] text-white font-semibold"
                 >
                   追加
                 </button>

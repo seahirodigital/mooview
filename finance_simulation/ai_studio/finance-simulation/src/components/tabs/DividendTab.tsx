@@ -179,7 +179,7 @@ export const DividendTab: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2">
         <div>
           <h1 className={`text-2xl sm:text-3xl font-semibold tracking-tight ${
-            isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'
+            isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'
           }`}>
             配当ポートフォリオ
           </h1>
@@ -187,7 +187,7 @@ export const DividendTab: React.FC = () => {
 
         <button
           onClick={() => setShowAddModal(true)}
-          className="self-start sm:self-auto flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)] transition-all shadow-xs"
+          className="self-start sm:self-auto flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] transition-all shadow-xs"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>銘柄を追加</span>
@@ -196,33 +196,33 @@ export const DividendTab: React.FC = () => {
 
       {/* KPI Minimal Ribbon (Flat Spreadsheet Style - No rounded cards) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-2">
-        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block font-medium">月額受取配当 (手取り・2563込)</span>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-[var(--color-finance-positive)] tabular-nums mt-1">
+        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">月額受取配当 (手取り・2563込)</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#34c759] tabular-nums mt-1">
             {totalMonthlyDividend.toFixed(1)} 万円
           </div>
-          <span className="text-[10px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 font-mono">配当入金合計</span>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">配当入金合計</span>
         </div>
 
-        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block font-medium">税引後 加重平均利回り</span>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] tabular-nums mt-1">
+        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">税引後 加重平均利回り</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
             {overallNetYield.toFixed(2)} %
           </div>
-          <span className="text-[10px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50">手取りベース実質利回り</span>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">手取りベース実質利回り</span>
         </div>
 
-        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block font-medium">年間受取配当 (手取り・2563込)</span>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] tabular-nums mt-1">
+        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">年間受取配当 (手取り・2563込)</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#1d1d1f] dark:text-[#f5f5f7] tabular-nums mt-1">
             {totalAnnualDividend.toFixed(1)} 万円
           </div>
-          <span className="text-[10px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50 font-mono">年額キャッシュイン</span>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">年額キャッシュイン</span>
         </div>
 
-        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 block font-medium">カバー率</span>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] tabular-nums mt-1">
+        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">カバー率</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
             {dividendCoverageRate.toFixed(1)}%
           </div>
         </div>
@@ -230,12 +230,12 @@ export const DividendTab: React.FC = () => {
       </div>
 
       {/* 月間配当タイムライン: 線上の日付を基準に、下へ銘柄名と配当金額を配置する。 */}
-      <div className="hidden border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/80 dark:bg-white/5 p-6 sm:p-8 space-y-6 transition-colors">
+      <div className="hidden border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 p-6 sm:p-8 space-y-6 transition-colors">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-[var(--color-finance-accent)]" />
-              <h2 className={`text-sm sm:text-base font-semibold ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+              <Calendar className="w-4 h-4 text-[#0071e3]" />
+              <h2 className={`text-sm sm:text-base font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
                 配当日程：合計: +{totalMonthlyDividend.toFixed(1)}万円/月
               </h2>
             </div>
@@ -272,7 +272,7 @@ export const DividendTab: React.FC = () => {
                         <button
                           onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                           title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
-                          className="h-5 w-5 rounded-full flex items-center justify-center bg-[var(--color-finance-accent)] text-white text-[8px] font-bold font-mono shadow-md transition-transform group-hover:scale-110 active:scale-95"
+                          className="h-5 w-5 rounded-full flex items-center justify-center bg-[#0071e3] text-white text-[8px] font-bold font-mono shadow-md transition-transform group-hover:scale-110 active:scale-95"
                         >
                           {day}
                         </button>
@@ -285,10 +285,10 @@ export const DividendTab: React.FC = () => {
                         onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                         className="absolute top-7 left-1/2 -translate-x-1/2 flex flex-col items-center whitespace-nowrap text-center transition-transform group-hover:scale-105 cursor-pointer"
                       >
-                        <span className="max-w-28 truncate text-[10px] font-semibold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]" title={stock.name || stock.ticker}>
+                        <span className="max-w-28 truncate text-[10px] font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
                           {stock.name || stock.ticker}
                         </span>
-                        <span className="mt-0.5 text-base leading-none font-mono font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">
+                        <span className="mt-0.5 text-base leading-none font-mono font-bold text-[#0071e3] dark:text-[#2997ff]">
                           +{monthlyNet.toFixed(1)}万
                         </span>
                       </div>
@@ -298,14 +298,14 @@ export const DividendTab: React.FC = () => {
                         <div
                           onClick={(e) => e.stopPropagation()}
                           className={`absolute top-8 left-1/2 -translate-x-1/2 z-20 p-3 shadow-xl border w-44 text-xs space-y-2 ${
-                            isDark ? 'bg-[var(--color-finance-ink)] border-white/15 text-white' : 'bg-white border-black/10 text-[var(--color-finance-ink)]'
+                            isDark ? 'bg-[#1d1d1f] border-white/15 text-white' : 'bg-white border-black/10 text-[#1d1d1f]'
                           }`}
                         >
                           <div className="flex items-center justify-between pb-1 border-b border-black/5 dark:border-white/10">
                             <span className="font-semibold text-[11px]">{stock.ticker} 支払日</span>
                             <button
                               onClick={() => setEditingPayoutStockId(null)}
-                              className="text-finance-muted hover:text-white"
+                              className="text-slate-400 hover:text-white"
                             >
                               <X className="w-3.5 h-3.5" />
                             </button>
@@ -380,21 +380,21 @@ export const DividendTab: React.FC = () => {
                 <button
                   onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
                   title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
-                  className="h-7 w-7 rounded-full justify-self-center flex items-center justify-center bg-[var(--color-finance-accent)] text-white text-[9px] font-bold font-mono shadow-sm active:scale-95"
+                  className="h-7 w-7 rounded-full justify-self-center flex items-center justify-center bg-[#0071e3] text-white text-[9px] font-bold font-mono shadow-sm active:scale-95"
                 >
                   {day}
                 </button>
-                <span className="min-w-0 truncate text-xs font-semibold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]" title={stock.name || stock.ticker}>
+                <span className="min-w-0 truncate text-xs font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
                   {stock.name || stock.ticker}
                 </span>
-                <span className="whitespace-nowrap text-sm font-mono font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">
+                <span className="whitespace-nowrap text-sm font-mono font-bold text-[#0071e3] dark:text-[#2997ff]">
                   +{monthlyNet.toFixed(1)}万
                 </span>
                 {isEditing && (
                   <div
                     onClick={(event) => event.stopPropagation()}
                     className={`col-span-3 grid grid-cols-2 gap-2 p-2 border text-xs ${
-                      isDark ? 'bg-[var(--color-finance-ink)] border-white/15 text-white' : 'bg-white border-black/10 text-[var(--color-finance-ink)]'
+                      isDark ? 'bg-[#1d1d1f] border-white/15 text-white' : 'bg-white border-black/10 text-[#1d1d1f]'
                     }`}
                   >
                     <label className="space-y-1">
@@ -442,15 +442,15 @@ export const DividendTab: React.FC = () => {
       {/* Main Stock Table with Universal Double-Click Editing */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className={`text-base font-semibold ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+          <h2 className={`text-base font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
             保有高配当銘柄一覧
           </h2>
         </div>
 
-        <div className="overflow-x-auto border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/50 dark:bg-white/5 p-2 sm:p-4">
+        <div className="overflow-x-auto border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 p-2 sm:p-4">
           <table className="w-full text-xs text-left">
             <thead>
-              <tr className="border-b border-black/5 dark:border-white/10 text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50">
+              <tr className="border-b border-black/5 dark:border-white/10 text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">
                 {[
                   ['ticker', 'ティッカー', ''],
                   ['name', '銘柄名称', ''],
@@ -466,7 +466,7 @@ export const DividendTab: React.FC = () => {
                     key={key}
                     onDoubleClick={() => cycleSort(key)}
                     title="ダブルクリックで 昇順 → 降順 → 元順"
-                    className={`py-3 px-3 font-medium cursor-pointer select-none hover:text-[var(--color-finance-accent)] ${className}`}
+                    className={`py-3 px-3 font-medium cursor-pointer select-none hover:text-[#0071e3] ${className}`}
                   >
                     {label}{sortMark(key)}
                   </th>
@@ -479,7 +479,7 @@ export const DividendTab: React.FC = () => {
             <tbody className="divide-y divide-black/5 dark:divide-white/5 font-mono">
               {displayedDividends.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-12 text-center text-finance-muted">
+                  <td colSpan={10} className="py-12 text-center text-slate-400">
                     登録されている銘柄がありません
                   </td>
                 </tr>
@@ -518,7 +518,7 @@ export const DividendTab: React.FC = () => {
                             });
                           }
                         }}
-                        textClassName="font-mono font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]"
+                        textClassName="font-mono font-bold text-[#0071e3] dark:text-[#2997ff]"
                       />
                     </td>
 
@@ -528,14 +528,14 @@ export const DividendTab: React.FC = () => {
                         value={stock.name}
                         type="text"
                         onSave={(val) => updateDividendStock(stock.id, { name: String(val) })}
-                        textClassName={`font-medium ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}
+                        textClassName={`font-medium ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                       />
                     </td>
 
                     {/* Market & Payout Day */}
                     <td className="py-2.5 px-3">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-sans px-1.5 py-0.5 border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/10 text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70">
+                        <span className="text-[10px] font-sans px-1.5 py-0.5 border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/10 text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70">
                           {stock.market}
                         </span>
                         <div className="flex items-center">
@@ -546,7 +546,7 @@ export const DividendTab: React.FC = () => {
                             max={31}
                             suffix="日"
                             onSave={(val) => updateDividendStock(stock.id, { payoutDay: Number(val) || 15 })}
-                            textClassName="text-[11px] font-bold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                            textClassName="text-[11px] font-bold text-[#1d1d1f] dark:text-[#f5f5f7]"
                           />
                         </div>
                       </div>
@@ -586,7 +586,7 @@ export const DividendTab: React.FC = () => {
                             payoutMonths: months,
                           });
                         }}
-                        className="text-[11px] py-1 px-2 border border-black/15 dark:border-white/15 bg-transparent font-medium cursor-pointer transition-colors text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        className="text-[11px] py-1 px-2 border border-black/15 dark:border-white/15 bg-transparent font-medium cursor-pointer transition-colors text-[#1d1d1f] dark:text-[#f5f5f7]"
                       >
                         <option value="monthly" className="text-black">毎月型 (年12回)</option>
                         <option value="semi_annual" className="text-black">年2回型 (6月・12月)</option>
@@ -609,7 +609,7 @@ export const DividendTab: React.FC = () => {
                         step="10"
                         align="center"
                         onSave={(val) => updateDividendStock(stock.id, { investedAmount: Number(val) || 0 })}
-                        textClassName={`font-bold tabular-nums ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}
+                        textClassName={`font-bold tabular-nums ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                       />
                     </td>
 
@@ -622,22 +622,22 @@ export const DividendTab: React.FC = () => {
                         suffix="%"
                         align="center"
                         onSave={(val) => updateDividendStock(stock.id, { estimatedYield: Number(val) || 0 })}
-                        textClassName="text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70 font-medium"
+                        textClassName="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium"
                       />
                     </td>
 
                     {/* Net Yield */}
-                    <td className="py-2.5 px-3 text-center text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] font-bold tabular-nums">
+                    <td className="py-2.5 px-3 text-center text-[#0071e3] dark:text-[#2997ff] font-bold tabular-nums">
                       {netYield.toFixed(2)}%
                     </td>
 
                     {/* Monthly Net */}
-                    <td className="py-2.5 px-3 text-center text-xs font-bold text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] tabular-nums">
+                    <td className="py-2.5 px-3 text-center text-xs font-bold text-[#1d1d1f] dark:text-[#f5f5f7] tabular-nums">
                       +{monthlyNet.toFixed(1)}
                     </td>
 
                     {/* Annual Net */}
-                    <td className="py-2.5 px-3 text-center tabular-nums text-[var(--color-finance-ink)]/80 dark:text-[var(--color-finance-surface)]/80">
+                    <td className="py-2.5 px-3 text-center tabular-nums text-[#1d1d1f]/80 dark:text-[#f5f5f7]/80">
                       +{annualNet.toFixed(1)}
                     </td>
 
@@ -648,7 +648,7 @@ export const DividendTab: React.FC = () => {
                           type="checkbox"
                           checked={Boolean(stock.excludeFromPortfolio)}
                           onChange={(event) => updateDividendStock(stock.id, { excludeFromPortfolio: event.target.checked })}
-                          className="h-4 w-4 accent-[var(--color-finance-accent)]"
+                          className="h-4 w-4 accent-[#0071e3]"
                           aria-label={`${stock.ticker || stock.name}を高配当ポートフォリオから除外`}
                         />
                       </label>
@@ -663,12 +663,12 @@ export const DividendTab: React.FC = () => {
       </div>
 
       {/* 保有高配当銘柄の月額手取り・投資額・年間試算 */}
-      <div className="border border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)]/50 dark:bg-white/5 p-4 sm:p-6 space-y-4">
+      <div className="border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 p-4 sm:p-6 space-y-4">
         <div className="flex items-center justify-between gap-2">
-          <h3 className={`text-sm sm:text-base font-semibold ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+          <h3 className={`text-sm sm:text-base font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
             高配当ポートフォリオ集計
           </h3>
-          <span className="text-[10px] text-[var(--color-finance-ink)]/50 dark:text-[var(--color-finance-surface)]/50">手取りベース</span>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">手取りベース</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <div className="border border-black/10 dark:border-white/10 p-3">
@@ -677,11 +677,11 @@ export const DividendTab: React.FC = () => {
           </div>
           <div className="border border-black/10 dark:border-white/10 p-3">
             <div className="text-[10px] opacity-60">合計月額手取り（2563込）</div>
-            <div className="font-mono font-bold text-lg text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] tabular-nums">{totalMonthlyDividend.toFixed(1)} 万円/月</div>
+            <div className="font-mono font-bold text-lg text-[#0071e3] dark:text-[#2997ff] tabular-nums">{totalMonthlyDividend.toFixed(1)} 万円/月</div>
           </div>
           <div className="border border-black/10 dark:border-white/10 p-3">
             <div className="text-[10px] opacity-60">年間手取り試算（2563込）</div>
-            <div className="font-mono font-bold text-lg text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] tabular-nums">{totalAnnualDividend.toFixed(1)} 万円/年</div>
+            <div className="font-mono font-bold text-lg text-[#0071e3] dark:text-[#2997ff] tabular-nums">{totalAnnualDividend.toFixed(1)} 万円/年</div>
           </div>
         </div>
       </div>
@@ -689,18 +689,18 @@ export const DividendTab: React.FC = () => {
       {rowMenu && (
         <div
           className={`fixed z-[60] min-w-44 border shadow-xl p-1 text-xs ${
-            isDark ? 'bg-[var(--color-finance-ink)] border-white/15 text-white' : 'bg-white border-black/15 text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] border-white/15 text-white' : 'bg-white border-black/15 text-[#1d1d1f]'
           }`}
           style={{ left: Math.min(rowMenu.x, window.innerWidth - 190), top: Math.min(rowMenu.y, window.innerHeight - 90) }}
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="px-2 py-1 text-[10px] text-finance-muted border-b border-black/10 dark:border-white/10">{rowMenu.label}</div>
+          <div className="px-2 py-1 text-[10px] text-slate-400 border-b border-black/10 dark:border-white/10">{rowMenu.label}</div>
           <button
             onClick={() => {
               deleteDividendStock(rowMenu.stockId);
               setRowMenu(null);
             }}
-            className="w-full text-left px-2 py-2 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10"
+            className="w-full text-left px-2 py-2 text-[#ff3b30] hover:bg-[#ff3b30]/10"
           >
             この銘柄を削除
           </button>
@@ -711,7 +711,7 @@ export const DividendTab: React.FC = () => {
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <div className={`p-6 w-full max-w-md border border-black/10 dark:border-white/10 shadow-2xl space-y-4 ${
-            isDark ? 'bg-[var(--color-finance-ink)] text-[var(--color-finance-surface)]' : 'bg-white text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] text-[#f5f5f7]' : 'bg-white text-[#1d1d1f]'
           }`}>
             <div className="flex items-center justify-between pb-3 border-b border-black/5 dark:border-white/10">
               <h3 className="text-base font-semibold">高配当銘柄の追加</h3>
@@ -721,7 +721,7 @@ export const DividendTab: React.FC = () => {
             </div>
 
             {autoResolvedNotice && (
-              <div className="p-2.5 border border-[var(--color-finance-accent)]/30 text-xs bg-[var(--color-finance-accent)]/10 text-[var(--color-finance-accent)] flex items-center gap-1.5">
+              <div className="p-2.5 border border-[#0071e3]/30 text-xs bg-[#0071e3]/10 text-[#0071e3] flex items-center gap-1.5">
                 <Sparkles className="w-4 h-4 shrink-0" />
                 <span>{autoResolvedNotice}</span>
               </div>
@@ -729,7 +729,7 @@ export const DividendTab: React.FC = () => {
 
             <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
               <div>
-                <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">
+                <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
                   ティッカーコード (例: QQQI, IWMI, JEPI, SPY, 1489) *
                 </label>
                 <input
@@ -739,27 +739,27 @@ export const DividendTab: React.FC = () => {
                   value={newStock.ticker}
                   onChange={(e) => handleTickerChange(e.target.value)}
                   className={`w-full p-2.5 border ${
-                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                   }`}
                 />
               </div>
 
               <div>
-                <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">銘柄名 *</label>
+                <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">銘柄名 *</label>
                 <input
                   type="text"
                   required
                   value={newStock.name}
                   onChange={(e) => setNewStock(prev => ({ ...prev, name: e.target.value }))}
                   className={`w-full p-2.5 border ${
-                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                   }`}
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">市場区分</label>
+                  <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">市場区分</label>
                   <select
                     value={newStock.market}
                     onChange={(e) => {
@@ -771,7 +771,7 @@ export const DividendTab: React.FC = () => {
                       }));
                     }}
                     className={`w-full p-2.5 border ${
-                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                     }`}
                   >
                     <option value="US">米国株・ETF (US)</option>
@@ -781,7 +781,7 @@ export const DividendTab: React.FC = () => {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">毎月支払日 (日)</label>
+                  <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">毎月支払日 (日)</label>
                   <input
                     type="number"
                     min="1"
@@ -789,7 +789,7 @@ export const DividendTab: React.FC = () => {
                     value={newStock.payoutDay || 15}
                     onChange={(e) => setNewStock(prev => ({ ...prev, payoutDay: Number(e.target.value) || 15 }))}
                     className={`w-full p-2.5 border ${
-                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                     }`}
                   />
                 </div>
@@ -797,7 +797,7 @@ export const DividendTab: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">投資額 (万円) *</label>
+                  <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">投資額 (万円) *</label>
                   <input
                     type="number"
                     required
@@ -806,12 +806,12 @@ export const DividendTab: React.FC = () => {
                     value={newStock.investedAmount}
                     onChange={(e) => setNewStock(prev => ({ ...prev, investedAmount: Number(e.target.value) || 0 }))}
                     className={`w-full p-2.5 border ${
-                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                     }`}
                   />
                 </div>
                 <div>
-                  <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">想定利回り (%) *</label>
+                  <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">想定利回り (%) *</label>
                   <input
                     type="number"
                     required
@@ -819,21 +819,21 @@ export const DividendTab: React.FC = () => {
                     value={newStock.estimatedYield}
                     onChange={(e) => setNewStock(prev => ({ ...prev, estimatedYield: Number(e.target.value) || 0 }))}
                     className={`w-full p-2.5 border ${
-                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                      isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                     }`}
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 mb-1">備考</label>
+                <label className="block text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">備考</label>
                 <input
                   type="text"
                   placeholder="メモ等"
                   value={newStock.note || ''}
                   onChange={(e) => setNewStock(prev => ({ ...prev, note: e.target.value }))}
                   className={`w-full p-2.5 border ${
-                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[var(--color-finance-surface)] border-black/10 text-[var(--color-finance-ink)]'
+                    isDark ? 'bg-white/10 border-white/15 text-white' : 'bg-[#f5f5f7] border-black/10 text-[#1d1d1f]'
                   }`}
                 />
               </div>
@@ -848,7 +848,7 @@ export const DividendTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 text-xs font-medium text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)] transition-colors shadow-xs"
+                  className="px-5 py-2 text-xs font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] transition-colors shadow-xs"
                 >
                   登録する
                 </button>

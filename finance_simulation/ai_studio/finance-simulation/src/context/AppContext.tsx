@@ -539,13 +539,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const existing = customAssetCategories.find((item) => item.label === normalizedLabel);
     if (existing) return existing.id;
     const id = `custom_${Date.now()}`;
-    const color = [
-      'var(--color-finance-accent)',
-      'var(--color-finance-accent-strong)',
-      'var(--color-finance-accent-mid)',
-      'var(--color-finance-accent-muted)',
-      'var(--color-finance-accent-on-dark)',
-    ][customAssetCategories.length % 5];
+    const color = ['#5ac8fa', '#ff2d55', '#ffcc00', '#64d2ff', '#bf5af2'][customAssetCategories.length % 5];
     setCustomAssetCategories((previous) => [...previous, { id, label: normalizedLabel, color }]);
     setCategoryOrder((previous) => previous.includes(id) ? previous : [...previous, id]);
     return id;

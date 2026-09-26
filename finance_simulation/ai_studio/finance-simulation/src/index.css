@@ -2,28 +2,6 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Finance Simulation: Apple Design の単一アクセントを基準にした共通カラートークン。 */
-@theme {
-  --color-finance-canvas: #ffffff;
-  --color-finance-surface: #f5f5f7;
-  --color-finance-ink: #1d1d1f;
-  --color-finance-muted: #6e6e73;
-  --color-finance-dark-surface: #1d1d1f;
-  --color-finance-dark-canvas: #000000;
-
-  --color-finance-accent: #0066cc;
-  --color-finance-accent-strong: #004a96;
-  --color-finance-accent-on-dark: #2997ff;
-  --color-finance-accent-mid: #4f7fa9;
-  --color-finance-accent-muted: #8eaec8;
-  --color-finance-accent-soft: #dbeaf7;
-  --color-finance-accent-subtle: #f1f6fb;
-
-  /* ブランド色ではなく、金額の意味を示す状態表示だけに使う。 */
-  --color-finance-positive: #2f7d5c;
-  --color-finance-negative: #b43c36;
-}
-
 @layer base {
   :root {
     font-family: "SF Pro JP", "SF Pro Text", "SF Pro Icons",
@@ -33,13 +11,13 @@
   }
 
   html.light, html.light body {
-    background-color: var(--color-finance-canvas);
-    color: var(--color-finance-ink);
+    background-color: #ffffff;
+    color: #1d1d1f;
   }
 
   html.dark, html.dark body {
-    background-color: var(--color-finance-dark-canvas);
-    color: var(--color-finance-surface);
+    background-color: #000000;
+    color: #f5f5f7;
   }
 }
 

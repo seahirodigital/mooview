@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { AssetItem, AssetCategory, IncomeItem, ExpenseItem, TimelineColumn } from '../../types';
 import { EditableCell } from '../common/EditableCell';
-import { MonthlyAssetLineChart, PortfolioDonutChart } from '../charts/InteractiveChart';
+import { PortfolioDonutChart } from '../charts/InteractiveChart';
+import { MonthlyAssetLineChart } from '../charts/MonthlyAssetLineChart';
 import { DividendTimeline } from './DividendTimeline';
 import { lookupYahooFinanceTicker } from '../../services/yahooFinance';
 import {
@@ -32,19 +33,11 @@ import {
 } from 'lucide-react';
 
 const CATEGORY_META: Record<AssetCategory, { label: string; color: string }> = {
-  core_stocks: { label: 'コア株式 (S&P500)', color: 'var(--color-finance-accent)' },
-  dividend_stocks: { label: '高配当資産 (ETF/投信)', color: 'var(--color-finance-accent-strong)' },
-  cash: { label: '生活防衛資金 (預金)', color: 'var(--color-finance-accent-muted)' },
-  illiquid_other: { label: '金・確定拠出・その他', color: 'var(--color-finance-accent-mid)' },
+  core_stocks: { label: 'コア株式 (S&P500)', color: '#0071e3' },
+  dividend_stocks: { label: '高配当資産 (ETF/投信)', color: '#34c759' },
+  cash: { label: '生活防衛資金 (預金)', color: '#ff9500' },
+  illiquid_other: { label: '金・確定拠出・その他', color: '#af52de' },
 };
-
-const FINANCE_CHART_COLORS = [
-  'var(--color-finance-accent)',
-  'var(--color-finance-accent-strong)',
-  'var(--color-finance-accent-mid)',
-  'var(--color-finance-accent-muted)',
-  'var(--color-finance-accent-on-dark)',
-];
 
 type AssetColumnKey = 'drag' | 'category' | 'name' | 'ticker' | 'institution' | 'shares' | 'averageCost' | 'currentPrice' | 'amount' | 'share';
 
@@ -105,19 +98,23 @@ const fundQuoteMatchesAssetName = (assetName: string, quote: YahooFinanceCurrent
 
 const PRESET_COLORS = [
   { label: 'なし (標準)', value: '' },
-  { label: '淡いブランドブルー', value: 'var(--color-finance-accent-subtle)' },
-  { label: 'やわらかいブルー', value: 'var(--color-finance-accent-soft)' },
-  { label: 'ニュートラル', value: 'var(--color-finance-surface)' },
-  { label: '濃いブランドブルー', value: 'var(--color-finance-accent-strong)' },
-  { label: '注意（赤字）', value: 'color-mix(in srgb, var(--color-finance-negative) 14%, transparent)' },
+  { label: '薄赤', value: '#fee2e2' },
+  { label: '薄黄', value: '#fef9c3' },
+  { label: '薄緑', value: '#dcfce7' },
+  { label: '薄青', value: '#dbeafe' },
+  { label: '薄紫', value: '#f3e8ff' },
+  { label: '薄灰', value: '#f1f5f9' },
+  { label: '濃青', value: '#1e3a8a' },
+  { label: '濃緑', value: '#14532d' },
 ];
 
 const PRESET_TEXT_COLORS = [
   { label: '標準 (黒/白)', value: '' },
-  { label: '本文', value: 'var(--color-finance-ink)' },
-  { label: 'ブランドブルー', value: 'var(--color-finance-accent)' },
-  { label: 'プラス', value: 'var(--color-finance-positive)' },
-  { label: 'マイナス', value: 'var(--color-finance-negative)' },
+  { label: '黒', value: '#1d1d1f' },
+  { label: '赤', value: '#dc2626' },
+  { label: '青', value: '#2563eb' },
+  { label: '緑', value: '#16a34a' },
+  { label: '橙', value: '#d97706' },
 ];
 
 export const AssetManagementTab: React.FC = () => {
@@ -178,7 +175,7 @@ export const AssetManagementTab: React.FC = () => {
   const isDark = theme === 'dark';
   const categoryMetaFor = (category: AssetCategory) => CATEGORY_META[category]
     || customAssetCategories.find((item) => item.id === category)
-    || { label: category, color: 'var(--color-finance-muted)' };
+    || { label: category, color: '#8e8e93' };
   const labelFor = (id: string, fallback: string) => customLabels[id] || fallback;
   const uniqueAssetName = (baseName: string, copyMode = false) => {
     const base = String(baseName || '新規資産').trim() || '新規資産';
@@ -685,15 +682,15 @@ export const AssetManagementTab: React.FC = () => {
       ? Number(monthlyOverrides[rowId][chartMonth.id]) || 0
       : fallback;
   };
+  // 月次表の資産行と同一の値だけをチャートへ渡し、表示間の差を作らない。
   const monthlyAssetChartData = timelineColumns.map((column) => {
     const coreStocks = Number(monthlyOverrides.prog_core_stocks?.[column.id] ?? coreStocksTotal) || 0;
     const dividendStocks = Number(monthlyOverrides.prog_dividend_stocks?.[column.id] ?? totalInvestedDividends) || 0;
     const cash = Number(cashPoolByCol[column.id] ?? cashTotal) || 0;
     const investmentCapacity = Number(cumulativeSurplusByCol[column.id] ?? 0) || 0;
-    const netWorth = Math.round((netWorthTotal + investmentCapacity) * 10) / 10;
     return {
       label: labelFor(`header_month_${column.id}`, column.label),
-      netWorth,
+      netWorth: Math.round((netWorthTotal + investmentCapacity) * 10) / 10,
       coreStocks,
       dividendStocks,
       cash,
@@ -701,10 +698,10 @@ export const AssetManagementTab: React.FC = () => {
     };
   });
   const chartSlices: AssetChartSlice[] = [
-    { id: 'core_stocks', label: 'コア株式 (S&P500)', value: chartValue('prog_core_stocks', coreStocksTotal), color: FINANCE_CHART_COLORS[0] },
-    { id: 'dividend_stocks', label: '高配当資産 (ETF/投信)', value: chartValue('prog_dividend_stocks', dividendStocksTotal), color: FINANCE_CHART_COLORS[1] },
-    { id: 'cash', label: '生活防衛資金・家賃口座', value: cashPoolByCol[chartMonth?.id || ''] ?? cashTotal, color: FINANCE_CHART_COLORS[3] },
-    { id: 'illiquid_other', label: '金・確定拠出・その他', value: chartValue('prog_illiquid', illiquidTotal), color: FINANCE_CHART_COLORS[2] },
+    { id: 'core_stocks', label: 'コア株式 (S&P500)', value: chartValue('prog_core_stocks', coreStocksTotal), color: '#0071e3' },
+    { id: 'dividend_stocks', label: '高配当資産 (ETF/投信)', value: chartValue('prog_dividend_stocks', dividendStocksTotal), color: '#34c759' },
+    { id: 'cash', label: '生活防衛資金・家賃口座', value: cashPoolByCol[chartMonth?.id || ''] ?? cashTotal, color: '#ff9500' },
+    { id: 'illiquid_other', label: '金・確定拠出・その他', value: chartValue('prog_illiquid', illiquidTotal), color: '#af52de' },
     ...visibleCustomCategories.map((category) => ({
       id: category.id,
       label: category.label,
@@ -722,7 +719,7 @@ export const AssetManagementTab: React.FC = () => {
       id: item.stock.id,
       label: item.stock.ticker || item.stock.name,
       value: Number(item.stock.investedAmount) || 0,
-      color: FINANCE_CHART_COLORS[index % FINANCE_CHART_COLORS.length],
+      color: ['#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55', '#5856d6', '#00c7be'][index % 7],
     }));
   const monthlyDividendChartItems = calculatedDividends
     .filter((item) => Number(item.monthlyNet) > 0)
@@ -730,7 +727,7 @@ export const AssetManagementTab: React.FC = () => {
       id: item.stock.id,
       label: item.stock.ticker || item.stock.name,
       value: Number(item.monthlyNet) || 0,
-      color: FINANCE_CHART_COLORS[index % FINANCE_CHART_COLORS.length],
+      color: ['#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55', '#5856d6', '#00c7be'][index % 7],
     }));
   const chartPieSlices = (() => {
     let startPercent = 0;
@@ -770,8 +767,8 @@ export const AssetManagementTab: React.FC = () => {
                 aria-pressed={maskAssetAmounts}
                 className={`inline-flex h-9 w-9 items-center justify-center border transition-colors ${
                   maskAssetAmounts
-                    ? 'border-[var(--color-finance-accent)] bg-[var(--color-finance-accent)]/10 text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]'
-                    : 'border-black/15 text-[var(--color-finance-ink)]/60 hover:bg-black/5 dark:border-white/15 dark:text-[var(--color-finance-surface)]/60 dark:hover:bg-white/10'
+                    ? 'border-[#0071e3] bg-[#0071e3]/10 text-[#0071e3] dark:text-[#2997ff]'
+                    : 'border-black/15 text-[#1d1d1f]/60 hover:bg-black/5 dark:border-white/15 dark:text-[#f5f5f7]/60 dark:hover:bg-white/10'
                 }`}
               >
                 {maskAssetAmounts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -779,7 +776,7 @@ export const AssetManagementTab: React.FC = () => {
               <select
                 value={assetChartMonthId}
                 onChange={(event) => setAssetChartMonthId(event.target.value)}
-                className="w-full border border-black/15 bg-white px-3 py-2 text-xs font-semibold text-[var(--color-finance-ink)] sm:w-44 dark:border-white/15 dark:bg-transparent dark:text-[var(--color-finance-surface)]"
+                className="w-full border border-black/15 bg-white px-3 py-2 text-xs font-semibold text-[#1d1d1f] sm:w-44 dark:border-white/15 dark:bg-transparent dark:text-[#f5f5f7]"
                 aria-label="資産構成の表示月"
               >
                 {timelineColumns.map((column) => (
@@ -809,17 +806,17 @@ export const AssetManagementTab: React.FC = () => {
                 );
               })}
               <circle cx="120" cy="120" r="56" className="fill-transparent" />
-              <text x="120" y="114" textAnchor="middle" className="fill-[var(--color-finance-ink)] dark:fill-[var(--color-finance-surface)]" fontSize="9">総資産合計</text>
-              <text x="120" y="131" textAnchor="middle" className={chartTotal < 0 ? 'fill-[var(--color-finance-negative)]' : 'fill-[var(--color-finance-accent)] dark:fill-[var(--color-finance-accent-on-dark)]'} fontSize="15" fontWeight="700">{chartDisplayNumber(chartTotal)}</text>
-              <text x="120" y="143" textAnchor="middle" className="fill-[var(--color-finance-ink)]/60 dark:fill-[var(--color-finance-surface)]/60" fontSize="8">万円</text>
+              <text x="120" y="114" textAnchor="middle" className="fill-[#1d1d1f] dark:fill-[#f5f5f7]" fontSize="9">総資産合計</text>
+              <text x="120" y="131" textAnchor="middle" className={chartTotal < 0 ? 'fill-[#ff3b30]' : 'fill-[#0071e3] dark:fill-[#2997ff]'} fontSize="15" fontWeight="700">{chartDisplayNumber(chartTotal)}</text>
+              <text x="120" y="143" textAnchor="middle" className="fill-[#1d1d1f]/60 dark:fill-[#f5f5f7]/60" fontSize="8">万円</text>
             </svg>
-            {chartSlices.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">表示できる資産がありません。</p>}
+            {chartSlices.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">表示できる資産がありません。</p>}
           </div>
           </div>
           <div className="flex min-h-[420px] flex-col items-center bg-transparent">
             <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
-              <div className="text-[10px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">年間受取配当 (手取り・2563込)</div>
-              <div className="font-mono text-lg font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">{totalAnnualDividend.toFixed(1)} 万円</div>
+              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">年間受取配当 (手取り・2563込)</div>
+              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{totalAnnualDividend.toFixed(1)} 万円</div>
             </div>
             <div className="min-h-0 w-full flex-1">
               <PortfolioDonutChart items={monthlyDividendChartItems} totalLabel="月額配当 (2563込)" />
@@ -827,8 +824,8 @@ export const AssetManagementTab: React.FC = () => {
           </div>
           <div className="flex min-h-[420px] flex-col items-center bg-transparent">
             <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
-              <div className="text-[10px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">税引後 加重平均利回り</div>
-              <div className="font-mono text-lg font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]">{overallNetYield.toFixed(2)} %</div>
+              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">税引後 加重平均利回り</div>
+              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{overallNetYield.toFixed(2)} %</div>
             </div>
             <div className="min-h-0 w-full flex-1">
               <PortfolioDonutChart items={dividendChartItems} totalLabel="高配当ポートフォリオ" />
@@ -842,13 +839,13 @@ export const AssetManagementTab: React.FC = () => {
         {/* The Matrix Table Container */}
         <div
           ref={tableScrollRef}
-          className="overflow-x-auto border border-black/15 dark:border-white/15 bg-white dark:bg-[var(--color-finance-dark-surface)] select-none"
+          className="overflow-x-auto border border-black/15 dark:border-white/15 bg-white dark:bg-[#1a1a1c] select-none"
           style={{ scrollBehavior: 'smooth' }}
         >
           <table className="w-full text-xs text-left border-collapse min-w-[900px]">
             <thead>
               {/* Header row: 区分(56px) -> 項目名(160px) -> すぐ右に各月次列(現在月: 2026年9月〜) -> 最右＋列 */}
-              <tr className="border-b border-black/15 dark:border-white/15 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] text-[var(--color-finance-ink)]/80 dark:text-[var(--color-finance-surface)]/80 font-sans">
+              <tr className="border-b border-black/15 dark:border-white/15 bg-[#f5f5f7] dark:bg-[#141416] text-[#1d1d1f]/80 dark:text-[#f5f5f7]/80 font-sans">
                 <th
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -856,7 +853,7 @@ export const AssetManagementTab: React.FC = () => {
                     setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'cell', rowId: 'header_fixed', colId: 'category', label: labelFor('header_category', '区分') });
                   }}
                   style={getResolvedStyle('header_fixed', 'category')}
-                  className="py-2 px-1 font-semibold sticky left-0 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-20 w-14 min-w-[56px] max-w-[56px] border-r border-black/15 dark:border-white/15 text-center"
+                  className="py-2 px-1 font-semibold sticky left-0 bg-[#f5f5f7] dark:bg-[#141416] z-20 w-14 min-w-[56px] max-w-[56px] border-r border-black/15 dark:border-white/15 text-center"
                 >
                   {labelFor('header_category', '区分')}
                 </th>
@@ -867,7 +864,7 @@ export const AssetManagementTab: React.FC = () => {
                     setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'cell', rowId: 'header_fixed', colId: 'name', label: labelFor('header_name', '項目名') });
                   }}
                   style={getResolvedStyle('header_fixed', 'name')}
-                  className="py-2 px-3 font-semibold sticky left-[56px] bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-20 w-40 min-w-[160px] max-w-[160px] border-r border-black/15 dark:border-white/15"
+                  className="py-2 px-3 font-semibold sticky left-[56px] bg-[#f5f5f7] dark:bg-[#141416] z-20 w-40 min-w-[160px] max-w-[160px] border-r border-black/15 dark:border-white/15"
                 >
                   {labelFor('header_name', '項目名')}
                 </th>
@@ -894,19 +891,19 @@ export const AssetManagementTab: React.FC = () => {
                         });
                       }}
                       style={{
-                        backgroundColor: colCustomStyle.backgroundColor || (isCurrent ? 'var(--color-finance-accent-subtle)' : undefined),
+                        backgroundColor: colCustomStyle.backgroundColor || (isCurrent ? '#0071e315' : undefined),
                         color: colCustomStyle.color || undefined,
                       }}
                       className={`py-1.5 px-2 font-semibold text-center min-w-[65px] border-r border-black/15 dark:border-white/15 group cursor-context-menu relative ${
-                        isCurrent ? 'border-b-2 border-b-[var(--color-finance-accent)]' : ''
+                        isCurrent ? 'border-b-2 border-b-[#0071e3]' : ''
                       }`}
                     >
                       <div className="flex flex-col items-center justify-center">
-                        <span className={`text-[11px] ${isCurrent ? 'font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]' : ''}`}>
+                        <span className={`text-[11px] ${isCurrent ? 'font-bold text-[#0071e3] dark:text-[#2997ff]' : ''}`}>
                           {labelFor(`header_month_${col.id}`, col.label)}
                         </span>
                         {isCurrent && (
-                          <span className="text-[9px] font-bold text-white bg-[var(--color-finance-accent)] px-1 py-0.2 mt-0.5 tracking-wider">
+                          <span className="text-[9px] font-bold text-white bg-[#0071e3] px-1 py-0.2 mt-0.5 tracking-wider">
                             現在
                           </span>
                         )}
@@ -916,11 +913,11 @@ export const AssetManagementTab: React.FC = () => {
                 })}
 
                 {/* 最右列: ＋ボタン列 (クリックで翌年を追加) */}
-                <th className="py-1 px-1.5 text-center w-10 min-w-[40px] bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)]">
+                <th className="py-1 px-1.5 text-center w-10 min-w-[40px] bg-[#f5f5f7] dark:bg-[#141416]">
                   <button
                     onClick={addNextYearColumns}
                     title="次の年度 (12ヶ月分) を追加"
-                    className="w-full py-0.5 hover:bg-[var(--color-finance-accent)] hover:text-white border border-black/20 dark:border-white/20 transition-colors cursor-pointer text-xs font-bold"
+                    className="w-full py-0.5 hover:bg-[#0071e3] hover:text-white border border-black/20 dark:border-white/20 transition-colors cursor-pointer text-xs font-bold"
                   >
                     ＋
                   </button>
@@ -935,7 +932,7 @@ export const AssetManagementTab: React.FC = () => {
               {/* Row 0.1: 総純資産推計 (月末残高 / 自走純資産) */}
               <tr
                 style={getResolvedStyle('prog_total_net_worth')}
-                className="bg-finance-accent-mid/10 dark:bg-finance-accent-mid/20 font-bold border-b-2 border-finance-accent-mid/40 text-xs"
+                className="bg-purple-500/10 dark:bg-purple-500/20 font-bold border-b-2 border-purple-500/40 text-xs"
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setContextMenu({
@@ -950,11 +947,11 @@ export const AssetManagementTab: React.FC = () => {
                 {/* 区分: 基本4行＋追加区分を、資産ブロック全体で1つのセルに結合 */}
                 <td
                   rowSpan={5 + visibleCustomCategories.length}
-                  className="py-2 px-1 text-center font-sans font-bold sticky left-0 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 border-r border-black/15 dark:border-white/15 align-middle text-[var(--color-finance-accent-mid)]"
+                  className="py-2 px-1 text-center font-sans font-bold sticky left-0 bg-[#f5f5f7] dark:bg-[#141416] z-10 border-r border-black/15 dark:border-white/15 align-middle text-[#af52de]"
                 >
                   資産
                 </td>
-                <td className="py-2 px-3 sticky left-[56px] bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 font-sans font-bold border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]">
+                <td className="py-2 px-3 sticky left-[56px] bg-[#f5f5f7] dark:bg-[#141416] z-10 font-sans font-bold border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7]">
                   {labelFor('prog_total_net_worth', '総純資産推計')}
                 </td>
                 {timelineColumns.map((col) => {
@@ -965,8 +962,8 @@ export const AssetManagementTab: React.FC = () => {
                     <td
                       key={col.id}
                       style={getResolvedStyle('prog_total_net_worth', col.id)}
-                      className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 font-black text-xs text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                        col.isCurrent ? 'bg-[var(--color-finance-accent)]/15 text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]' : ''
+                      className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 font-black text-xs text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                        col.isCurrent ? 'bg-[#0071e3]/15 text-[#0071e3] dark:text-[#2997ff]' : ''
                       }`}
                     >
                       <span>{maskAssetAmounts ? '***' : Math.round(estimatedNW).toLocaleString()}</span>
@@ -991,7 +988,7 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
               >
-                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                   {labelFor('prog_core_stocks', 'コア株式 (S&P500)')}
                 </td>
                 {timelineColumns.map((col) => {
@@ -1016,8 +1013,8 @@ export const AssetManagementTab: React.FC = () => {
                           currentValue: cellVal,
                         });
                       }}
-                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                        col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                        col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                       }`}
                     >
                       <EditableCell
@@ -1026,7 +1023,7 @@ export const AssetManagementTab: React.FC = () => {
                         step="10"
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_core_stocks', col.id, Number(val) || 0, true)}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                         masked={maskAssetAmounts}
                       />
                     </td>
@@ -1050,7 +1047,7 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
               >
-                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                   {labelFor('prog_dividend_stocks', '高配当ポートフォリオ')}
                 </td>
                 {timelineColumns.map((col) => {
@@ -1075,8 +1072,8 @@ export const AssetManagementTab: React.FC = () => {
                           currentValue: cellVal,
                         });
                       }}
-                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                        col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                        col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                       }`}
                     >
                       <EditableCell
@@ -1085,7 +1082,7 @@ export const AssetManagementTab: React.FC = () => {
                         step="10"
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_dividend_stocks', col.id, Number(val) || 0, true)}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                         masked={maskAssetAmounts}
                       />
                     </td>
@@ -1109,7 +1106,7 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
               >
-                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                   {labelFor('prog_cash_pool', '現金・投資余力累積')}
                 </td>
                 {timelineColumns.map((col) => {
@@ -1132,8 +1129,8 @@ export const AssetManagementTab: React.FC = () => {
                           currentValue: cellVal,
                         });
                       }}
-                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                        col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                        col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                       }`}
                     >
                       <EditableCell
@@ -1142,7 +1139,7 @@ export const AssetManagementTab: React.FC = () => {
                         step="10"
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_cash_pool', col.id, Number(val) || 0, true)}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                         masked={maskAssetAmounts}
                       />
                     </td>
@@ -1166,7 +1163,7 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
               >
-                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                   {labelFor('prog_illiquid', '金・確定拠出・他')}
                 </td>
                 {timelineColumns.map((col) => {
@@ -1191,8 +1188,8 @@ export const AssetManagementTab: React.FC = () => {
                           currentValue: cellVal,
                         });
                       }}
-                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                        col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                      className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                        col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                       }`}
                     >
                       <EditableCell
@@ -1201,7 +1198,7 @@ export const AssetManagementTab: React.FC = () => {
                         step="10"
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_illiquid', col.id, Number(val) || 0, true)}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                         masked={maskAssetAmounts}
                       />
                     </td>
@@ -1227,7 +1224,7 @@ export const AssetManagementTab: React.FC = () => {
                       setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'row', rowId, label });
                     }}
                   >
-                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15" style={{ color: category.color }}>
+                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15" style={{ color: category.color }}>
                       {label}
                     </td>
                     {timelineColumns.map((col) => {
@@ -1242,7 +1239,7 @@ export const AssetManagementTab: React.FC = () => {
                             setStyleScope('cell');
                             setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'cell', rowId, colId: col.id, label: `${label} (${col.label})`, currentValue: cellVal });
                           }}
-                          className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''}`}
+                          className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''}`}
                         >
                           <EditableCell
                             value={cellVal}
@@ -1250,7 +1247,7 @@ export const AssetManagementTab: React.FC = () => {
                             step="10"
                             align="center"
                             onSave={(val) => updateMonthlyCell(rowId, col.id, Number(val) || 0, true)}
-                            textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                            textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                             masked={maskAssetAmounts}
                           />
                         </td>
@@ -1276,9 +1273,9 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
                 style={getResolvedStyle('sec_income')}
-                className="bg-finance-positive/10 dark:bg-finance-positive/15 font-sans font-bold text-xs border-y border-finance-positive/30 cursor-context-menu"
+                className="bg-emerald-500/10 dark:bg-emerald-500/15 font-sans font-bold text-xs border-y border-emerald-500/30 cursor-context-menu"
               >
-                <td colSpan={2 + timelineColumns.length + 1} className="py-2 px-3 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]">
+                <td colSpan={2 + timelineColumns.length + 1} className="py-2 px-3 text-[#1d1d1f] dark:text-[#f5f5f7]">
                   {labelFor('sec_income', '【1. 入金（月次収入内訳）】')}
                 </td>
               </tr>
@@ -1307,18 +1304,18 @@ export const AssetManagementTab: React.FC = () => {
                     {index === 0 && (
                       <td
                         rowSpan={incomes.length}
-                        className="py-1.5 px-1 font-sans font-bold sticky left-0 bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15 text-center text-[var(--color-finance-positive)] align-middle"
+                        className="py-1.5 px-1 font-sans font-bold sticky left-0 bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15 text-center text-[#34c759] align-middle"
                       >
                         収入
                       </td>
                     )}
                     {/* 項目名 (sticky left-[56px]) */}
-                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                       <EditableCell
                         value={item.name}
                         type="text"
                         onSave={(val) => updateIncome(item.id, { name: String(val) })}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                       />
                     </td>
 
@@ -1345,11 +1342,11 @@ export const AssetManagementTab: React.FC = () => {
                             });
                           }}
                           className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 ${
-                            col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                            col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                           }`}
                         >
                           {isDiv ? (
-                            <span className="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-semibold tabular-nums">
+                            <span className="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold tabular-nums">
                               {maskAssetAmounts ? '***' : amount.toFixed(1)}
                             </span>
                           ) : (
@@ -1359,7 +1356,7 @@ export const AssetManagementTab: React.FC = () => {
                               step="0.1"
                               align="center"
                               onSave={(val) => updateMonthlyCell(item.id, col.id, Number(val) || 0, true)}
-                              textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-semibold"
+                              textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold"
                               masked={maskAssetAmounts}
                             />
                           )}
@@ -1384,17 +1381,17 @@ export const AssetManagementTab: React.FC = () => {
                     label: labelFor('row_income_total', '収入小計'),
                   });
                 }}
-                className="bg-finance-positive/5 font-bold border-t border-finance-positive/20"
+                className="bg-emerald-500/5 font-bold border-t border-emerald-500/20"
               >
-                <td className="py-2 px-3 sticky left-0 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 border-r border-black/15 dark:border-white/15" colSpan={2}>
+                <td className="py-2 px-3 sticky left-0 bg-[#f5f5f7] dark:bg-[#141416] z-10 border-r border-black/15 dark:border-white/15" colSpan={2}>
                   {labelFor('row_income_total', '収入小計')}
                 </td>
                 {columnTotals.map((t) => (
                   <td
                     key={t.colId}
                     style={getResolvedStyle('row_income_total', t.colId)}
-                    className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                      t.col.isCurrent ? 'bg-[var(--color-finance-accent)]/10 font-black' : ''
+                    className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                      t.col.isCurrent ? 'bg-[#0071e3]/10 font-black' : ''
                     }`}
                   >
                     {maskAssetAmounts ? '***' : t.income.toFixed(1)}
@@ -1418,9 +1415,9 @@ export const AssetManagementTab: React.FC = () => {
                   });
                 }}
                 style={getResolvedStyle('sec_expense')}
-                className="bg-finance-accent-muted/10 dark:bg-finance-accent-muted/15 font-sans font-bold text-xs border-y border-finance-accent-muted/30 cursor-context-menu"
+                className="bg-amber-500/10 dark:bg-amber-500/15 font-sans font-bold text-xs border-y border-amber-500/30 cursor-context-menu"
               >
-                <td colSpan={2 + timelineColumns.length + 1} className="py-2 px-3 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]">
+                <td colSpan={2 + timelineColumns.length + 1} className="py-2 px-3 text-[#1d1d1f] dark:text-[#f5f5f7]">
                   {labelFor('sec_expense', '【2. 出金（生活費の出費・固定費・変動費・税金・特損）】')}
                 </td>
               </tr>
@@ -1448,18 +1445,18 @@ export const AssetManagementTab: React.FC = () => {
                     {index === 0 && (
                       <td
                         rowSpan={expenses.length}
-                        className="py-1.5 px-1 font-sans font-bold sticky left-0 bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15 text-center text-[var(--color-finance-accent-muted)] align-middle"
+                        className="py-1.5 px-1 font-sans font-bold sticky left-0 bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15 text-center text-[#ff9500] align-middle"
                       >
                         支出
                       </td>
                     )}
                     {/* 項目名 (sticky left-[56px]) */}
-                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[var(--color-finance-dark-surface)] z-10 border-r border-black/15 dark:border-white/15">
+                    <td className="py-1.5 px-3 font-sans font-medium sticky left-[56px] bg-white dark:bg-[#1a1a1c] z-10 border-r border-black/15 dark:border-white/15">
                       <EditableCell
                         value={item.name}
                         type="text"
                         onSave={(val) => updateExpense(item.id, { name: String(val) })}
-                        textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]"
+                        textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
                       />
                     </td>
 
@@ -1486,7 +1483,7 @@ export const AssetManagementTab: React.FC = () => {
                             });
                           }}
                           className={`py-1.5 px-2 text-center border-r border-black/15 dark:border-white/15 ${
-                            col.isCurrent ? 'bg-[var(--color-finance-accent)]/5 font-bold' : ''
+                            col.isCurrent ? 'bg-[#0071e3]/5 font-bold' : ''
                           }`}
                         >
                           <EditableCell
@@ -1495,7 +1492,7 @@ export const AssetManagementTab: React.FC = () => {
                             step="0.1"
                             align="center"
                             onSave={(val) => updateMonthlyCell(item.id, col.id, Number(val) || 0, true)}
-                            textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-semibold"
+                            textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold"
                             masked={maskAssetAmounts}
                           />
                         </td>
@@ -1519,17 +1516,17 @@ export const AssetManagementTab: React.FC = () => {
                     label: labelFor('row_expense_total', '支出小計'),
                   });
                 }}
-                className="bg-finance-accent-muted/5 font-bold border-t border-finance-accent-muted/20"
+                className="bg-amber-500/5 font-bold border-t border-amber-500/20"
               >
-                <td className="py-2 px-3 sticky left-0 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 border-r border-black/15 dark:border-white/15" colSpan={2}>
+                <td className="py-2 px-3 sticky left-0 bg-[#f5f5f7] dark:bg-[#141416] z-10 border-r border-black/15 dark:border-white/15" colSpan={2}>
                   {labelFor('row_expense_total', '支出小計')}
                 </td>
                 {columnTotals.map((t) => (
                   <td
                     key={t.colId}
                     style={getResolvedStyle('row_expense_total', t.colId)}
-                    className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] ${
-                      t.col.isCurrent ? 'bg-[var(--color-finance-accent)]/10 font-black' : ''
+                    className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7] ${
+                      t.col.isCurrent ? 'bg-[#0071e3]/10 font-black' : ''
                     }`}
                   >
                     {maskAssetAmounts ? '***' : `-${t.expense.toFixed(1)}`}
@@ -1553,12 +1550,12 @@ export const AssetManagementTab: React.FC = () => {
                     label: labelFor('row_surplus', '差引余剰 (投資積立原資)'),
                   });
                 }}
-                className="bg-[var(--color-finance-accent)]/10 dark:bg-[var(--color-finance-accent)]/15 font-bold border-y-2 border-[var(--color-finance-accent)]/30 text-xs"
+                className="bg-[#0071e3]/10 dark:bg-[#0071e3]/15 font-bold border-y-2 border-[#0071e3]/30 text-xs"
               >
-                <td className="py-2 px-1 text-center font-sans font-bold sticky left-0 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 border-r border-black/15 dark:border-white/15 text-[var(--color-finance-accent)]">
+                <td className="py-2 px-1 text-center font-sans font-bold sticky left-0 bg-[#f5f5f7] dark:bg-[#141416] z-10 border-r border-black/15 dark:border-white/15 text-[#0071e3]">
                   余剰
                 </td>
-                <td className="py-2 px-3 sticky left-[56px] bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] z-10 font-sans font-bold border-r border-black/15 dark:border-white/15 text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]">
+                <td className="py-2 px-3 sticky left-[56px] bg-[#f5f5f7] dark:bg-[#141416] z-10 font-sans font-bold border-r border-black/15 dark:border-white/15 text-[#1d1d1f] dark:text-[#f5f5f7]">
                   {labelFor('row_surplus', '差引余剰 (投資積立原資)')}
                 </td>
                 {columnTotals.map((t) => {
@@ -1568,8 +1565,8 @@ export const AssetManagementTab: React.FC = () => {
                       key={t.colId}
                       style={getResolvedStyle('row_surplus', t.colId)}
                       className={`py-2 px-2 text-center border-r border-black/15 dark:border-white/15 font-extrabold ${
-                        isPositive ? 'text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)]' : 'text-finance-negative'
-                      } ${t.col.isCurrent ? 'bg-[var(--color-finance-accent)]/20' : ''}`}
+                        isPositive ? 'text-[#1d1d1f] dark:text-[#f5f5f7]' : 'text-red-500'
+                      } ${t.col.isCurrent ? 'bg-[#0071e3]/20' : ''}`}
                     >
                       {maskAssetAmounts ? '***' : (isPositive ? `+${t.surplus.toFixed(1)}` : `${t.surplus.toFixed(1)}`)}
                     </td>
@@ -1586,12 +1583,12 @@ export const AssetManagementTab: React.FC = () => {
       <div className="space-y-3 pt-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
           <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 text-[var(--color-finance-accent)]" />
-            <h2 className={`text-base font-bold ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}>
+            <Layers className="w-4 h-4 text-[#0071e3]" />
+            <h2 className={`text-base font-bold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
               保有資産ポートフォリオ一覧表
             </h2>
           </div>
-          <span className="text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">
             ※ 上下ドラッグで並び替え / 列境界ドラッグで幅変更 / 行右クリックで複製・削除
           </span>
         </div>
@@ -1604,7 +1601,7 @@ export const AssetManagementTab: React.FC = () => {
               activeCategoryFilter === 'all'
                 ? isDark
                   ? 'bg-white text-black border-white'
-                  : 'bg-[var(--color-finance-ink)] text-white border-[var(--color-finance-ink)]'
+                  : 'bg-[#1d1d1f] text-white border-[#1d1d1f]'
                 : 'bg-transparent border-black/10 dark:border-white/10 opacity-70 hover:opacity-100'
             }`}
           >
@@ -1651,7 +1648,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className={`group flex items-center border transition-all shrink-0 cursor-grab active:cursor-grabbing ${
                   activeCategoryFilter === catKey
-                    ? 'bg-[var(--color-finance-accent)] text-white border-[var(--color-finance-accent)]'
+                    ? 'bg-[#0071e3] text-white border-[#0071e3]'
                     : 'bg-transparent border-black/10 dark:border-white/10 opacity-80 hover:opacity-100'
                 }`}
               >
@@ -1703,10 +1700,10 @@ export const AssetManagementTab: React.FC = () => {
         </div>
 
         {/* Resizable Asset Portfolio Table */}
-        <div className="overflow-x-auto border border-black/10 dark:border-white/10 bg-white dark:bg-[var(--color-finance-dark-surface)] select-none">
+        <div className="overflow-x-auto border border-black/10 dark:border-white/10 bg-white dark:bg-[#1a1a1c] select-none">
           <table className="w-full text-xs text-left border-collapse table-fixed">
             <thead>
-              <tr className="border-b border-black/10 dark:border-white/10 bg-[var(--color-finance-surface)] dark:bg-[var(--color-finance-dark-canvas)] text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70 font-sans">
+              <tr className="border-b border-black/10 dark:border-white/10 bg-[#f5f5f7] dark:bg-[#141416] text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-sans">
                 {columnKeys.map((colKey) => {
                   const colDef = DEFAULT_ASSET_COLUMNS.find(c => c.key === colKey);
                   const width = colWidths[colKey] || colDef?.defaultWidth || 100;
@@ -1737,14 +1734,14 @@ export const AssetManagementTab: React.FC = () => {
                             <button
                               onClick={() => moveColumn(colKey, 'left')}
                               title="列を左へ"
-                              className="hover:text-[var(--color-finance-accent)] p-0.5 text-[9px]"
+                              className="hover:text-[#0071e3] p-0.5 text-[9px]"
                             >
                               ◀
                             </button>
                             <button
                               onClick={() => moveColumn(colKey, 'right')}
                               title="列を右へ"
-                              className="hover:text-[var(--color-finance-accent)] p-0.5 text-[9px]"
+                              className="hover:text-[#0071e3] p-0.5 text-[9px]"
                             >
                               ▶
                             </button>
@@ -1763,7 +1760,7 @@ export const AssetManagementTab: React.FC = () => {
                             startWidth: width,
                           };
                         }}
-                        className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-[var(--color-finance-accent)]/50 transition-colors z-20"
+                        className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-[#0071e3]/50 transition-colors z-20"
                       />
                     </th>
                   );
@@ -1774,7 +1771,7 @@ export const AssetManagementTab: React.FC = () => {
             <tbody className="divide-y divide-black/5 dark:divide-white/5 font-mono text-xs">
               {filteredAssets.length === 0 ? (
                 <tr>
-                  <td colSpan={columnKeys.length} className="py-12 text-center text-finance-muted font-sans">
+                  <td colSpan={columnKeys.length} className="py-12 text-center text-slate-400 font-sans">
                     資産が登録されていません。「資産を追加」ボタンから追加してください。
                   </td>
                 </tr>
@@ -1803,7 +1800,7 @@ export const AssetManagementTab: React.FC = () => {
                         });
                       }}
                       className={`hover:bg-black/5 dark:hover:bg-white/5 transition-colors group cursor-grab active:cursor-grabbing ${
-                        isDragging ? 'opacity-30 bg-[var(--color-finance-accent)]/10' : ''
+                        isDragging ? 'opacity-30 bg-[#0071e3]/10' : ''
                       }`}
                     >
                       {columnKeys.map((colKey) => {
@@ -1816,7 +1813,7 @@ export const AssetManagementTab: React.FC = () => {
                             className={`py-2 px-3 truncate border-r border-black/10 dark:border-white/10 ${alignClass}`}
                           >
                             {colKey === 'drag' && (
-                              <div className="flex items-center justify-center text-finance-muted group-hover:text-[var(--color-finance-accent)]">
+                              <div className="flex items-center justify-center text-slate-400 group-hover:text-[#0071e3]">
                                 <GripVertical className="w-4 h-4 cursor-grab" />
                               </div>
                             )}
@@ -1883,7 +1880,7 @@ export const AssetManagementTab: React.FC = () => {
                                   value={asset.name}
                                   type="text"
                                   onSave={(val) => updateAsset(asset.id, { name: String(val) })}
-                                  textClassName={`font-medium ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}
+                                  textClassName={`font-medium ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                                 />
                               </div>
                             )}
@@ -1904,7 +1901,7 @@ export const AssetManagementTab: React.FC = () => {
                                     updateAsset(asset.id, { ticker: uppercase });
                                   }
                                 }}
-                                textClassName="font-mono font-bold text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)]"
+                                textClassName="font-mono font-bold text-[#0071e3] dark:text-[#2997ff]"
                               />
                             )}
 
@@ -1914,7 +1911,7 @@ export const AssetManagementTab: React.FC = () => {
                                   value={asset.institution || '—'}
                                   type="text"
                                   onSave={(val) => updateAsset(asset.id, { institution: String(val) })}
-                                  textClassName="text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70"
+                                  textClassName="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70"
                                 />
                               </div>
                             )}
@@ -1927,7 +1924,7 @@ export const AssetManagementTab: React.FC = () => {
                                 step="1"
                                 align="center"
                                 onSave={(val) => updateAsset(asset.id, { shares: Number(val) || 0 })}
-                                textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-medium"
+                                textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-medium"
                               />
                             )}
 
@@ -1939,7 +1936,7 @@ export const AssetManagementTab: React.FC = () => {
                                 step="0.1"
                                 align="center"
                                 onSave={(val) => updateAsset(asset.id, { averageCost: Number(val) || 0 })}
-                                textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-medium"
+                                textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-medium"
                                 masked={maskAssetAmounts}
                               />
                             )}
@@ -1965,7 +1962,7 @@ export const AssetManagementTab: React.FC = () => {
                                     } : {}),
                                   });
                                 }}
-                                textClassName="text-[var(--color-finance-ink)] dark:text-[var(--color-finance-surface)] font-medium"
+                                textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-medium"
                                 masked={maskAssetAmounts}
                               />
                             )}
@@ -1977,13 +1974,13 @@ export const AssetManagementTab: React.FC = () => {
                                 step="10"
                                 align="center"
                                 onSave={(val) => updateAsset(asset.id, { amount: Number(val) || 0 })}
-                                textClassName={`font-bold tabular-nums text-sm ${isDark ? 'text-[var(--color-finance-surface)]' : 'text-[var(--color-finance-ink)]'}`}
+                                textClassName={`font-bold tabular-nums text-sm ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                                 masked={maskAssetAmounts}
                               />
                             )}
 
                             {colKey === 'share' && (
-                              <span className="font-mono text-[11px] text-[var(--color-finance-ink)]/60 dark:text-[var(--color-finance-surface)]/60 tabular-nums">
+                              <span className="font-mono text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 tabular-nums">
                                 {sharePercent}%
                               </span>
                             )}
@@ -2007,12 +2004,12 @@ export const AssetManagementTab: React.FC = () => {
           style={{ top: `${Math.min(window.innerHeight - 380, contextMenu.y)}px`, left: `${Math.min(window.innerWidth - 240, contextMenu.x)}px` }}
           className={`fixed z-50 p-2 shadow-2xl border text-xs min-w-[220px] max-w-[280px] animate-in fade-in transition-all ${
             isDark
-              ? 'bg-[var(--color-finance-dark-surface)] border-white/15 text-[var(--color-finance-surface)]'
-              : 'bg-white border-black/15 text-[var(--color-finance-ink)]'
+              ? 'bg-[#1e1e20] border-white/15 text-[#f5f5f7]'
+              : 'bg-white border-black/15 text-[#1d1d1f]'
           }`}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="px-2 py-1 text-[11px] font-bold text-finance-muted border-b border-black/10 dark:border-white/10 mb-1.5 flex items-center justify-between">
+          <div className="px-2 py-1 text-[11px] font-bold text-slate-400 border-b border-black/10 dark:border-white/10 mb-1.5 flex items-center justify-between">
             <span className="truncate">{contextMenu.label || 'メニュー'}</span>
             <span className="text-[10px] uppercase opacity-60">
               {contextMenu.targetType}
@@ -2032,7 +2029,7 @@ export const AssetManagementTab: React.FC = () => {
                 });
                 setContextMenu(null);
               }}
-              className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-[var(--color-finance-accent)]/10 text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] font-semibold transition-colors"
+              className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-[#0071e3]/10 text-[#0071e3] dark:text-[#2997ff] font-semibold transition-colors"
             >
               <span>このセルだけ数値を変更 (右へ波及させない)</span>
             </button>
@@ -2046,7 +2043,7 @@ export const AssetManagementTab: React.FC = () => {
                 setHeaderTextEditModal({ open: true, id, label: contextMenu.label || '' });
                 setContextMenu(null);
               }}
-              className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-[var(--color-finance-accent)]/10 text-[var(--color-finance-accent)] dark:text-[var(--color-finance-accent-on-dark)] font-semibold transition-colors"
+              className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-[#0071e3]/10 text-[#0071e3] dark:text-[#2997ff] font-semibold transition-colors"
             >
               テキストを編集
             </button>
@@ -2054,13 +2051,13 @@ export const AssetManagementTab: React.FC = () => {
 
           {contextMenu.rowId && contextMenu.colId && contextMenu.targetType !== 'row' && contextMenu.targetType !== 'header' && (
             <div className="px-2 py-1.5 border-t border-black/10 dark:border-white/10">
-              <span className="block text-[10px] text-finance-muted font-semibold mb-1">色・書式の適用範囲</span>
+              <span className="block text-[10px] text-slate-400 font-semibold mb-1">色・書式の適用範囲</span>
               <div className="grid grid-cols-3 gap-1">
                 {(['cell', 'row', 'col'] as const).map((scope) => (
                   <button
                     key={scope}
                     onClick={() => setStyleScope(scope)}
-                    className={`px-1 py-1 border text-[10px] ${styleScope === scope ? 'bg-[var(--color-finance-accent)] border-[var(--color-finance-accent)] text-white' : 'border-black/15 dark:border-white/15 hover:bg-black/5 dark:hover:bg-white/10'}`}
+                    className={`px-1 py-1 border text-[10px] ${styleScope === scope ? 'bg-[#0071e3] border-[#0071e3] text-white' : 'border-black/15 dark:border-white/15 hover:bg-black/5 dark:hover:bg-white/10'}`}
                   >
                     {scope === 'cell' ? (contextMenu.rowId === 'header_month' || contextMenu.rowId === 'header_fixed' ? 'このヘッダー' : 'このセル') : scope === 'row' ? 'この行' : 'この列'}
                   </button>
@@ -2071,7 +2068,7 @@ export const AssetManagementTab: React.FC = () => {
 
           {/* Background Color Palette */}
           <div className="py-1">
-            <span className="block text-[10px] text-finance-muted font-semibold px-2 mb-1 flex items-center gap-1">
+            <span className="block text-[10px] text-slate-400 font-semibold px-2 mb-1 flex items-center gap-1">
               <Palette className="w-3 h-3" />
               背景色を変更
             </span>
@@ -2082,7 +2079,7 @@ export const AssetManagementTab: React.FC = () => {
                   onClick={() => applyMenuStyle(c.value ? { bg: c.value } : { bg: undefined })}
                   title={c.label}
                   className="w-7 h-6 border border-black/20 dark:border-white/20 flex items-center justify-center text-[9px] hover:scale-105 transition-transform"
-                  style={{ backgroundColor: c.value || (isDark ? 'var(--color-finance-dark-surface)' : 'var(--color-finance-surface)') }}
+                  style={{ backgroundColor: c.value || (isDark ? '#2a2a2c' : '#f0f0f0') }}
                 >
                   {!c.value && '✕'}
                 </button>
@@ -2092,7 +2089,7 @@ export const AssetManagementTab: React.FC = () => {
 
           {/* Font Color & Style */}
           <div className="py-1 border-t border-black/10 dark:border-white/10 mt-1">
-            <span className="block text-[10px] text-finance-muted font-semibold px-2 mb-1 flex items-center gap-1">
+            <span className="block text-[10px] text-slate-400 font-semibold px-2 mb-1 flex items-center gap-1">
               <Type className="w-3 h-3" />
               フォント・装飾
             </span>
@@ -2130,7 +2127,7 @@ export const AssetManagementTab: React.FC = () => {
                   onClick={() => applyMenuStyle({ color: tc.value || undefined })}
                   title={tc.label}
                   className="w-5 h-5 border border-black/20 dark:border-white/20 flex items-center justify-center font-bold text-[10px]"
-                  style={{ color: tc.value || (isDark ? 'var(--color-finance-canvas)' : 'var(--color-finance-ink)') }}
+                  style={{ color: tc.value || (isDark ? '#fff' : '#000') }}
                 >
                   A
                 </button>
@@ -2161,7 +2158,7 @@ export const AssetManagementTab: React.FC = () => {
                     try { localStorage.setItem('finance_simulation_asset_col_order_v2', JSON.stringify(next)); } catch {}
                     setContextMenu(null);
                   }}
-                  className="w-full text-left px-2.5 py-1.5 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10"
+                  className="w-full text-left px-2.5 py-1.5 text-[#ff3b30] hover:bg-[#ff3b30]/10"
                 >
                   この列を削除（非表示）
                 </button>
@@ -2195,7 +2192,7 @@ export const AssetManagementTab: React.FC = () => {
                     if (contextMenu.colId) deleteTimelineColumn(contextMenu.colId);
                     setContextMenu(null);
                   }}
-                  className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10 transition-colors"
+                  className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[#ff3b30] hover:bg-[#ff3b30]/10 transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>この列を削除</span>
@@ -2218,7 +2215,7 @@ export const AssetManagementTab: React.FC = () => {
                         if (nextLabel?.trim()) renameCustomAssetCategory(categoryId, nextLabel);
                         setContextMenu(null);
                       }}
-                      className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent)]/10 transition-colors"
+                      className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[#0071e3] hover:bg-[#0071e3]/10 transition-colors"
                     >
                       <Type className="w-3.5 h-3.5" />
                       <span>この区分名を編集</span>
@@ -2232,14 +2229,14 @@ export const AssetManagementTab: React.FC = () => {
                         }
                         setContextMenu(null);
                       }}
-                      className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10 transition-colors"
+                      className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[#ff3b30] hover:bg-[#ff3b30]/10 transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>この区分を削除</span>
                     </button>
                   </>
                 ) : (
-                  <div className="px-2.5 py-1.5 text-[11px] text-finance-muted">標準区分は削除できません</div>
+                  <div className="px-2.5 py-1.5 text-[11px] text-slate-400">標準区分は削除できません</div>
                 )
               ) : null}
             </div>
@@ -2254,7 +2251,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <ChevronLeft className="w-3.5 h-3.5 rotate-90 text-[var(--color-finance-accent)]" />
+                <ChevronLeft className="w-3.5 h-3.5 rotate-90 text-[#0071e3]" />
                 <span>この資産行を上へ移動</span>
               </button>
               <button
@@ -2264,7 +2261,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <ChevronLeft className="w-3.5 h-3.5 -rotate-90 text-[var(--color-finance-accent)]" />
+                <ChevronLeft className="w-3.5 h-3.5 -rotate-90 text-[#0071e3]" />
                 <span>この資産行を下へ移動</span>
               </button>
               <button
@@ -2278,7 +2275,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <Copy className="w-3.5 h-3.5 text-[var(--color-finance-accent)]" />
+                <Copy className="w-3.5 h-3.5 text-[#0071e3]" />
                 <span>資産行を複製</span>
               </button>
               <button
@@ -2299,7 +2296,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <Plus className="w-3.5 h-3.5 text-[var(--color-finance-accent)]" />
+                <Plus className="w-3.5 h-3.5 text-[#0071e3]" />
                 <span>この下に新規資産行を追加</span>
               </button>
               <button
@@ -2307,7 +2304,7 @@ export const AssetManagementTab: React.FC = () => {
                   deleteAsset(contextMenu.assetItem!.id);
                   setContextMenu(null);
                 }}
-                className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10 transition-colors"
+                className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[#ff3b30] hover:bg-[#ff3b30]/10 transition-colors"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>資産行を削除</span>
@@ -2325,7 +2322,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <ChevronLeft className="w-3.5 h-3.5 rotate-90 text-[var(--color-finance-accent)]" />
+                <ChevronLeft className="w-3.5 h-3.5 rotate-90 text-[#0071e3]" />
                 <span>この行を上へ移動</span>
               </button>
               <button
@@ -2335,7 +2332,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <ChevronRight className="w-3.5 h-3.5 rotate-90 text-[var(--color-finance-accent)]" />
+                <ChevronRight className="w-3.5 h-3.5 rotate-90 text-[#0071e3]" />
                 <span>この行を下へ移動</span>
               </button>
               <button
@@ -2345,7 +2342,7 @@ export const AssetManagementTab: React.FC = () => {
                 }}
                 className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
               >
-                <Plus className="w-3.5 h-3.5 text-[var(--color-finance-accent)]" />
+                <Plus className="w-3.5 h-3.5 text-[#0071e3]" />
                 <span>この下に行を追加（特損）</span>
               </button>
               <button
@@ -2357,7 +2354,7 @@ export const AssetManagementTab: React.FC = () => {
                   }
                   setContextMenu(null);
                 }}
-                className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[var(--color-finance-negative)] hover:bg-[var(--color-finance-negative)]/10 transition-colors"
+                className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-[#ff3b30] hover:bg-[#ff3b30]/10 transition-colors"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>この行を削除</span>
@@ -2374,7 +2371,7 @@ export const AssetManagementTab: React.FC = () => {
               }}
               disabled={!canUndo}
               className={`w-full text-left px-2.5 py-1.5 flex items-center gap-2 transition-colors ${
-                canUndo ? 'hover:bg-black/5 dark:hover:bg-white/10 text-[var(--color-finance-accent)]' : 'opacity-40 cursor-not-allowed'
+                canUndo ? 'hover:bg-black/5 dark:hover:bg-white/10 text-[#0071e3]' : 'opacity-40 cursor-not-allowed'
               }`}
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -2394,18 +2391,18 @@ export const AssetManagementTab: React.FC = () => {
               updateCustomLabel(headerTextEditModal.id, String(value || ''));
               setHeaderTextEditModal({ open: false, id: '', label: '' });
             }}
-            className={`p-5 w-full max-w-sm border shadow-2xl space-y-4 ${isDark ? 'bg-[var(--color-finance-ink)] border-white/20 text-[var(--color-finance-surface)]' : 'bg-white border-black/20 text-[var(--color-finance-ink)]'}`}
+            className={`p-5 w-full max-w-sm border shadow-2xl space-y-4 ${isDark ? 'bg-[#1d1d1f] border-white/20 text-[#f5f5f7]' : 'bg-white border-black/20 text-[#1d1d1f]'}`}
           >
             <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
               <h3 className="text-sm font-bold">表見出しを編集</h3>
-              <button type="button" onClick={() => setHeaderTextEditModal({ open: false, id: '', label: '' })} className="p-1 hover:text-[var(--color-finance-accent)]">
+              <button type="button" onClick={() => setHeaderTextEditModal({ open: false, id: '', label: '' })} className="p-1 hover:text-[#0071e3]">
                 <X className="w-4 h-4" />
               </button>
             </div>
             <input name="header-label" autoFocus defaultValue={headerTextEditModal.label} className="w-full p-2 border bg-transparent text-sm" />
             <div className="pt-2 flex justify-end gap-2 border-t border-black/10 dark:border-white/10 text-xs">
               <button type="button" onClick={() => setHeaderTextEditModal({ open: false, id: '', label: '' })} className="px-3 py-1.5 border border-black/10 dark:border-white/10">キャンセル</button>
-              <button type="submit" className="px-3 py-1.5 bg-[var(--color-finance-accent)] text-white">保存</button>
+              <button type="submit" className="px-3 py-1.5 bg-[#0071e3] text-white">保存</button>
             </div>
           </form>
         </div>
@@ -2417,23 +2414,23 @@ export const AssetManagementTab: React.FC = () => {
       {singleCellEditModal.open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
           <div className={`p-5 w-full max-w-sm border shadow-2xl space-y-4 ${
-            isDark ? 'bg-[var(--color-finance-ink)] border-white/20 text-[var(--color-finance-surface)]' : 'bg-white border-black/20 text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] border-white/20 text-[#f5f5f7]' : 'bg-white border-black/20 text-[#1d1d1f]'
           }`}>
             <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
               <h3 className="text-sm font-bold">このセルのみ数値を変更</h3>
               <button
                 onClick={() => setSingleCellEditModal({ open: false, itemId: '', colId: '', itemName: '', currentValue: 0 })}
-                className="p-1 hover:text-[var(--color-finance-accent)]"
+                className="p-1 hover:text-[#0071e3]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-xs text-[var(--color-finance-ink)]/70 dark:text-[var(--color-finance-surface)]/70">
+            <p className="text-xs text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70">
               対象: <span className="font-semibold">{singleCellEditModal.itemName}</span><br />
               （※ 右以降の月次には影響を与えず、この月単体のみ変更します）
             </p>
             <div>
-              <label className="block text-[11px] font-semibold text-finance-muted mb-1">金額 (万円)</label>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">金額 (万円)</label>
               <input
                 type="number"
                 step="0.1"
@@ -2460,7 +2457,7 @@ export const AssetManagementTab: React.FC = () => {
                   updateMonthlyCell(singleCellEditModal.itemId, singleCellEditModal.colId, val, false);
                   setSingleCellEditModal({ open: false, itemId: '', colId: '', itemName: '', currentValue: 0 });
                 }}
-                className="px-4 py-1.5 font-semibold text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)]"
+                className="px-4 py-1.5 font-semibold text-white bg-[#0071e3] hover:bg-[#0077ed]"
               >
                 この月のみ保存
               </button>
@@ -2475,11 +2472,11 @@ export const AssetManagementTab: React.FC = () => {
       {showAddAssetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
           <div className={`p-6 w-full max-w-md border shadow-2xl space-y-4 ${
-            isDark ? 'bg-[var(--color-finance-ink)] border-white/20 text-[var(--color-finance-surface)]' : 'bg-white border-black/20 text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] border-white/20 text-[#f5f5f7]' : 'bg-white border-black/20 text-[#1d1d1f]'
           }`}>
             <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
               <h3 className="text-base font-bold">資産を追加</h3>
-              <button onClick={() => setShowAddAssetModal(false)} className="p-1 hover:text-[var(--color-finance-accent)]">
+              <button onClick={() => setShowAddAssetModal(false)} className="p-1 hover:text-[#0071e3]">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2495,7 +2492,7 @@ export const AssetManagementTab: React.FC = () => {
               className="space-y-3.5 text-xs"
             >
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">資産区分</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">資産区分</label>
                 <select
                   value={newAsset.category}
                   onChange={(e) => {
@@ -2537,7 +2534,7 @@ export const AssetManagementTab: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">ティッカー (任意: 入力で名称自動補完)</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">ティッカー (任意: 入力で名称自動補完)</label>
                 <input
                   type="text"
                   placeholder="例: VOO, SPY, QQQI, 2563"
@@ -2548,7 +2545,7 @@ export const AssetManagementTab: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">資産名称 *</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">資産名称 *</label>
                 <input
                   type="text"
                   required
@@ -2561,7 +2558,7 @@ export const AssetManagementTab: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-semibold text-finance-muted mb-1">現在評価額 (万円) *</label>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">現在評価額 (万円) *</label>
                   <input
                     type="number"
                     step="1"
@@ -2572,7 +2569,7 @@ export const AssetManagementTab: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-semibold text-finance-muted mb-1">金融機関 / 口座</label>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">金融機関 / 口座</label>
                   <input
                     type="text"
                     value={newAsset.institution || ''}
@@ -2584,7 +2581,7 @@ export const AssetManagementTab: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-semibold text-finance-muted mb-1">保有枚数 / 口数</label>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">保有枚数 / 口数</label>
                   <input
                     type="number"
                     step="1"
@@ -2594,7 +2591,7 @@ export const AssetManagementTab: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-semibold text-finance-muted mb-1">平均取得単価 (円またはドル)</label>
+                  <label className="block text-[11px] font-semibold text-slate-400 mb-1">平均取得単価 (円またはドル)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -2615,7 +2612,7 @@ export const AssetManagementTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 font-semibold text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)]"
+                  className="px-5 py-2 font-semibold text-white bg-[#0071e3] hover:bg-[#0077ed]"
                 >
                   保存する
                 </button>
@@ -2631,11 +2628,11 @@ export const AssetManagementTab: React.FC = () => {
       {showAddIncomeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
           <div className={`p-6 w-full max-w-sm border shadow-2xl space-y-4 ${
-            isDark ? 'bg-[var(--color-finance-ink)] border-white/20 text-[var(--color-finance-surface)]' : 'bg-white border-black/20 text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] border-white/20 text-[#f5f5f7]' : 'bg-white border-black/20 text-[#1d1d1f]'
           }`}>
             <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
               <h3 className="text-base font-bold">収入項目を追加</h3>
-              <button onClick={() => setShowAddIncomeModal(false)} className="p-1 hover:text-[var(--color-finance-accent)]">
+              <button onClick={() => setShowAddIncomeModal(false)} className="p-1 hover:text-[#0071e3]">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2651,7 +2648,7 @@ export const AssetManagementTab: React.FC = () => {
               className="space-y-3.5 text-xs"
             >
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">項目名 *</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">項目名 *</label>
                 <input
                   type="text"
                   required
@@ -2663,7 +2660,7 @@ export const AssetManagementTab: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">基準月額 (万円) *</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">基準月額 (万円) *</label>
                 <input
                   type="number"
                   step="0.1"
@@ -2684,7 +2681,7 @@ export const AssetManagementTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 font-semibold text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)]"
+                  className="px-5 py-2 font-semibold text-white bg-[#0071e3] hover:bg-[#0077ed]"
                 >
                   追加する
                 </button>
@@ -2700,11 +2697,11 @@ export const AssetManagementTab: React.FC = () => {
       {showAddExpenseModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
           <div className={`p-6 w-full max-w-sm border shadow-2xl space-y-4 ${
-            isDark ? 'bg-[var(--color-finance-ink)] border-white/20 text-[var(--color-finance-surface)]' : 'bg-white border-black/20 text-[var(--color-finance-ink)]'
+            isDark ? 'bg-[#1d1d1f] border-white/20 text-[#f5f5f7]' : 'bg-white border-black/20 text-[#1d1d1f]'
           }`}>
             <div className="flex items-center justify-between pb-2 border-b border-black/10 dark:border-white/10">
               <h3 className="text-base font-bold">支出項目・特別損失を追加</h3>
-              <button onClick={() => setShowAddExpenseModal(false)} className="p-1 hover:text-[var(--color-finance-accent)]">
+              <button onClick={() => setShowAddExpenseModal(false)} className="p-1 hover:text-[#0071e3]">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2720,7 +2717,7 @@ export const AssetManagementTab: React.FC = () => {
               className="space-y-3.5 text-xs"
             >
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">項目名 *</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">項目名 *</label>
                 <input
                   type="text"
                   required
@@ -2732,7 +2729,7 @@ export const AssetManagementTab: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">区分</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">区分</label>
                 <select
                   value={newExpense.category}
                   onChange={(e) => setNewExpense({ ...newExpense, category: e.target.value as any })}
@@ -2745,7 +2742,7 @@ export const AssetManagementTab: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-finance-muted mb-1">基準月額 (万円) *</label>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">基準月額 (万円) *</label>
                 <input
                   type="number"
                   step="0.1"
@@ -2766,7 +2763,7 @@ export const AssetManagementTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 font-semibold text-white bg-[var(--color-finance-accent)] hover:bg-[var(--color-finance-accent-strong)]"
+                  className="px-5 py-2 font-semibold text-white bg-[#0071e3] hover:bg-[#0077ed]"
                 >
                   追加する
                 </button>

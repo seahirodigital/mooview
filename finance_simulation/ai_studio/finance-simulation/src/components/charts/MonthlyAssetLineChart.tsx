@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 
 export interface MonthlyAssetDataPoint {
   label: string;
@@ -31,6 +32,7 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
   const [visibleKeys, setVisibleKeys] = useState<SeriesKey[]>(['netWorth']);
   const [activeKey, setActiveKey] = useState<SeriesKey>('netWorth');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const visibleSeries = useMemo(
     () => SERIES.filter((series) => visibleKeys.includes(series.key)),
@@ -88,13 +90,23 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
 
   return (
     <section className="-mt-4 border-0 bg-transparent p-5 transition-colors sm:p-7">
-      <div className="mb-4">
-        <div>
-          <h2 className="text-base font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]">月次資産推移</h2>
-        </div>
+      <div className={`flex items-center justify-between ${isExpanded ? 'mb-4' : ''}`}>
+        <h2 className="text-base font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]">月次資産推移</h2>
+        <button
+          type="button"
+          onClick={() => setIsExpanded((current) => !current)}
+          aria-expanded={isExpanded}
+          aria-controls="monthly-asset-chart-content"
+          aria-label={isExpanded ? '月次資産推移を閉じる' : '月次資産推移を表示'}
+          title={isExpanded ? '月次資産推移を閉じる' : '月次資産推移を表示'}
+          className="inline-flex h-7 w-7 items-center justify-center border border-black/15 text-[#1d1d1f]/70 transition-colors hover:bg-black/5 dark:border-white/15 dark:text-[#f5f5f7]/70 dark:hover:bg-white/10"
+        >
+          <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+        </button>
       </div>
 
-      <div className="mb-4 flex flex-wrap gap-2" aria-label="表示する資産系列">
+      {isExpanded && <div id="monthly-asset-chart-content">
+        <div className="mb-4 flex flex-wrap gap-2" aria-label="表示する資産系列">
         {SERIES.map((series) => {
           const isVisible = visibleKeys.includes(series.key);
           const isActive = activeKey === series.key;
@@ -116,17 +128,17 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
             </button>
           );
         })}
-      </div>
+        </div>
 
-      <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#1d1d1f]/65 dark:text-[#f5f5f7]/70">
+        <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[#1d1d1f]/65 dark:text-[#f5f5f7]/70">
         {visibleSeries.map((series) => (
           <span key={series.key} className="font-mono" style={{ color: series.color }}>
             {series.label} {formatAmount(currentPoint[series.key], masked)}
           </span>
         ))}
-      </div>
+        </div>
 
-      <div className="overflow-x-auto">
+        <div className="overflow-x-auto">
         <svg viewBox={`0 0 ${width} ${height}`} className="min-w-[700px] w-full" role="img" aria-label="月次資産推移グラフ" onMouseLeave={() => setHoverIndex(null)}>
           <defs>
             <clipPath id="monthly-asset-plot">
@@ -155,7 +167,8 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
             return <text key={point.label} x={getX(index)} y={height - 25} textAnchor="middle" className="fill-[#1d1d1f]/55 dark:fill-[#f5f5f7]/60 font-mono text-[10px]">{point.label}</text>;
           })}
         </svg>
-      </div>
+        </div>
+      </div>}
     </section>
   );
 };

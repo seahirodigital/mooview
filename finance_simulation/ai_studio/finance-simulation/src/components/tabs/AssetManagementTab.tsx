@@ -26,6 +26,7 @@ import {
   Layers,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   TrendingUp,
   Percent,
   Eye,
@@ -209,6 +210,9 @@ export const AssetManagementTab: React.FC = () => {
       localStorage.setItem('finance_simulation_mask_asset_amounts', String(maskAssetAmounts));
     } catch {}
   }, [maskAssetAmounts]);
+
+  const [isCashflowTableExpanded, setIsCashflowTableExpanded] = useState(true);
+  const [isPortfolioTableExpanded, setIsPortfolioTableExpanded] = useState(true);
 
   // Modals
   const [showAddAssetModal, setShowAddAssetModal] = useState<boolean>(false);
@@ -835,13 +839,28 @@ export const AssetManagementTab: React.FC = () => {
       <DividendTimeline />
       <MonthlyAssetLineChart data={monthlyAssetChartData} masked={maskAssetAmounts} />
       {/* CASHFLOW & ASSET PROGRESSION MATRIX */}
-      <div className="space-y-1">
-        {/* The Matrix Table Container */}
-        <div
-          ref={tableScrollRef}
-          className="overflow-x-auto border border-black/15 dark:border-white/15 bg-white dark:bg-[#1a1a1c] select-none"
-          style={{ scrollBehavior: 'smooth' }}
-        >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between px-1">
+          <h2 className={`text-base font-bold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>家計CFの月次表</h2>
+          <button
+            type="button"
+            onClick={() => setIsCashflowTableExpanded((current) => !current)}
+            aria-expanded={isCashflowTableExpanded}
+            aria-controls="cashflow-monthly-table"
+            aria-label={isCashflowTableExpanded ? '家計CFの月次表を閉じる' : '家計CFの月次表を表示'}
+            title={isCashflowTableExpanded ? '家計CFの月次表を閉じる' : '家計CFの月次表を表示'}
+            className="inline-flex h-7 w-7 items-center justify-center border border-black/15 text-[#1d1d1f]/70 transition-colors hover:bg-black/5 dark:border-white/15 dark:text-[#f5f5f7]/70 dark:hover:bg-white/10"
+          >
+            <ChevronDown className={`h-4 w-4 transition-transform ${isCashflowTableExpanded ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+        <div id="cashflow-monthly-table" className={isCashflowTableExpanded ? 'space-y-1' : 'hidden'}>
+          {/* The Matrix Table Container */}
+          <div
+            ref={tableScrollRef}
+            className="overflow-x-auto border border-black/15 dark:border-white/15 bg-white dark:bg-[#1a1a1c] select-none"
+            style={{ scrollBehavior: 'smooth' }}
+          >
           <table className="w-full text-xs text-left border-collapse min-w-[900px]">
             <thead>
               {/* Header row: 区分(56px) -> 項目名(160px) -> すぐ右に各月次列(現在月: 2026年9月〜) -> 最右＋列 */}
@@ -1576,6 +1595,7 @@ export const AssetManagementTab: React.FC = () => {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
       </div>
 
@@ -1588,11 +1608,25 @@ export const AssetManagementTab: React.FC = () => {
               保有資産ポートフォリオ一覧表
             </h2>
           </div>
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">
-            ※ 上下ドラッグで並び替え / 列境界ドラッグで幅変更 / 行右クリックで複製・削除
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">
+              ※ 上下ドラッグで並び替え / 列境界ドラッグで幅変更 / 行右クリックで複製・削除
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsPortfolioTableExpanded((current) => !current)}
+              aria-expanded={isPortfolioTableExpanded}
+              aria-controls="asset-portfolio-table"
+              aria-label={isPortfolioTableExpanded ? '保有資産ポートフォリオ一覧表を閉じる' : '保有資産ポートフォリオ一覧表を表示'}
+              title={isPortfolioTableExpanded ? '保有資産ポートフォリオ一覧表を閉じる' : '保有資産ポートフォリオ一覧表を表示'}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-black/15 text-[#1d1d1f]/70 transition-colors hover:bg-black/5 dark:border-white/15 dark:text-[#f5f5f7]/70 dark:hover:bg-white/10"
+            >
+              <ChevronDown className={`h-4 w-4 transition-transform ${isPortfolioTableExpanded ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
         </div>
 
+        <div id="asset-portfolio-table" className={isPortfolioTableExpanded ? 'space-y-3' : 'hidden'}>
         {/* Category Filter Tabs (Flat spreadsheet pills with left/right reordering buttons & drag) */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
           <button
@@ -1994,6 +2028,7 @@ export const AssetManagementTab: React.FC = () => {
             </tbody>
           </table>
         </div>
+      </div>
       </div>
 
       {/* ======================================================== */}

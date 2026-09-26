@@ -32,6 +32,18 @@ const BUILT_IN_ASSET_CATEGORIES: BuiltInAssetCategory[] = [
   'core_stocks', 'dividend_stocks', 'cash', 'illiquid_other',
 ];
 const monthlyCategoryRowId = (category: AssetItem['category']) => `prog_category_${category}`;
+const normalizeSimulationYears = (value: unknown): number => {
+  const years = Number(value);
+  return Number.isFinite(years) && years >= 0 && years <= 10 ? years : 2;
+};
+const normalizeCurrentTimeline = (columns: TimelineColumn[]): TimelineColumn[] => {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const currentIndex = columns.findIndex((column) => column.year === currentYear && column.month === currentMonth);
+  if (currentIndex < 0) return columns;
+  return columns.map((column, index) => ({ ...column, isCurrent: index === currentIndex }));
+};
 
 export interface CalculatedDividend {
   stock: DividendStock;
@@ -169,6 +181,29 @@ const sameTicker = (left: unknown, right: unknown): boolean => {
 
 const linkedDividendIdForAsset = (asset: AssetItem): string => asset.linkedDividendId || `div_${asset.id}`;
 const linkedAssetIdForDividend = (stock: DividendStock): string => stock.linkedAssetId || `asset_${stock.id}`;
+
+// 旧データでは asset_iwmi / div_iwmi のようにIDの接頭辞だけが異なる場合がある。
+// 削除・再結合時は現行ID、旧ID、ティッカー、正規化名称をすべて候補にする。
+const legacyLinkedDividendIdsForAsset = (asset: AssetItem): string[] => Array.from(new Set([
+  asset.linkedDividendId,
+  asset.id.replace(/^asset_/, 'div_'),
+  linkedDividendIdForAsset(asset),
+].filter(Boolean)));
+
+const legacyLinkedAssetIdsForDividend = (stock: DividendStock): string[] => Array.from(new Set([
+  stock.linkedAssetId,
+  stock.id.replace(/^div_/, 'asset_'),
+  linkedAssetIdForDividend(stock),
+].filter(Boolean)));
+
+const isLinkedHolding = (asset: AssetItem, stock: DividendStock): boolean => {
+  const assetDividendIds = legacyLinkedDividendIdsForAsset(asset);
+  const stockAssetIds = legacyLinkedAssetIdsForDividend(stock);
+  return assetDividendIds.includes(stock.id)
+    || stockAssetIds.includes(asset.id)
+    || sameTicker(asset.ticker, stock.ticker)
+    || normalizedNameKey(asset.name) === normalizedNameKey(stock.name);
+};
 
 const normalizedHoldingKey = (ticker: unknown, name?: string): string => {
   const tickerKey = normalizeTicker(ticker);
@@ -460,7 +495,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [simulationConfig, setSimulationConfig] = useState<SimulationConfig>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY + '_sim');
-      return saved ? JSON.parse(saved) : INITIAL_SIMULATION_CONFIG;
+      const parsed = saved ? JSON.parse(saved) : INITIAL_SIMULATION_CONFIG;
+      return {
+        ...INITIAL_SIMULATION_CONFIG,
+        ...parsed,
+        years: normalizeSimulationYears(parsed?.years),
+      };
     } catch {
       return INITIAL_SIMULATION_CONFIG;
     }
@@ -620,7 +660,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   });
 
-  const totalInvestedDividends = Math.round(calculatedDividends.reduce((sum, item) => sum + (Number(item.stock.investedAmount) || 0), 0));
+  // 円グラフ・高配当ポートフォリオの投資額からは除外指定銘柄を外す。
+  // 月額・年間配当は除外指定銘柄も含め、配当入金として別途合算する。
+  const portfolioDividends = calculatedDividends.filter((item) => !item.stock.excludeFromPortfolio);
+  const totalInvestedDividends = Math.round(
+    portfolioDividends.reduce((sum, item) => sum + (Number(item.stock.investedAmount) || 0), 0) * 10,
+  ) / 10;
   const totalMonthlyDividend = Math.round(calculatedDividends.reduce((sum, c) => sum + c.monthlyNet, 0) * 10) / 10;
   const totalAnnualDividend = Math.round(totalMonthlyDividend * 12 * 10) / 10;
   const overallNetYield = totalInvestedDividends > 0
@@ -905,16 +950,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // When a dividend stock is deleted, AUTOMATICALLY remove from Assets table
   const deleteDividendStock = (id: string) => {
-    setDividendStocks(prev => {
-      const target = prev.find(s => s.id === id);
-      if (target) {
-        const linkedAssetId = target.linkedAssetId;
-        setAssets(assetPrev => linkedAssetId
-          ? assetPrev.filter(a => a.id !== linkedAssetId)
-          : assetPrev.filter(a => !(sameTicker(a.ticker, target.ticker) && a.name === target.name)));
-      }
-      return prev.filter(item => item.id !== id);
-    });
+    portfolioPreferenceRef.current = 'dividend';
+    const target = dividendStocks.find((stock) => stock.id === id);
+    if (!target) return;
+    setDividendStocks((prev) => prev.filter((item) => item.id !== id));
+    setAssets((prev) => prev.filter((asset) => !isLinkedHolding(asset, target)));
   };
 
   // When an asset is added
@@ -1073,16 +1113,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteAsset = (id: string) => {
-    setAssets(prev => {
-      const target = prev.find(a => a.id === id);
-      if (target && target.category === 'dividend_stocks') {
-        const linkedDividendId = target.linkedDividendId;
-        setDividendStocks(divPrev => linkedDividendId
-          ? divPrev.filter(d => d.id !== linkedDividendId)
-          : divPrev.filter(d => !(sameTicker(d.ticker, target.ticker) && d.name === target.name)));
-      }
-      return prev.filter(item => item.id !== id);
-    });
+    portfolioPreferenceRef.current = 'asset';
+    const target = assets.find((asset) => asset.id === id);
+    if (!target) return;
+    setAssets((prev) => prev.filter((item) => item.id !== id));
+    if (target.category === 'dividend_stocks') {
+      setDividendStocks((prev) => prev.filter((stock) => !isLinkedHolding(target, stock)));
+    }
   };
 
   // Reorder asset row up or down
@@ -1111,53 +1148,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // Default Timeline Columns: 2026-09 (Current) to 2028-12 (2028年末までデフォルト記載, 1月のみ年記載)
+  // Default Timeline Columns: 今月から28か月分（現在月は端末の日付から自動判定）
   const generateDefaultTimelineColumns = (): TimelineColumn[] => {
-    const cols: TimelineColumn[] = [];
-    // 2026年: 9月(現在)〜12月
-    cols.push({
-      id: '2026-09',
-      label: '2026年9月',
-      year: 2026,
-      month: 9,
-      isCurrent: true,
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1;
+    const startMonthKey = currentYear * 12 + currentMonth - 1;
+    return Array.from({ length: 28 }, (_, index) => {
+      const monthKey = startMonthKey + index;
+      const year = Math.floor(monthKey / 12);
+      const month = (monthKey % 12) + 1;
+      return {
+        id: `${year}-${String(month).padStart(2, '0')}`,
+        label: index === 0 || month === 1 ? `${year}年${month}月` : `${month}月`,
+        year,
+        month,
+        isCurrent: index === 0,
+      };
     });
-    for (let m = 10; m <= 12; m++) {
-      cols.push({
-        id: `2026-${String(m).padStart(2, '0')}`,
-        label: `${m}月`,
-        year: 2026,
-        month: m,
-        isCurrent: false,
-      });
-    }
-    // 2027年: 1月〜12月 (1月のみ年を記載)
-    for (let m = 1; m <= 12; m++) {
-      cols.push({
-        id: `2027-${String(m).padStart(2, '0')}`,
-        label: m === 1 ? '2027年1月' : `${m}月`,
-        year: 2027,
-        month: m,
-        isCurrent: false,
-      });
-    }
-    // 2028年: 1月〜12月 (1月のみ年を記載)
-    for (let m = 1; m <= 12; m++) {
-      cols.push({
-        id: `2028-${String(m).padStart(2, '0')}`,
-        label: m === 1 ? '2028年1月' : `${m}月`,
-        year: 2028,
-        month: m,
-        isCurrent: false,
-      });
-    }
-    return cols;
   };
 
   const [timelineColumns, setTimelineColumns] = useState<TimelineColumn[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY + '_timeline_columns_v3');
-      if (saved) return JSON.parse(saved);
+      if (saved) return normalizeCurrentTimeline(JSON.parse(saved));
     } catch {}
     return generateDefaultTimelineColumns();
   });
@@ -1299,7 +1313,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     const categoryTotals: Record<string, number> = {
       prog_core_stocks: coreStocksTotal,
-      prog_dividend_stocks: dividendStocksTotal,
+      // 高配当ポートフォリオ行は、右側円グラフと同じく除外指定銘柄を含めない。
+      // 除外銘柄の配当金は配当CFへ残し、投資額だけをこの行から外す。
+      prog_dividend_stocks: totalInvestedDividends,
       prog_cash_pool: cashTotal,
       prog_illiquid: illiquidTotal,
     };
@@ -1339,7 +1355,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return changed ? next : previous;
     });
-  }, [assets, cashTotal, coreStocksTotal, customAssetCategories, dividendStocksTotal, expenses, illiquidTotal, timelineColumns]);
+  }, [assets, cashTotal, coreStocksTotal, customAssetCategories, dividendStocksTotal, expenses, illiquidTotal, timelineColumns, totalInvestedDividends]);
 
   // Undo (Ctrl+Z) history stack
   interface HistorySnapshot {
@@ -1618,7 +1634,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Mutators: Simulation
   const updateSimulationConfig = (updates: Partial<SimulationConfig>) => {
-    setSimulationConfig(prev => ({ ...prev, ...updates }));
+    setSimulationConfig(prev => ({
+      ...prev,
+      ...updates,
+      ...(updates.years !== undefined
+        ? { years: normalizeSimulationYears(updates.years) }
+        : {}),
+    }));
   };
 
   // Google Sheets sync mutators
@@ -1626,22 +1648,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSheetsConfig(prev => ({ ...prev, ...updates }));
   };
 
-  const buildFinanceSheetState = (): FinanceSheetState => ({
-    assets,
-    dividendStocks,
-    expenses,
-    incomes,
-    sicknessSchedule,
-    simulationConfig,
-    timelineColumns,
-    monthlyOverrides,
-    customDividendFrequencies,
-    customAssetCategories,
-    customLabels,
-    categoryOrder,
-    assetTableLayout,
-    customStyles,
-  });
+  const buildFinanceSheetState = (): FinanceSheetState => {
+    // 旧版の目標額フィールドは、クラウド元帳・JSONともに出力しない。
+    const simulationState = { ...simulationConfig };
+    delete simulationState.fireTargetAmount;
+    delete simulationState.targetAmount;
+    return {
+      assets,
+      dividendStocks,
+      expenses,
+      incomes,
+      sicknessSchedule,
+      simulationConfig: simulationState,
+      timelineColumns,
+      monthlyOverrides,
+      customDividendFrequencies,
+      customAssetCategories,
+      customLabels,
+      categoryOrder,
+      assetTableLayout,
+      customStyles,
+    };
+  };
 
   const applyRemoteFinanceState = (data: FinanceSheetState) => {
     const reconciled = reconcileLinkedPortfolio(
@@ -1656,8 +1684,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (Array.isArray(data.expenses)) setExpenses(data.expenses as ExpenseItem[]);
     if (Array.isArray(data.incomes)) setIncomes(data.incomes as IncomeItem[]);
     if (Array.isArray(data.sicknessSchedule)) setSicknessSchedule(data.sicknessSchedule as SicknessAllowanceMonth[]);
-    if (data.simulationConfig) setSimulationConfig(data.simulationConfig as SimulationConfig);
-    if (Array.isArray(data.timelineColumns)) setTimelineColumns(data.timelineColumns as TimelineColumn[]);
+    if (data.simulationConfig) {
+      const incomingSimulation = data.simulationConfig as Partial<SimulationConfig>;
+      setSimulationConfig((previous) => ({
+        ...previous,
+        ...incomingSimulation,
+        ...(incomingSimulation.years !== undefined
+          ? { years: normalizeSimulationYears(incomingSimulation.years) }
+          : {}),
+      }));
+    }
+    if (Array.isArray(data.timelineColumns)) setTimelineColumns(normalizeCurrentTimeline(data.timelineColumns as TimelineColumn[]));
     if (data.monthlyOverrides) setMonthlyOverrides(data.monthlyOverrides as Record<string, Record<string, number>>);
     if (Array.isArray(data.customDividendFrequencies)) setCustomDividendFrequencies(data.customDividendFrequencies as CustomDividendFrequency[]);
     if (Array.isArray(data.customAssetCategories)) setCustomAssetCategories(data.customAssetCategories as CustomAssetCategory[]);
@@ -1680,9 +1717,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [assets, assetTableLayout, categoryOrder, customAssetCategories, customDividendFrequencies, customLabels, customStyles, dividendStocks, expenses, incomes, monthlyOverrides, sicknessSchedule, simulationConfig, timelineColumns]);
 
   const syncPushGoogleSheets = async (accessToken: string) => {
-    const res = await pushToGoogleSheet(sheetsConfig.spreadsheetId || undefined, accessToken, buildFinanceSheetState());
+    const state = buildFinanceSheetState();
+    const snapshot = JSON.stringify(state);
+    const res = await pushToGoogleSheet(sheetsConfig.spreadsheetId || undefined, accessToken, state);
     if (res.success) {
-      lastAutoSyncedSnapshotRef.current = JSON.stringify(res.snapshot?.state || buildFinanceSheetState());
+      // 保存要求を送った時点のローカル状態を基準にする。サーバー側の正規化で
+      // 直後に「未同期」と誤判定して旧データを再読込しないようにする。
+      lastAutoSyncedSnapshotRef.current = snapshot;
       updateSheetsConfig({ lastSyncedAt: new Date().toLocaleTimeString() });
     }
     return res;
@@ -1706,6 +1747,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const result = await pullFromGoogleSheet(sheetsConfig.spreadsheetId || undefined, '');
       if (result.success && result.data) {
+        const localSnapshot = latestFinanceStateSnapshotRef.current;
+        const hasUnsyncedLocalChanges = cloudReadyRef.current
+          && localSnapshot !== ''
+          && localSnapshot !== lastAutoSyncedSnapshotRef.current;
+
+        // 更新通知や30秒ポーリングが、削除・編集直後のローカル状態を
+        // クラウドの旧スナップショットで上書きしない。ローカルを正として保存する。
+        if (hasUnsyncedLocalChanges) {
+          try {
+            const localState = JSON.parse(localSnapshot) as FinanceSheetState;
+            const saved = await pushToGoogleSheet(sheetsConfig.spreadsheetId || undefined, '', localState);
+            if (saved.success) {
+              lastAutoSyncedSnapshotRef.current = localSnapshot;
+              setCloudSyncStatus('synced');
+              updateSheetsConfig({ lastSyncedAt: new Date().toLocaleTimeString() });
+              return { success: true, message: 'ローカルの最新変更をクラウド元帳へ保存しました。' };
+            }
+            setCloudSyncStatus('offline');
+            return { success: false, message: saved.message };
+          } catch (error) {
+            setCloudSyncStatus('offline');
+            return { success: false, message: error instanceof Error ? error.message : 'ローカル変更の保存に失敗しました。' };
+          }
+        }
+
         lastAutoSyncedSnapshotRef.current = JSON.stringify(result.data);
         applyRemoteFinanceState(result.data);
         cloudReadyRef.current = true;
@@ -1751,7 +1817,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const result = await pushToGoogleSheet(sheetsConfig.spreadsheetId || undefined, '', state);
         if (result.success) {
-          lastAutoSyncedSnapshotRef.current = JSON.stringify(result.snapshot?.state || state);
+          // ローカルで確定した編集内容を同期基準にする。Apps Scriptの
+          // リンク補完結果を理由に、編集直後の状態を再びdirty扱いにしない。
+          lastAutoSyncedSnapshotRef.current = JSON.stringify(state);
           setCloudSyncStatus('synced');
           updateSheetsConfig({ lastSyncedAt: new Date().toLocaleTimeString() });
         } else setCloudSyncStatus('offline');

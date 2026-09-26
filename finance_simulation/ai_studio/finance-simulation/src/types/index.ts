@@ -46,6 +46,8 @@ export interface DividendStock {
   payoutMonths?: number[]; // e.g. [1,2,3,4,5,6,7,8,9,10,11,12] or [6,12]
   payoutDay?: number; // e.g. 18th
   manualMonthlyDividend?: number; // Optional override in 万円
+  /** trueの場合、投資額を高配当ポートフォリオ（円グラフ・投資額集計）から除外する。配当金額は集計する。 */
+  excludeFromPortfolio?: boolean;
   note?: string;
 }
 
@@ -127,7 +129,7 @@ export interface LumpSumItem {
 
 // Simulation parameters
 export interface SimulationConfig {
-  years: number; // e.g. 10 (1〜35)
+  years: number; // 0〜10年後
   currentCoreAmount: number; // in 万円
   monthlyInvestment: number; // in 万円 / month
   baseAnnualRate: number; // e.g. 10 (%) - mid
@@ -144,6 +146,8 @@ export interface SimulationConfig {
   baseReturnRate?: number;
   bullReturnRate?: number;
   bearReturnRate?: number;
+  coreGrowthRate?: number; // コア株式の個別成長率 (%)
+  dividendGrowthRate?: number; // 高配当ポートフォリオの個別成長率 (%)
   minReturnRate?: number;
   bearMinReturnRate?: number;
   bearMaxReturnRate?: number;

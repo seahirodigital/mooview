@@ -14,6 +14,8 @@ interface EditableCellProps {
   textClassName?: string;
   align?: 'left' | 'right' | 'center';
   placeholder?: string;
+  /** 編集時の実値は保持したまま、通常表示だけを伏せ字にする。 */
+  masked?: boolean;
 }
 
 export const EditableCell: React.FC<EditableCellProps> = ({
@@ -30,6 +32,7 @@ export const EditableCell: React.FC<EditableCellProps> = ({
   textClassName = '',
   align = 'left',
   placeholder = '-',
+  masked = false,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [tempValue, setTempValue] = useState<string | number>(value ?? '');
@@ -119,7 +122,9 @@ export const EditableCell: React.FC<EditableCellProps> = ({
     );
   }
 
-  const displayVal = value !== undefined && value !== null && value !== ''
+  const displayVal = masked
+    ? '***'
+    : value !== undefined && value !== null && value !== ''
     ? (type === 'number' && typeof value === 'number' ? value.toLocaleString() : String(value))
     : placeholder;
 

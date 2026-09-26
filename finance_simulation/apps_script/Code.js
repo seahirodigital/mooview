@@ -17,7 +17,12 @@ function doGet(event) {
     if (params.action !== 'read') throw new Error('未対応の操作です。');
     const spreadsheet = SpreadsheetApp.openById(required_(params.spreadsheetId, 'スプレッドシートID'));
     const current = readState_(spreadsheet);
-    const state = reconcileState_(refreshFromVisibleSheets_(spreadsheet, current), 'asset');
+    // 可視シート側で削除された行を先に両側へ反映してから再結合する。
+    // 先にreconcileすると削除行が相手側から復活するため、この順序を固定する。
+    let state = refreshFromVisibleSheets_(spreadsheet, current);
+    state = applyVisibleDeletion_(current, state, '資産一覧');
+    state = applyVisibleDeletion_(current, state, '配当一覧');
+    state = reconcileState_(state, 'asset');
     if (!sameState_(current, state)) writeState_(spreadsheet, state, 'asset');
     return response_({ ok: true, state: state, message: 'スプレッドシートから最新データを読み込みました。' });
   } catch (error) {
@@ -65,7 +70,7 @@ function writeState_(spreadsheet, state, preference) {
     'id', 'linkedDividendId', 'category', 'name', 'ticker', 'amount', 'shares', 'averageCost', 'currentPrice', 'estimatedYield', 'payoutMonths', 'payoutDay', 'institution', 'note'
   ], normalized.assets);
   writeTable_(spreadsheet, '配当一覧', [
-    'id', 'linkedAssetId', 'ticker', 'name', 'market', 'investedAmount', 'shares', 'averageCost', 'currentPrice', 'estimatedYield', 'usTaxRate', 'jpTaxRate', 'frequency', 'customFrequencyLabel', 'payoutMonths', 'payoutDay', 'manualMonthlyDividend', 'note'
+    'id', 'linkedAssetId', 'ticker', 'name', 'market', 'investedAmount', 'shares', 'averageCost', 'currentPrice', 'estimatedYield', 'usTaxRate', 'jpTaxRate', 'frequency', 'customFrequencyLabel', 'payoutMonths', 'payoutDay', 'manualMonthlyDividend', 'excludeFromPortfolio', 'note'
   ], normalized.dividendStocks);
   const cashflowRows = normalized.incomes.map(function (item) {
     return Object.assign({ type: 'income' }, item);
@@ -235,8 +240,7 @@ function applyVisibleDeletion_(previous, next, editedName) {
       const stillExists = state.assets.some(function (candidate) { return candidate.id === asset.id; });
       if (!stillExists) {
         state.dividendStocks = state.dividendStocks.filter(function (stock) {
-          if (asset.linkedDividendId) return stock.id !== asset.linkedDividendId;
-          return !(sameHolding_(asset, stock) && stock.name === asset.name);
+          return !sameHolding_(asset, stock);
         });
       }
     });
@@ -246,8 +250,7 @@ function applyVisibleDeletion_(previous, next, editedName) {
       const stillExists = state.dividendStocks.some(function (candidate) { return candidate.id === stock.id; });
       if (!stillExists) {
         state.assets = state.assets.filter(function (asset) {
-          if (stock.linkedAssetId) return asset.id !== stock.linkedAssetId;
-          return !(sameHolding_(asset, stock) && asset.name === stock.name);
+          return !sameHolding_(asset, stock);
         });
       }
     });
@@ -263,7 +266,7 @@ function carryEditedHoldingValues_(previous, next, editedName) {
       if (!oldAsset) return;
       const index = oldAsset.linkedDividendId
         ? state.dividendStocks.findIndex(function (stock) { return stock.id === oldAsset.linkedDividendId; })
-        : state.dividendStocks.findIndex(function (stock) { return sameHolding_(oldAsset, stock) && stock.name === oldAsset.name; });
+        : state.dividendStocks.findIndex(function (stock) { return sameHolding_(oldAsset, stock); });
       if (index >= 0) state.dividendStocks[index] = dividendFromAsset_(asset, state.dividendStocks[index]);
     });
   }
@@ -273,7 +276,7 @@ function carryEditedHoldingValues_(previous, next, editedName) {
       if (!oldStock) return;
       const index = oldStock.linkedAssetId
         ? state.assets.findIndex(function (asset) { return asset.id === oldStock.linkedAssetId; })
-        : state.assets.findIndex(function (asset) { return asset.category === 'dividend_stocks' && sameHolding_(oldStock, asset) && asset.name === oldStock.name; });
+        : state.assets.findIndex(function (asset) { return asset.category === 'dividend_stocks' && sameHolding_(oldStock, asset); });
       if (index >= 0) state.assets[index] = assetFromDividend_(state.assets[index], stock);
     });
   }
@@ -491,7 +494,9 @@ function dividendFromRow_(row) {
     estimatedYield: number_(row.estimatedYield), usTaxRate: number_(row.usTaxRate), jpTaxRate: number_(row.jpTaxRate),
     frequency: row.frequency || 'monthly', customFrequencyLabel: row.customFrequencyLabel || undefined,
     payoutMonths: String(row.payoutMonths || '').split(',').map(Number).filter(function (month) { return month >= 1 && month <= 12; }),
-    payoutDay: optionalNumber_(row.payoutDay), manualMonthlyDividend: optionalNumber_(row.manualMonthlyDividend), note: row.note || '',
+    payoutDay: optionalNumber_(row.payoutDay), manualMonthlyDividend: optionalNumber_(row.manualMonthlyDividend),
+    excludeFromPortfolio: String(row.excludeFromPortfolio).toLowerCase() === 'true' || row.excludeFromPortfolio === true,
+    note: row.note || '',
   };
 }
 

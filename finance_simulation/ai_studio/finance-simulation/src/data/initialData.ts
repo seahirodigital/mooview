@@ -194,13 +194,14 @@ export const INITIAL_SICKNESS_SCHEDULE: SicknessAllowanceMonth[] = [
 ];
 
 export const INITIAL_SIMULATION_CONFIG: SimulationConfig = {
-  years: 25,
+  years: 2,
   currentCoreAmount: 7883, // S&P500 Core 7616 + NISA 267
   monthlyInvestment: 25.0, // Monthly investment (万円)
   baseAnnualRate: 7.0, // S&P500 historic real return
   bullAnnualRate: 15.0, // Bull market
   bearAnnualRate: -5.0, // Bear market
-  fireTargetAmount: 15000, // 1.5億円
+  coreGrowthRate: 7.0,
+  dividendGrowthRate: 5.0,
   reinvestDividends: true,
   marketCrashYear: 3, // Stress test scenario: Year 3 -30% drop
 };

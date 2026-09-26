@@ -3,15 +3,22 @@ import { useApp } from '../../context/AppContext';
 import { SimulationChart } from '../charts/InteractiveChart';
 import { EditableCell } from '../common/EditableCell';
 import { LumpSumItem } from '../../types';
-import { ArrowUpRight, Flame, Plus, Trash2, Edit3, X, Link as LinkIcon, Check } from 'lucide-react';
+import { ArrowUpRight, Plus, Trash2, Edit3, X, Link as LinkIcon, Check } from 'lucide-react';
 
 export const SimulationTab: React.FC = () => {
   const {
     simulationConfig,
     updateSimulationConfig,
     coreStocksTotal,
+    dividendStocksTotal,
     cashTotal,
     netWorthTotal,
+    monthlySurplus,
+    incomes,
+    expenses,
+    timelineColumns,
+    monthlyOverrides,
+    getMonthlyDividendForCol,
     setCategoryTotal,
     theme,
   } = useApp();
@@ -54,13 +61,84 @@ export const SimulationTab: React.FC = () => {
     }
   }, [capitalSource, coreStocksTotal, cashTotal, netWorthTotal, simulationConfig.currentCoreAmount]);
 
-  const simulationYears = Math.max(1, simulationConfig.years || 10);
-  const monthlyDeposit = simulationConfig.monthlyInvestment;
+  const simulationYears = Math.min(10, Math.max(0, Number(simulationConfig.years) || 0));
+  // 試算対象元本以外は、資産管理タブの現在値を固定資産として合算する。
+  // これにより、元本の選択を変えても現在の総資産を二重計上しない。
+  const otherAssetsTotal = Math.max(0, netWorthTotal - initialPrincipal);
 
   const baseReturnRate = simulationConfig.baseReturnRate ?? simulationConfig.baseAnnualRate ?? 7;
   const bullReturnRate = simulationConfig.bullReturnRate ?? simulationConfig.bullAnnualRate ?? 15;
   const bearReturnRate = simulationConfig.bearReturnRate ?? simulationConfig.bearAnnualRate ?? -5;
-  const targetAmount = simulationConfig.targetAmount ?? simulationConfig.fireTargetAmount ?? 10000;
+  const coreGrowthRate = Math.min(40, Math.max(0, Number(simulationConfig.coreGrowthRate ?? 7)));
+  const dividendGrowthRate = Math.min(40, Math.max(0, Number(simulationConfig.dividendGrowthRate ?? 5)));
+  const formatScenarioRate = (rate: number) => `${rate >= 0 ? '+' : ''}${rate}%`;
+
+  // 資産管理タブの各月の入金・支出をそのまま使う。未入力月は直前の既知月を引き継ぐ。
+  const timelineSurpluses = useMemo(() => timelineColumns.map((column) => {
+    const incomeTotal = incomes.reduce((sum, item) => {
+      if (monthlyOverrides[item.id]?.[column.id] !== undefined) return sum + (Number(monthlyOverrides[item.id][column.id]) || 0);
+      if (item.id === 'inc_dividend' || item.category === 'dividend') return sum + getMonthlyDividendForCol(column);
+      return sum + (Number(item.amount) || 0);
+    }, 0);
+    const expenseTotal = expenses.reduce((sum, item) => {
+      if (String(item.name || '').replace(/[\s　]/g, '').includes('家賃')) return sum + (Number(item.amount) || 0);
+      if (monthlyOverrides[item.id]?.[column.id] !== undefined) return sum + (Number(monthlyOverrides[item.id][column.id]) || 0);
+      return sum + (Number(item.amount) || 0);
+    }, 0);
+    return Math.round((incomeTotal - expenseTotal) * 10) / 10;
+  }), [expenses, getMonthlyDividendForCol, incomes, monthlyOverrides, timelineColumns]);
+
+  const currentTimelineIndex = timelineColumns.findIndex((column) => column.isCurrent);
+  const currentMonthKey = (() => {
+    const currentColumn = timelineColumns[currentTimelineIndex >= 0 ? currentTimelineIndex : 0];
+    return currentColumn?.year && currentColumn.month
+      ? currentColumn.year * 12 + currentColumn.month - 1
+      : null;
+  })();
+  const projectionDateLabel = (year: number) => {
+    if (currentMonthKey === null) return year === 0 ? '現在' : `${year}年後`;
+    // 1年後は現在月から12か月後。月次CFの集計期間と表示年月を一致させる。
+    const monthKey = currentMonthKey + (year * 12);
+    const calendarYear = Math.floor(monthKey / 12);
+    const calendarMonth = (monthKey % 12) + 1;
+    return year === 0
+      ? `${calendarYear}/${String(calendarMonth).padStart(2, '0')} (現在)`
+      : `${calendarYear}/${String(calendarMonth).padStart(2, '0')}`;
+  };
+  const ageAtMonthKey = (monthKey: number | null) => {
+    if (currentMonthKey === null || monthKey === null) return null;
+    const birthdayMonth = 2;
+    let age = 43;
+    for (let key = currentMonthKey + 1; key <= monthKey; key += 1) {
+      if ((key % 12) + 1 === birthdayMonth) age += 1;
+    }
+    return age;
+  };
+  const currentMonthlySurplus = currentTimelineIndex >= 0
+    ? timelineSurpluses[currentTimelineIndex]
+    : Number(monthlySurplus) || 0;
+  const monthlyForecastSurplus = useMemo(() => {
+    const startIndex = currentTimelineIndex >= 0 ? currentTimelineIndex : 0;
+    const datedEntries = timelineColumns
+      .map((column, index) => ({
+        key: column.year && column.month ? column.year * 12 + column.month - 1 : null,
+        value: timelineSurpluses[index],
+      }))
+      .filter((entry): entry is { key: number; value: number } => entry.key !== null && (currentMonthKey === null || entry.key >= currentMonthKey))
+      .sort((left, right) => left.key - right.key);
+    let previous = currentMonthlySurplus;
+    return Array.from({ length: simulationYears * 12 }, (_, offset) => {
+      const targetMonthKey = currentMonthKey === null ? null : currentMonthKey + offset + 1;
+      if (targetMonthKey !== null) {
+        const latest = datedEntries.filter((entry) => entry.key <= targetMonthKey).at(-1);
+        if (latest) previous = latest.value;
+      } else {
+        const sequenceValue = timelineSurpluses[startIndex + offset + 1];
+        if (sequenceValue !== undefined) previous = sequenceValue;
+      }
+      return previous;
+    });
+  }, [currentMonthKey, currentMonthlySurplus, currentTimelineIndex, simulationYears, timelineColumns, timelineSurpluses]);
 
   // Lump sum items from config
   const lumpSums: LumpSumItem[] = simulationConfig.lumpSums || [];
@@ -92,10 +170,19 @@ export const SimulationTab: React.FC = () => {
     updateSimulationConfig({ lumpSums: updated });
   };
 
-  // Compute 3 scenario curves: Base, Bull, Bear + One-time incomes applied to specific years
-  // Starting from Year 1 (as requested by user)
+  // 現在の元本を0年目とし、家計CFの余剰を毎月積み立てて4シナリオを年次計算する。
   const chartData = useMemo(() => {
-    const data = [];
+    const data = [{
+      year: 0,
+      label: '現在',
+      base: Math.round(initialPrincipal + otherAssetsTotal),
+      bull: Math.round(initialPrincipal + otherAssetsTotal),
+      bear: Math.round(initialPrincipal + otherAssetsTotal),
+      split: Math.round(netWorthTotal),
+      invested: Math.round(initialPrincipal + otherAssetsTotal),
+      age: ageAtMonthKey(currentMonthKey),
+      lumpSum: 0,
+    }];
     const baseRate = baseReturnRate / 100;
     const bullRate = bullReturnRate / 100;
     const bearRate = bearReturnRate / 100;
@@ -103,36 +190,42 @@ export const SimulationTab: React.FC = () => {
     let baseBalance = initialPrincipal;
     let bullBalance = initialPrincipal;
     let bearBalance = initialPrincipal;
-    let cumulativeInvested = initialPrincipal;
+    let splitCoreBalance = coreStocksTotal;
+    let splitDividendBalance = dividendStocksTotal;
+    let cumulativeInvested = initialPrincipal + otherAssetsTotal;
+    const splitOtherAssetsTotal = Math.max(0, netWorthTotal - coreStocksTotal - dividendStocksTotal);
+    const growWithMonthlyDeposits = (balance: number, annualRate: number, deposits: number[]): number => {
+      const monthlyRate = Math.pow(Math.max(0, 1 + annualRate), 1 / 12) - 1;
+      let next = balance;
+      deposits.forEach((deposit) => {
+        next = (next + deposit) * (1 + monthlyRate);
+      });
+      return next;
+    };
 
     for (let year = 1; year <= simulationYears; year++) {
-      const annualDeposit = monthlyDeposit * 12;
-
       // Check one-time lump sums for this specific year
       const yearLumpSums = lumpSums.filter((l) => l.year === year);
       const lumpSumTotal = yearLumpSums.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
+      const yearDeposits = monthlyForecastSurplus.slice((year - 1) * 12, year * 12);
 
-      cumulativeInvested += annualDeposit + lumpSumTotal;
+      cumulativeInvested += yearDeposits.reduce((sum, amount) => sum + amount, 0) + lumpSumTotal;
 
-      // Compound calculations with deposit & lump sum
-      baseBalance = (baseBalance + annualDeposit + lumpSumTotal) * (1 + baseRate);
-      bullBalance = (bullBalance + annualDeposit + lumpSumTotal) * (1 + bullRate);
-
-      if (year === 2) {
-        bearBalance = (bearBalance + annualDeposit + lumpSumTotal) * 0.75; // -25% market drawdown
-      } else if (year === 7) {
-        bearBalance = (bearBalance + annualDeposit + lumpSumTotal) * 0.82; // -18% recession
-      } else {
-        bearBalance = (bearBalance + annualDeposit + lumpSumTotal) * (1 + bearRate);
-      }
+      baseBalance = growWithMonthlyDeposits(baseBalance + lumpSumTotal, baseRate, yearDeposits);
+      bullBalance = growWithMonthlyDeposits(bullBalance + lumpSumTotal, bullRate, yearDeposits);
+      bearBalance = growWithMonthlyDeposits(bearBalance + lumpSumTotal, bearRate, yearDeposits);
+      splitCoreBalance = growWithMonthlyDeposits(splitCoreBalance + lumpSumTotal, coreGrowthRate / 100, yearDeposits);
+      splitDividendBalance = growWithMonthlyDeposits(splitDividendBalance, dividendGrowthRate / 100, yearDeposits.map(() => 0));
 
       data.push({
         year,
-        label: `${year}年目`,
-        base: Math.round(baseBalance),
-        bull: Math.round(bullBalance),
-        bear: Math.round(Math.max(0, bearBalance)),
+        label: projectionDateLabel(year),
+        base: Math.round(baseBalance + otherAssetsTotal),
+        bull: Math.round(bullBalance + otherAssetsTotal),
+        bear: Math.round(Math.max(0, bearBalance) + otherAssetsTotal),
+        split: Math.round(splitCoreBalance + splitDividendBalance + splitOtherAssetsTotal),
         invested: Math.round(cumulativeInvested),
+        age: ageAtMonthKey(currentMonthKey === null ? null : currentMonthKey + (year * 12)),
         lumpSum: lumpSumTotal,
       });
     }
@@ -140,7 +233,15 @@ export const SimulationTab: React.FC = () => {
   }, [
     simulationYears,
     initialPrincipal,
-    monthlyDeposit,
+    otherAssetsTotal,
+    monthlyForecastSurplus,
+    projectionDateLabel,
+    ageAtMonthKey,
+    coreGrowthRate,
+    dividendGrowthRate,
+    coreStocksTotal,
+    dividendStocksTotal,
+    netWorthTotal,
     baseReturnRate,
     bullReturnRate,
     bearReturnRate,
@@ -153,25 +254,11 @@ export const SimulationTab: React.FC = () => {
     bear: initialPrincipal,
     invested: initialPrincipal,
   };
-  const isBaseGoalAchieved = finalYearData.base >= targetAmount;
-
   return (
     <div className="space-y-6">
       {/* Top Controls Toolbar: Apple-like Flat Navigation Bar (Title removed as requested) */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-black/10 dark:border-white/10">
         <div className="flex flex-wrap items-center gap-2">
-          {/* Target FIRE Achieved Badge */}
-          <span
-            className={`text-xs px-3 py-1.5 border flex items-center gap-1.5 font-medium ${
-              isBaseGoalAchieved
-                ? 'bg-[#34c759]/15 text-[#34c759] border-[#34c759]/30'
-                : 'bg-[#ff9500]/15 text-[#ff9500] border-[#ff9500]/30'
-            }`}
-          >
-            <Flame className="w-3.5 h-3.5" />
-            <span>目標 {targetAmount.toLocaleString()}万円: {isBaseGoalAchieved ? '達成見込み' : '計画調整推奨'}</span>
-          </span>
-
           {/* Capital Link Status Selector */}
           <div className="flex items-center gap-1.5 px-3 py-1 border border-black/10 dark:border-white/10 bg-[#f5f5f7] dark:bg-white/5 text-xs">
             <LinkIcon className="w-3.5 h-3.5 text-[#0071e3]" />
@@ -253,33 +340,30 @@ export const SimulationTab: React.FC = () => {
             <h2 className={`text-sm font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
               試算パラメータ
             </h2>
-            <span className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">
-              各項目をクリック/ダブルクリックで変更可能
-            </span>
           </div>
 
           <div className="space-y-3.5 text-xs">
-            {/* Simulation Years (1年から開始) */}
+            {/* Simulation Years (0〜10年後) */}
             <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
               <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block mb-1">
-                試算期間 (1年目〜)
+                試算期間 (0〜10年後)
               </label>
               <div className="flex items-center justify-between">
                 <EditableCell
-                  value={simulationConfig.years}
+                  value={simulationYears}
                   type="number"
-                  min={1}
-                  max={40}
+                  min={0}
+                  max={10}
                   suffix=" 年間"
-                  onSave={(val) => updateSimulationConfig({ years: Number(val) || 10 })}
+                  onSave={(val) => updateSimulationConfig({ years: Math.min(10, Math.max(0, Number(val) || 0)) })}
                   textClassName={`text-base font-bold font-mono ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
                 />
                 <input
                   type="range"
-                  min="1"
-                  max="35"
+                  min="0"
+                  max="10"
                   step="1"
-                  value={simulationConfig.years}
+                  value={simulationYears}
                   onChange={(e) => updateSimulationConfig({ years: Number(e.target.value) })}
                   className="w-20 accent-[#0071e3] cursor-pointer"
                 />
@@ -312,56 +396,21 @@ export const SimulationTab: React.FC = () => {
                 }}
                 textClassName="text-base font-bold font-mono text-[#0071e3] dark:text-[#2997ff]"
               />
-              <span className="text-[10px] text-[#1d1d1f]/40 dark:text-[#f5f5f7]/40 block mt-1">
-                ※ 各タブの残高変更と自動同期
-              </span>
             </div>
 
             {/* Monthly Investment */}
             <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
               <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block mb-1">
-                毎月積立額 (万円/月)
+                毎月積立額 (資産管理表CF連動)
               </label>
-              <EditableCell
-                value={simulationConfig.monthlyInvestment}
-                type="number"
-                step="1"
-                min={0}
-                suffix=" 万円"
-                onSave={(val) => updateSimulationConfig({ monthlyInvestment: Number(val) || 0 })}
-                textClassName="text-base font-bold font-mono text-[#34c759]"
-              />
-              <span className="text-[10px] text-[#1d1d1f]/40 dark:text-[#f5f5f7]/40 block mt-1">
-                年間積立額: {(simulationConfig.monthlyInvestment * 12).toLocaleString()} 万円
-              </span>
-            </div>
-
-            {/* Target Amount */}
-            <div className="p-3 border border-black/10 dark:border-white/10 bg-white/60 dark:bg-white/5">
-              <label className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block mb-1">
-                目標資産額 (万円)
-              </label>
-              <EditableCell
-                value={targetAmount}
-                type="number"
-                step="500"
-                min={100}
-                suffix=" 万円"
-                onSave={(val) =>
-                  updateSimulationConfig({
-                    targetAmount: Number(val) || 10000,
-                    fireTargetAmount: Number(val) || 10000,
-                  })
-                }
-                textClassName="text-base font-bold font-mono text-[#ff9500]"
-              />
+              <div className="text-base font-bold font-mono text-[#34c759]">{currentMonthlySurplus.toFixed(1)} 万円/月</div>
             </div>
 
             {/* Scenario Yield Rates with Plus Button */}
             <div className="space-y-2 pt-1">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-medium text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70">
-                  目標利回り設定 (%)
+                  シナリオ利回り設定 (%)
                 </span>
                 <button
                   onClick={() => setShowAddScenarioModal(true)}
@@ -432,6 +481,42 @@ export const SimulationTab: React.FC = () => {
                 </div>
               </div>
 
+              {/* コア株式・高配当ポートフォリオの個別成長率 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
+                <div className="p-2.5 border border-[#af52de]/30 bg-[#af52de]/5">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] font-sans font-bold text-[#af52de]">コア株式 ({coreGrowthRate}%)</label>
+                    <span className="text-[10px] font-mono text-[#af52de]">0〜40%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="40"
+                    step="1"
+                    value={coreGrowthRate}
+                    onChange={(e) => updateSimulationConfig({ coreGrowthRate: Number(e.target.value) })}
+                    className="w-full accent-[#af52de] cursor-pointer"
+                    aria-label="コア株式の成長率"
+                  />
+                </div>
+                <div className="p-2.5 border border-[#af52de]/30 bg-[#af52de]/5">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] font-sans font-bold text-[#af52de]">高配当ポートフォリオ ({dividendGrowthRate}%)</label>
+                    <span className="text-[10px] font-mono text-[#af52de]">0〜40%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="40"
+                    step="1"
+                    value={dividendGrowthRate}
+                    onChange={(e) => updateSimulationConfig({ dividendGrowthRate: Number(e.target.value) })}
+                    className="w-full accent-[#af52de] cursor-pointer"
+                    aria-label="高配当ポートフォリオの成長率"
+                  />
+                </div>
+              </div>
+
               {/* Custom Scenarios List (If added) */}
               {customScenarios.map((sc) => (
                 <div
@@ -458,9 +543,63 @@ export const SimulationTab: React.FC = () => {
           </div>
         </div>
 
-        {/* Right 3 Cols: Interactive Chart & Outcome Milestone Cards */}
+        {/* 右側: 年次チャート・試算表・シナリオ結果 */}
         <div className="lg:col-span-3 space-y-6">
-          <SimulationChart data={chartData} targetAmount={targetAmount} />
+          <SimulationChart
+            data={chartData}
+            rates={{ base: baseReturnRate, bull: bullReturnRate, bear: bearReturnRate, core: coreGrowthRate, dividend: dividendGrowthRate }}
+          />
+
+          {/* 年次純資産試算: 年次を横方向へ並べ、S&P500試算とその他資産を合算 */}
+          <div className="border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 overflow-hidden">
+            <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
+              <h3 className="text-sm font-semibold">年次純資産試算 (万円)</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[760px] text-xs font-mono tabular-nums">
+                <thead className="bg-black/5 dark:bg-white/5">
+                  <tr>
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">シナリオ</th>
+                    {chartData.map((row) => (
+                      <th key={row.year} className="px-4 py-2 text-right font-semibold whitespace-nowrap">
+                        {row.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-t border-black/5 dark:border-white/10">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">積立元本（余剰累積）</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right whitespace-nowrap">{row.invested.toLocaleString()} 万円</td>)}
+                  </tr>
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#34c759]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#34c759]">{formatScenarioRate(baseReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#34c759] whitespace-nowrap">{row.base.toLocaleString()} 万円</td>)}
+                  </tr>
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#0071e3]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#0071e3] dark:text-[#2997ff]">{formatScenarioRate(bullReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#0071e3] dark:text-[#2997ff] whitespace-nowrap">{row.bull.toLocaleString()} 万円</td>)}
+                  </tr>
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#ff3b30]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#ff3b30]">{formatScenarioRate(bearReturnRate)}</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#ff3b30] whitespace-nowrap">{row.bear.toLocaleString()} 万円</td>)}
+                  </tr>
+                  <tr className="border-t border-black/5 dark:border-white/10 bg-[#af52de]/5">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold text-[#af52de]">コア株式 ({coreGrowthRate}%) / 高配当ポートフォリオ ({dividendGrowthRate}%)</th>
+                    {chartData.map((row) => <td key={row.year} className="px-4 py-2 text-right font-semibold text-[#af52de] whitespace-nowrap">{(row.split ?? 0).toLocaleString()} 万円</td>)}
+                  </tr>
+                  <tr className="border-t-2 border-black/10 dark:border-white/10">
+                    <th className="sticky left-0 z-10 bg-[#f5f5f7] dark:bg-[#1c1c1e] px-4 py-2 text-left font-semibold">年齢（歳）</th>
+                    {chartData.map((row) => {
+                      const monthKey = currentMonthKey === null ? null : currentMonthKey + (row.year * 12);
+                      const age = ageAtMonthKey(monthKey);
+                      return <td key={row.year} className="px-4 py-2 text-right font-semibold whitespace-nowrap">{age ?? '—'}</td>;
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
 
           {/* 3 Outcome Milestone Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -469,7 +608,7 @@ export const SimulationTab: React.FC = () => {
               <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
                 <span className="font-semibold text-[#34c759] flex items-center gap-1.5">
                   <span className="w-2 h-2 bg-[#34c759]" />
-                  Base (+{baseReturnRate}%)
+                  {formatScenarioRate(baseReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>
@@ -489,7 +628,7 @@ export const SimulationTab: React.FC = () => {
               <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
                 <span className="font-semibold text-[#0071e3] dark:text-[#2997ff] flex items-center gap-1.5">
                   <ArrowUpRight className="w-3.5 h-3.5" />
-                  Bull (+{bullReturnRate}%)
+                  {formatScenarioRate(bullReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>
@@ -509,7 +648,7 @@ export const SimulationTab: React.FC = () => {
               <div className="flex items-center justify-between text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 mb-1">
                 <span className="font-semibold text-[#ff3b30] flex items-center gap-1.5">
                   <span className="w-2 h-2 bg-[#ff3b30]" />
-                  Bear ({bearReturnRate}%)
+                  {formatScenarioRate(bearReturnRate)}
                 </span>
                 <span className="font-mono">{simulationYears}年後</span>
               </div>

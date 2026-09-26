@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { DividendStock } from '../../types';
-import { CoverageGauge, PortfolioDonutChart } from '../charts/InteractiveChart';
 import { EditableCell } from '../common/EditableCell';
 import { isJapaneseMutualFundCode, lookupYahooFinanceTicker } from '../../services/yahooFinance';
 import { Plus, Calendar, Sparkles, X } from 'lucide-react';
@@ -12,9 +11,7 @@ export const DividendTab: React.FC = () => {
     totalMonthlyDividend,
     totalAnnualDividend,
     overallNetYield,
-    totalExpenses,
     dividendCoverageRate,
-    dividendShortfall,
     addDividendStock,
     updateDividendStock,
     deleteDividendStock,
@@ -123,20 +120,6 @@ export const DividendTab: React.FC = () => {
     note: '',
   });
 
-  const donutPalette = [
-    '#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55',
-    '#5856d6', '#00c7be', '#32ade6', '#a2845e', '#ff3b30'
-  ];
-
-  const donutItems = calculatedDividends
-    .filter(c => c.stock.investedAmount > 0)
-    .map((c, idx) => ({
-      id: c.stock.id,
-      label: c.stock.ticker || c.stock.name,
-      value: c.stock.investedAmount,
-      color: donutPalette[idx % donutPalette.length],
-    }));
-
   const handleTickerChange = (tickerVal: string) => {
     const uppercase = tickerVal.toUpperCase();
     const resolved = lookupYahooFinanceTicker(uppercase);
@@ -214,11 +197,11 @@ export const DividendTab: React.FC = () => {
       {/* KPI Minimal Ribbon (Flat Spreadsheet Style - No rounded cards) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-2">
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">月額受取配当 (手取り)</span>
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">月額受取配当 (手取り・2563込)</span>
           <div className="text-xl sm:text-2xl font-bold font-mono text-[#34c759] tabular-nums mt-1">
             {totalMonthlyDividend.toFixed(1)} 万円
           </div>
-          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">生活費カバー {dividendCoverageRate.toFixed(1)}%</span>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">配当入金合計</span>
         </div>
 
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
@@ -230,7 +213,7 @@ export const DividendTab: React.FC = () => {
         </div>
 
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">年間受取配当 (手取り)</span>
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">年間受取配当 (手取り・2563込)</span>
           <div className="text-xl sm:text-2xl font-bold font-mono text-[#1d1d1f] dark:text-[#f5f5f7] tabular-nums mt-1">
             {totalAnnualDividend.toFixed(1)} 万円
           </div>
@@ -238,48 +221,29 @@ export const DividendTab: React.FC = () => {
         </div>
 
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">完全FIREまで</span>
-          <div className={`text-xl sm:text-2xl font-bold font-mono tabular-nums mt-1 ${
-            dividendShortfall > 0 ? 'text-[#ff9500]' : 'text-[#34c759]'
-          }`}>
-            {dividendShortfall > 0 ? `不足 ${dividendShortfall.toFixed(1)}万` : '達成済み'}
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">カバー率</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
+            {dividendCoverageRate.toFixed(1)}%
           </div>
-          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">必要生活費との差分</span>
         </div>
-      </div>
 
-      {/* Two Column Grid: Coverage Gauge & Donut Chart */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <CoverageGauge
-          coverageRate={dividendCoverageRate}
-          monthlyDividend={totalMonthlyDividend}
-          monthlyExpenses={totalExpenses}
-        />
-        <PortfolioDonutChart items={donutItems} totalLabel="高配当ポートフォリオ" />
       </div>
 
       {/* 月間配当タイムライン: 線上の日付を基準に、下へ銘柄名と配当金額を配置する。 */}
-      <div className="border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 p-6 sm:p-8 space-y-6 transition-colors">
+      <div className="hidden border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 p-6 sm:p-8 space-y-6 transition-colors">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
               <Calendar className="w-4 h-4 text-[#0071e3]" />
               <h2 className={`text-sm sm:text-base font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
-                月間配当スケジュール (タイムライン図解)
+                配当日程：合計: +{totalMonthlyDividend.toFixed(1)}万円/月
               </h2>
             </div>
-            <p className="text-xs text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-0.5">
-              各銘柄の支払日・金額をダブルクリック/クリックで直接変更可能（全画面同期）
-            </p>
-          </div>
-
-          <div className="text-xs font-mono font-medium text-[#34c759]">
-            月間合計: +{totalMonthlyDividend.toFixed(1)}万円/月
           </div>
         </div>
 
         {/* Graphical Month Timeline Track (1日〜31日) */}
-        <div className="pt-5 pb-24 px-2 sm:px-4">
+        <div className="hidden sm:block min-h-[170px] pt-5 pb-24 px-2 sm:px-4">
           <div className="relative w-full">
             {/* Horizontal Line Bar */}
             <div className="h-1.5 w-full bg-black/10 dark:bg-white/10" />
@@ -287,28 +251,40 @@ export const DividendTab: React.FC = () => {
             {/* Payout Nodes along the timeline */}
             <div className="absolute top-0 left-0 right-0 pointer-events-none">
               <div className="relative w-full h-0">
-                {payoutsWithDay.map(({ stock, monthlyNet, day }, idx) => {
+                {payoutsWithDay.map(({ stock, monthlyNet, day }) => {
                   // Position percentage across 1..31
                   const leftPercent = ((day - 1) / 30) * 100;
+                  const sameDayItems = payoutsWithDay.filter((item) => item.day === day);
+                  const stackIndex = sameDayItems.findIndex((item) => item.stock.id === stock.id);
                   const isEditing = editingPayoutStockId === stock.id;
 
                   return (
                     <div
                       key={stock.id}
-                      style={{ left: `${Math.min(96, Math.max(4, leftPercent))}%` }}
+                      style={{
+                        left: `${Math.min(96, Math.max(4, leftPercent))}%`,
+                        top: `${stackIndex * 58}px`,
+                      }}
                       className="absolute top-0 -translate-x-1/2 -translate-y-1/2 pointer-events-auto group cursor-pointer"
                     >
                       {/* 線上の小さな青丸が支払日。 */}
-                      <button
-                        onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
-                        title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
-                        className="h-5 w-5 rounded-full flex items-center justify-center bg-[#0071e3] text-white text-[8px] font-bold font-mono shadow-md transition-transform group-hover:scale-110 active:scale-95"
-                      >
-                        {day}
-                      </button>
+                      {stackIndex === 0 ? (
+                        <button
+                          onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
+                          title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
+                          className="h-5 w-5 rounded-full flex items-center justify-center bg-[#0071e3] text-white text-[8px] font-bold font-mono shadow-md transition-transform group-hover:scale-110 active:scale-95"
+                        >
+                          {day}
+                        </button>
+                      ) : (
+                        <div className="h-5 w-5" aria-hidden="true" />
+                      )}
 
                       {/* 日付の直下に銘柄名、その下に強調した配当金額。 */}
-                      <div className="absolute top-7 left-1/2 -translate-x-1/2 flex flex-col items-center whitespace-nowrap text-center transition-transform group-hover:scale-105">
+                      <div
+                        onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
+                        className="absolute top-7 left-1/2 -translate-x-1/2 flex flex-col items-center whitespace-nowrap text-center transition-transform group-hover:scale-105 cursor-pointer"
+                      >
                         <span className="max-w-28 truncate text-[10px] font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
                           {stock.name || stock.ticker}
                         </span>
@@ -391,6 +367,76 @@ export const DividendTab: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* 狭い画面では絶対配置を使わず、各銘柄を縦に並べて重なりを防ぐ。 */}
+        <div className="sm:hidden space-y-2">
+          {payoutsWithDay.map(({ stock, monthlyNet, day }) => {
+            const isEditing = editingPayoutStockId === stock.id;
+            return (
+              <div
+                key={`mobile-${stock.id}`}
+                className={`relative grid grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-2 border-b border-black/5 dark:border-white/10 pb-2 ${isEditing ? 'pb-3' : ''}`}
+              >
+                <button
+                  onClick={() => setEditingPayoutStockId(isEditing ? null : stock.id)}
+                  title={`${stock.ticker}の支払日を変更 (現在: ${day}日)`}
+                  className="h-7 w-7 rounded-full justify-self-center flex items-center justify-center bg-[#0071e3] text-white text-[9px] font-bold font-mono shadow-sm active:scale-95"
+                >
+                  {day}
+                </button>
+                <span className="min-w-0 truncate text-xs font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]" title={stock.name || stock.ticker}>
+                  {stock.name || stock.ticker}
+                </span>
+                <span className="whitespace-nowrap text-sm font-mono font-bold text-[#0071e3] dark:text-[#2997ff]">
+                  +{monthlyNet.toFixed(1)}万
+                </span>
+                {isEditing && (
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    className={`col-span-3 grid grid-cols-2 gap-2 p-2 border text-xs ${
+                      isDark ? 'bg-[#1d1d1f] border-white/15 text-white' : 'bg-white border-black/10 text-[#1d1d1f]'
+                    }`}
+                  >
+                    <label className="space-y-1">
+                      <span className="block text-[10px] opacity-60">支払日</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="31"
+                        defaultValue={day}
+                        onBlur={(event) => updateDividendStock(stock.id, { payoutDay: Number(event.target.value) || 15 })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            updateDividendStock(stock.id, { payoutDay: Number(event.currentTarget.value) || 15 });
+                            setEditingPayoutStockId(null);
+                          }
+                        }}
+                        className="w-full p-1.5 font-mono border bg-transparent"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] opacity-60">投資元本 (万円)</span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="10"
+                        defaultValue={stock.investedAmount}
+                        onBlur={(event) => updateDividendStock(stock.id, { investedAmount: Number(event.target.value) || stock.investedAmount })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            updateDividendStock(stock.id, { investedAmount: Number(event.currentTarget.value) || stock.investedAmount });
+                            setEditingPayoutStockId(null);
+                          }
+                        }}
+                        className="w-full p-1.5 font-mono border bg-transparent"
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Main Stock Table with Universal Double-Click Editing */}
@@ -399,9 +445,6 @@ export const DividendTab: React.FC = () => {
           <h2 className={`text-base font-semibold ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}>
             保有高配当銘柄一覧
           </h2>
-          <span className="text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">
-            ダブルクリックで直接編集（ティッカー変更で利回り・名称・支払日を自動同期）
-          </span>
         </div>
 
         <div className="overflow-x-auto border border-black/10 dark:border-white/10 bg-[#f5f5f7]/50 dark:bg-white/5 p-2 sm:p-4">
@@ -428,12 +471,15 @@ export const DividendTab: React.FC = () => {
                     {label}{sortMark(key)}
                   </th>
                 ))}
+                <th className="py-3 px-3 text-center font-medium" title="ONにすると円グラフと投資額集計から除外（配当金額は含む）">
+                  ポートフォリオ除外
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-black/5 dark:divide-white/5 font-mono">
               {displayedDividends.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400">
+                  <td colSpan={10} className="py-12 text-center text-slate-400">
                     登録されている銘柄がありません
                   </td>
                 </tr>
@@ -595,6 +641,19 @@ export const DividendTab: React.FC = () => {
                       +{annualNet.toFixed(1)}
                     </td>
 
+                    {/* 円グラフ・高配当投資額からの除外設定。配当金額は除外しない。 */}
+                    <td className="py-2.5 px-3 text-center">
+                      <label className="inline-flex items-center justify-center gap-1.5 cursor-pointer select-none" title="ONにすると円グラフと投資額集計から除外します（配当金額は含みます）">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(stock.excludeFromPortfolio)}
+                          onChange={(event) => updateDividendStock(stock.id, { excludeFromPortfolio: event.target.checked })}
+                          className="h-4 w-4 accent-[#0071e3]"
+                          aria-label={`${stock.ticker || stock.name}を高配当ポートフォリオから除外`}
+                        />
+                      </label>
+                    </td>
+
                   </tr>
                 ))
               )}
@@ -613,32 +672,17 @@ export const DividendTab: React.FC = () => {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <div className="border border-black/10 dark:border-white/10 p-3">
-            <div className="text-[10px] opacity-60">合計投資額</div>
-            <div className="font-mono font-bold text-lg tabular-nums">{calculatedDividends.reduce((sum, item) => sum + item.stock.investedAmount, 0).toFixed(1)} 万円</div>
+            <div className="text-[10px] opacity-60">合計投資額（円グラフ対象）</div>
+            <div className="font-mono font-bold text-lg tabular-nums">{calculatedDividends.filter((item) => !item.stock.excludeFromPortfolio).reduce((sum, item) => sum + item.stock.investedAmount, 0).toFixed(1)} 万円</div>
           </div>
           <div className="border border-black/10 dark:border-white/10 p-3">
-            <div className="text-[10px] opacity-60">合計月額手取り</div>
+            <div className="text-[10px] opacity-60">合計月額手取り（2563込）</div>
             <div className="font-mono font-bold text-lg text-[#0071e3] dark:text-[#2997ff] tabular-nums">{totalMonthlyDividend.toFixed(1)} 万円/月</div>
           </div>
           <div className="border border-black/10 dark:border-white/10 p-3">
-            <div className="text-[10px] opacity-60">年間手取り試算</div>
+            <div className="text-[10px] opacity-60">年間手取り試算（2563込）</div>
             <div className="font-mono font-bold text-lg text-[#0071e3] dark:text-[#2997ff] tabular-nums">{totalAnnualDividend.toFixed(1)} 万円/年</div>
           </div>
-        </div>
-        <div className="space-y-2">
-          {(() => {
-            const maxMonthly = Math.max(...calculatedDividends.map((item) => item.monthlyNet), 1);
-            return calculatedDividends.map(({ stock, monthlyNet, annualNet }) => (
-              <div key={`bar-${stock.id}`} className="grid grid-cols-[90px_1fr_78px] items-center gap-2 text-[11px]">
-                <span className="truncate font-mono">{stock.ticker || stock.name}</span>
-                <div className="h-3 bg-black/5 dark:bg-white/10 overflow-hidden">
-                  <div className="h-full bg-[#0071e3]" style={{ width: `${Math.max(2, (monthlyNet / maxMonthly) * 100)}%` }} />
-                </div>
-                <span className="text-right font-mono tabular-nums text-[#0071e3] dark:text-[#2997ff]">{monthlyNet.toFixed(1)} / {annualNet.toFixed(1)}</span>
-              </div>
-            ));
-          })()}
-          <div className="text-[10px] text-right opacity-50">棒グラフ右端：月額手取り / 年額手取り（万円）</div>
         </div>
       </div>
 

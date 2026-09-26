@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { AssetItem, AssetCategory, IncomeItem, ExpenseItem, TimelineColumn } from '../../types';
 import { EditableCell } from '../common/EditableCell';
 import { PortfolioDonutChart } from '../charts/InteractiveChart';
+import { DividendTimeline } from './DividendTimeline';
 import { lookupYahooFinanceTicker } from '../../services/yahooFinance';
 import {
   calculateAssetAmountManYen,
@@ -25,7 +26,9 @@ import {
   ChevronLeft,
   ChevronRight,
   TrendingUp,
-  Percent
+  Percent,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 const CATEGORY_META: Record<AssetCategory, { label: string; color: string }> = {
@@ -119,9 +122,11 @@ export const AssetManagementTab: React.FC = () => {
     cashTotal,
     coreStocksTotal,
     dividendStocksTotal,
+    totalInvestedDividends,
     calculatedDividends,
     totalMonthlyDividend,
     totalAnnualDividend,
+    overallNetYield,
     illiquidTotal,
     netWorthTotal,
     addAsset,
@@ -190,6 +195,19 @@ export const AssetManagementTab: React.FC = () => {
 
   // Category filter
   const [activeCategoryFilter, setActiveCategoryFilter] = useState<string>('all');
+  const [maskAssetAmounts, setMaskAssetAmounts] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('finance_simulation_mask_asset_amounts') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('finance_simulation_mask_asset_amounts', String(maskAssetAmounts));
+    } catch {}
+  }, [maskAssetAmounts]);
 
   // Modals
   const [showAddAssetModal, setShowAddAssetModal] = useState<boolean>(false);
@@ -504,7 +522,7 @@ export const AssetManagementTab: React.FC = () => {
   // Cumulative surplus from current month forward for asset progression
   // Find current month index (2026年9月)
   const currentMonthIdx = timelineColumns.findIndex(c => c.isCurrent);
-  const safeCurrentIdx = currentMonthIdx !== -1 ? currentMonthIdx : 8; // fallback to 9th col (index 8)
+  const safeCurrentIdx = currentMonthIdx !== -1 ? currentMonthIdx : 0;
 
   // Compute accumulated surplus for each column
   // Future months accumulate surplus from now; past months show current snapshot or past progress
@@ -678,12 +696,21 @@ export const AssetManagementTab: React.FC = () => {
   const chartTotal = Math.round(chartSlices.reduce((sum, slice) => sum + slice.value, 0) * 10) / 10;
   const chartPositiveTotal = chartSlices.reduce((sum, slice) => sum + Math.max(0, slice.value), 0);
   const chartNumber = (value: number) => `${value < 0 ? '−' : ''}${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 1 })}`;
+  const chartDisplayNumber = (value: number) => maskAssetAmounts ? '***' : chartNumber(value);
   const dividendChartItems = calculatedDividends
-    .filter((item) => Number(item.stock.investedAmount) > 0)
+    .filter((item) => !item.stock.excludeFromPortfolio && Number(item.stock.investedAmount) > 0)
     .map((item, index) => ({
       id: item.stock.id,
       label: item.stock.ticker || item.stock.name,
       value: Number(item.stock.investedAmount) || 0,
+      color: ['#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55', '#5856d6', '#00c7be'][index % 7],
+    }));
+  const monthlyDividendChartItems = calculatedDividends
+    .filter((item) => Number(item.monthlyNet) > 0)
+    .map((item, index) => ({
+      id: item.stock.id,
+      label: item.stock.ticker || item.stock.name,
+      value: Number(item.monthlyNet) || 0,
       color: ['#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55', '#5856d6', '#00c7be'][index % 7],
     }));
   const chartPieSlices = (() => {
@@ -713,9 +740,23 @@ export const AssetManagementTab: React.FC = () => {
   return (
     <div className="space-y-6 pb-16">
       {/* 資産内訳: 表と同じ月次元帳を参照するモバイル優先サマリー */}
-      <section className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-stretch">
-          <div className="flex min-h-[360px] flex-col items-center justify-start bg-transparent">
-            <div className="mt-8 mb-1 flex w-full justify-end">
+      <section className="grid grid-cols-1 gap-5 lg:grid-cols-3 lg:items-start">
+          <div className="flex min-h-[420px] flex-col items-center justify-start bg-transparent">
+            <div className="mb-1 flex min-h-[54px] w-full items-center justify-end gap-1">
+              <button
+                type="button"
+                onClick={() => setMaskAssetAmounts((current) => !current)}
+                title={maskAssetAmounts ? '金額を表示' : '金額を伏せ字にする'}
+                aria-label={maskAssetAmounts ? '金額の伏せ字を解除' : '金額を伏せ字にする'}
+                aria-pressed={maskAssetAmounts}
+                className={`inline-flex h-9 w-9 items-center justify-center border transition-colors ${
+                  maskAssetAmounts
+                    ? 'border-[#0071e3] bg-[#0071e3]/10 text-[#0071e3] dark:text-[#2997ff]'
+                    : 'border-black/15 text-[#1d1d1f]/60 hover:bg-black/5 dark:border-white/15 dark:text-[#f5f5f7]/60 dark:hover:bg-white/10'
+                }`}
+              >
+                {maskAssetAmounts ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
               <select
                 value={assetChartMonthId}
                 onChange={(event) => setAssetChartMonthId(event.target.value)}
@@ -727,13 +768,13 @@ export const AssetManagementTab: React.FC = () => {
                 ))}
               </select>
             </div>
-          <div className="relative h-[min(80vw,320px)] w-[min(80vw,320px)]" aria-label={`総資産 ${chartNumber(chartTotal)}万円`}>
+          <div className="relative h-[min(80vw,320px)] w-[min(80vw,320px)]" aria-label={`総資産 ${chartDisplayNumber(chartTotal)}万円`}>
             <svg viewBox="0 0 240 240" className="h-full w-full" role="img">
               {chartPieSlices.map((slice) => {
                 if (slice.percent >= 99.99) {
-                  return <circle key={slice.id} cx="120" cy="120" r="106" fill={slice.color}><title>{`${slice.label}: ${chartNumber(slice.value)}万円 (${slice.percent.toFixed(1)}%)`}</title></circle>;
+                  return <circle key={slice.id} cx="120" cy="120" r="106" fill={slice.color}><title>{`${slice.label}: ${chartDisplayNumber(slice.value)}万円 (${slice.percent.toFixed(1)}%)`}</title></circle>;
                 }
-                return <path key={slice.id} d={pieSlicePath(slice.startPercent, slice.endPercent)} fill={slice.color} stroke="rgba(255,255,255,0.45)" strokeWidth="0.8"><title>{`${slice.label}: ${chartNumber(slice.value)}万円 (${slice.percent.toFixed(1)}%)`}</title></path>;
+                return <path key={slice.id} d={pieSlicePath(slice.startPercent, slice.endPercent)} fill={slice.color} stroke="rgba(255,255,255,0.45)" strokeWidth="0.8"><title>{`${slice.label}: ${chartDisplayNumber(slice.value)}万円 (${slice.percent.toFixed(1)}%)`}</title></path>;
               })}
               {chartPieSlices.map((slice) => {
                 const midpoint = ((slice.startPercent + slice.endPercent) / 200) * Math.PI * 2 - Math.PI / 2;
@@ -743,35 +784,39 @@ export const AssetManagementTab: React.FC = () => {
                 return (
                   <text key={`${slice.id}-label`} x={labelPoint.x} y={labelPoint.y - fontSize} textAnchor="middle" fill="white" fontSize={fontSize} fontWeight="700" className="pointer-events-none">
                     <tspan x={labelPoint.x}>{compactLabel}</tspan>
-                    <tspan x={labelPoint.x} dy={fontSize + 1}>{chartNumber(slice.value)}万円</tspan>
+                    <tspan x={labelPoint.x} dy={fontSize + 1}>{chartDisplayNumber(slice.value)}万円</tspan>
                     <tspan x={labelPoint.x} dy={fontSize + 1}>{slice.percent.toFixed(1)}%</tspan>
                   </text>
                 );
               })}
               <circle cx="120" cy="120" r="56" className="fill-transparent" />
               <text x="120" y="114" textAnchor="middle" className="fill-[#1d1d1f] dark:fill-[#f5f5f7]" fontSize="9">総資産合計</text>
-              <text x="120" y="131" textAnchor="middle" className={chartTotal < 0 ? 'fill-[#ff3b30]' : 'fill-[#0071e3] dark:fill-[#2997ff]'} fontSize="15" fontWeight="700">{chartNumber(chartTotal)}</text>
+              <text x="120" y="131" textAnchor="middle" className={chartTotal < 0 ? 'fill-[#ff3b30]' : 'fill-[#0071e3] dark:fill-[#2997ff]'} fontSize="15" fontWeight="700">{chartDisplayNumber(chartTotal)}</text>
               <text x="120" y="143" textAnchor="middle" className="fill-[#1d1d1f]/60 dark:fill-[#f5f5f7]/60" fontSize="8">万円</text>
             </svg>
             {chartSlices.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">表示できる資産がありません。</p>}
           </div>
           </div>
-          <div className="flex min-h-[360px] flex-col bg-transparent">
-            <div className="mb-3 grid grid-cols-2 gap-2 text-center">
-              <div>
-                <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">月額受取配当 (手取り)</div>
-                <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{totalMonthlyDividend.toFixed(1)} 万円</div>
-              </div>
-              <div>
-                <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">年間受取配当 (手取り)</div>
-                <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{totalAnnualDividend.toFixed(1)} 万円</div>
-              </div>
+          <div className="flex min-h-[420px] flex-col items-center bg-transparent">
+            <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
+              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">年間受取配当 (手取り・2563込)</div>
+              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{totalAnnualDividend.toFixed(1)} 万円</div>
             </div>
-            <div className="min-h-0 flex-1">
+            <div className="min-h-0 w-full flex-1">
+              <PortfolioDonutChart items={monthlyDividendChartItems} totalLabel="月額配当 (2563込)" />
+            </div>
+          </div>
+          <div className="flex min-h-[420px] flex-col items-center bg-transparent">
+            <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
+              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">税引後 加重平均利回り</div>
+              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{overallNetYield.toFixed(2)} %</div>
+            </div>
+            <div className="min-h-0 w-full flex-1">
               <PortfolioDonutChart items={dividendChartItems} totalLabel="高配当ポートフォリオ" />
             </div>
           </div>
       </section>
+      <DividendTimeline />
       {/* CASHFLOW & ASSET PROGRESSION MATRIX */}
       <div className="space-y-1">
         {/* The Matrix Table Container */}
@@ -904,7 +949,7 @@ export const AssetManagementTab: React.FC = () => {
                         col.isCurrent ? 'bg-[#0071e3]/15 text-[#0071e3] dark:text-[#2997ff]' : ''
                       }`}
                     >
-                      <span>{Math.round(estimatedNW).toLocaleString()}</span>
+                      <span>{maskAssetAmounts ? '***' : Math.round(estimatedNW).toLocaleString()}</span>
                     </td>
                   );
                 })}
@@ -962,6 +1007,7 @@ export const AssetManagementTab: React.FC = () => {
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_core_stocks', col.id, Number(val) || 0, true)}
                         textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
+                        masked={maskAssetAmounts}
                       />
                     </td>
                   );
@@ -990,7 +1036,7 @@ export const AssetManagementTab: React.FC = () => {
                 {timelineColumns.map((col) => {
                   const cellVal = monthlyOverrides['prog_dividend_stocks']?.[col.id] !== undefined
                     ? monthlyOverrides['prog_dividend_stocks'][col.id]
-                    : dividendStocksTotal;
+                    : totalInvestedDividends;
 
                   return (
                     <td
@@ -1020,6 +1066,7 @@ export const AssetManagementTab: React.FC = () => {
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_dividend_stocks', col.id, Number(val) || 0, true)}
                         textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
+                        masked={maskAssetAmounts}
                       />
                     </td>
                   );
@@ -1076,6 +1123,7 @@ export const AssetManagementTab: React.FC = () => {
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_cash_pool', col.id, Number(val) || 0, true)}
                         textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
+                        masked={maskAssetAmounts}
                       />
                     </td>
                   );
@@ -1134,6 +1182,7 @@ export const AssetManagementTab: React.FC = () => {
                         align="center"
                         onSave={(val) => updateMonthlyCell('prog_illiquid', col.id, Number(val) || 0, true)}
                         textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
+                        masked={maskAssetAmounts}
                       />
                     </td>
                   );
@@ -1182,6 +1231,7 @@ export const AssetManagementTab: React.FC = () => {
                             align="center"
                             onSave={(val) => updateMonthlyCell(rowId, col.id, Number(val) || 0, true)}
                             textClassName="text-[#1d1d1f] dark:text-[#f5f5f7]"
+                            masked={maskAssetAmounts}
                           />
                         </td>
                       );
@@ -1280,7 +1330,7 @@ export const AssetManagementTab: React.FC = () => {
                         >
                           {isDiv ? (
                             <span className="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold tabular-nums">
-                              {amount.toFixed(1)}
+                              {maskAssetAmounts ? '***' : amount.toFixed(1)}
                             </span>
                           ) : (
                             <EditableCell
@@ -1290,6 +1340,7 @@ export const AssetManagementTab: React.FC = () => {
                               align="center"
                               onSave={(val) => updateMonthlyCell(item.id, col.id, Number(val) || 0, true)}
                               textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold"
+                              masked={maskAssetAmounts}
                             />
                           )}
                         </td>
@@ -1326,7 +1377,7 @@ export const AssetManagementTab: React.FC = () => {
                       t.col.isCurrent ? 'bg-[#0071e3]/10 font-black' : ''
                     }`}
                   >
-                    {t.income.toFixed(1)}
+                    {maskAssetAmounts ? '***' : t.income.toFixed(1)}
                   </td>
                 ))}
                 <td className="py-1 px-1.5 border-r border-black/15 dark:border-white/15"></td>
@@ -1425,6 +1476,7 @@ export const AssetManagementTab: React.FC = () => {
                             align="center"
                             onSave={(val) => updateMonthlyCell(item.id, col.id, Number(val) || 0, true)}
                             textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-semibold"
+                            masked={maskAssetAmounts}
                           />
                         </td>
                       );
@@ -1460,7 +1512,7 @@ export const AssetManagementTab: React.FC = () => {
                       t.col.isCurrent ? 'bg-[#0071e3]/10 font-black' : ''
                     }`}
                   >
-                    -{t.expense.toFixed(1)}
+                    {maskAssetAmounts ? '***' : `-${t.expense.toFixed(1)}`}
                   </td>
                 ))}
                 <td className="py-1 px-1.5 border-r border-black/15 dark:border-white/15"></td>
@@ -1499,7 +1551,7 @@ export const AssetManagementTab: React.FC = () => {
                         isPositive ? 'text-[#1d1d1f] dark:text-[#f5f5f7]' : 'text-red-500'
                       } ${t.col.isCurrent ? 'bg-[#0071e3]/20' : ''}`}
                     >
-                      {isPositive ? `+${t.surplus.toFixed(1)}` : `${t.surplus.toFixed(1)}`}
+                      {maskAssetAmounts ? '***' : (isPositive ? `+${t.surplus.toFixed(1)}` : `${t.surplus.toFixed(1)}`)}
                     </td>
                   );
                 })}
@@ -1868,6 +1920,7 @@ export const AssetManagementTab: React.FC = () => {
                                 align="center"
                                 onSave={(val) => updateAsset(asset.id, { averageCost: Number(val) || 0 })}
                                 textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-medium"
+                                masked={maskAssetAmounts}
                               />
                             )}
 
@@ -1893,6 +1946,7 @@ export const AssetManagementTab: React.FC = () => {
                                   });
                                 }}
                                 textClassName="text-[#1d1d1f] dark:text-[#f5f5f7] font-medium"
+                                masked={maskAssetAmounts}
                               />
                             )}
 
@@ -1904,6 +1958,7 @@ export const AssetManagementTab: React.FC = () => {
                                 align="center"
                                 onSave={(val) => updateAsset(asset.id, { amount: Number(val) || 0 })}
                                 textClassName={`font-bold tabular-nums text-sm ${isDark ? 'text-[#f5f5f7]' : 'text-[#1d1d1f]'}`}
+                                masked={maskAssetAmounts}
                               />
                             )}
 

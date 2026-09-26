@@ -16,35 +16,42 @@ export interface SimulationDataPoint {
   bull: number;
   base: number;
   bear: number;
+  split?: number;
   invested?: number;
+  age?: number | null;
 }
 
 interface SimulationLineChartProps {
   data: SimulationDataPoint[];
-  targetAmount: number; // in 万円
+  rates?: {
+    base: number;
+    bull: number;
+    bear: number;
+    core?: number;
+    dividend?: number;
+  };
 }
 
-export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, targetAmount }) => {
+export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, rates }) => {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
   if (!data || data.length === 0) return null;
 
   const width = 800;
   const height = 360;
-  const padding = { top: 30, right: 30, bottom: 40, left: 60 };
+  const padding = { top: 30, right: 30, bottom: 54, left: 60 };
 
   const graphWidth = width - padding.left - padding.right;
   const graphHeight = height - padding.top - padding.bottom;
 
   // Max value calculation
   const maxVal = Math.max(
-    ...data.map(d => Math.max(d.bull, d.base, d.bear)),
-    targetAmount * 1.15,
+    ...data.map(d => Math.max(d.bull, d.base, d.bear, d.split ?? 0)),
     10000
   );
   const minVal = 0;
 
-  const getX = (index: number) => padding.left + (index / (data.length - 1)) * graphWidth;
+  const getX = (index: number) => padding.left + (index / Math.max(1, data.length - 1)) * graphWidth;
   const getY = (val: number) => padding.top + graphHeight - ((val - minVal) / (maxVal - minVal)) * graphHeight;
 
   // Paths
@@ -67,6 +74,12 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
   });
 
   const activePoint = hoverIndex !== null ? data[hoverIndex] : data[data.length - 1];
+  const baseRate = rates?.base ?? 7;
+  const bullRate = rates?.bull ?? 15;
+  const bearRate = rates?.bear ?? -5;
+  const coreRate = rates?.core ?? 7;
+  const dividendRate = rates?.dividend ?? 5;
+  const formatRate = (rate: number) => `${rate >= 0 ? '+' : ''}${rate}%`;
 
   return (
     <div className="w-full bg-[#f5f5f7]/80 dark:bg-white/5 border border-black/10 dark:border-white/10 p-6 sm:p-8 select-none transition-colors">
@@ -75,29 +88,32 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
         <div className="flex flex-wrap items-center gap-5">
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 bg-[#0071e3] inline-block"></span>
-            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">Bull (+15%)</span>
+            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">{formatRate(bullRate)}</span>
             <span className="font-mono text-[#0071e3] dark:text-[#2997ff] font-semibold tabular-nums">
               {formatYen(activePoint.bull)}
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 bg-[#af52de] inline-block"></span>
+            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">コア{formatRate(coreRate)} / 高配当{formatRate(dividendRate)}</span>
+            <span className="font-mono text-[#af52de] font-semibold tabular-nums">
+              {formatYen(activePoint.split ?? 0)}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 bg-[#34c759] inline-block"></span>
-            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">Base (+7%)</span>
+            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">{formatRate(baseRate)}</span>
             <span className="font-mono text-[#34c759] font-semibold tabular-nums">
               {formatYen(activePoint.base)}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 bg-[#ff3b30] inline-block"></span>
-            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">Bear (-5%)</span>
+            <span className="text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-medium">{formatRate(bearRate)}</span>
             <span className="font-mono text-[#ff3b30] font-semibold tabular-nums">
               {formatYen(activePoint.bear)}
             </span>
           </div>
-        </div>
-
-        <div className="flex items-center gap-2 text-xs font-mono font-medium px-3 py-1 border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/10 text-[#1d1d1f] dark:text-[#f5f5f7]">
-          <span>目標: {formatYen(targetAmount)}</span>
         </div>
       </div>
 
@@ -143,29 +159,6 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
             </g>
           ))}
 
-          {/* Target Amount Line */}
-          {targetAmount <= maxVal && (
-            <g>
-              <line
-                x1={padding.left}
-                y1={getY(targetAmount)}
-                x2={width - padding.right}
-                y2={getY(targetAmount)}
-                stroke="#ff9500"
-                strokeWidth="1.5"
-                strokeDasharray="4 4"
-              />
-              <text
-                x={width - padding.right - 4}
-                y={getY(targetAmount) - 6}
-                textAnchor="end"
-                className="text-[10px] fill-[#ff9500] font-mono font-medium"
-              >
-                FIRE目標 {formatYen(targetAmount)}
-              </text>
-            </g>
-          )}
-
           {/* Areas */}
           <path d={createAreaPath('bull')} fill="url(#bullGrad)" />
           <path d={createAreaPath('base')} fill="url(#baseGrad)" />
@@ -193,6 +186,14 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
             strokeDasharray="5 3"
             strokeLinecap="round"
           />
+          <path
+            d={data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(d.split ?? 0)}`).join(' ')}
+            fill="none"
+            stroke="#af52de"
+            strokeWidth="2.5"
+            strokeDasharray="7 3"
+            strokeLinecap="round"
+          />
 
           {/* X Axis labels */}
           {data.map((d, i) => {
@@ -201,11 +202,12 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
                 <text
                   key={i}
                   x={getX(i)}
-                  y={height - 12}
+                  y={height - 28}
                   textAnchor="middle"
                   className="text-[11px] fill-[#1d1d1f]/60 dark:fill-[#f5f5f7]/60 font-mono"
                 >
-                  {d.label || `${d.year}年目`}
+                  <tspan x={getX(i)} dy="0">{d.label || `${d.year}年目`}</tspan>
+                  {typeof d.age === 'number' && <tspan x={getX(i)} dy="14">({d.age})</tspan>}
                 </text>
               );
             }
@@ -229,6 +231,14 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
                 cy={getY(data[hoverIndex].bull)}
                 r="4.5"
                 fill="#0071e3"
+                stroke="#ffffff"
+                strokeWidth="2"
+              />
+              <circle
+                cx={getX(hoverIndex)}
+                cy={getY(data[hoverIndex].split ?? 0)}
+                r="4.5"
+                fill="#af52de"
                 stroke="#ffffff"
                 strokeWidth="2"
               />
@@ -267,8 +277,7 @@ export const SimulationLineChart: React.FC<SimulationLineChartProps> = ({ data, 
         </svg>
       </div>
 
-      <div className="flex items-center justify-between text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-4 px-1">
-        <span>※ 過去実績と複利計算に基づく3シナリオ比較推移</span>
+      <div className="flex items-center justify-end text-[11px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 mt-4 px-1">
         <span className="font-mono">{activePoint.label || `${activePoint.year}年目`}</span>
       </div>
     </div>
@@ -369,17 +378,6 @@ export const CoverageGauge: React.FC<CoverageGaugeProps> = ({
         </div>
       </div>
 
-      <div className="text-xs text-center mt-3 text-[#1d1d1f]/70 dark:text-[#f5f5f7]/70 font-mono">
-        {monthlyDividend >= monthlyExpenses ? (
-          <span className="text-[#34c759] font-medium">
-            余剰配当: +{(monthlyDividend - monthlyExpenses).toFixed(1)} 万円/月 (再投資可能)
-          </span>
-        ) : (
-          <span>
-            完全FIREまであと <strong className="text-[#ff9500]">{(monthlyExpenses - monthlyDividend).toFixed(1)} 万円/月</strong> 不足
-          </span>
-        )}
-      </div>
     </div>
   );
 };
@@ -439,7 +437,7 @@ export const PortfolioDonutChart: React.FC<PortfolioDonutChartProps> = ({ items,
     <div className="w-full bg-transparent transition-colors">
       <div className="flex flex-col items-center gap-4">
         {/* Donut graphic with Central Total Assets */}
-        <div className="relative flex w-full max-w-[360px] items-center justify-center">
+        <div className="relative flex w-full max-w-[320px] items-center justify-center">
           <svg viewBox="0 0 240 240" className="h-auto w-full" role="img">
             {slices.map((slice) => {
               const title = `${slice.label}: ${slice.value.toLocaleString()}万円 (${slice.percentage.toFixed(1)}%)`;

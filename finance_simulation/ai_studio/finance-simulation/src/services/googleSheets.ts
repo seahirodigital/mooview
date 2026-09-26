@@ -43,7 +43,7 @@ export function formatDataForGoogleSheets(state: FinanceSheetState) {
     ...state.assets.map((asset: any) => [asset.category, asset.name, asset.ticker || '', asset.shares || 0, asset.averageCost || 0, asset.currentPrice || '', asset.amount, asset.institution || '']),
   ];
   const dividendRows = [
-    ['ティッカー', '銘柄名', '市場', '投資額(万円)', '想定利回り(%)', '分配頻度'],
+    ['ティッカー', '銘柄名', '市場', '投資額(万円)', '想定利回り(%)', '分配頻度', 'ポートフォリオ除外'],
     ...state.dividendStocks.map((stock: any) => [
       stock.ticker,
       stock.name,
@@ -51,6 +51,7 @@ export function formatDataForGoogleSheets(state: FinanceSheetState) {
       stock.investedAmount,
       stock.estimatedYield,
       stock.customFrequencyLabel || stock.frequency || 'monthly',
+      Boolean(stock.excludeFromPortfolio),
     ]),
   ];
   const expensesRows = [

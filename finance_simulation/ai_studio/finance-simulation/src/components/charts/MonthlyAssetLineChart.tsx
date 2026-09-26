@@ -19,6 +19,8 @@ const SERIES: Array<{ key: SeriesKey; label: string; color: string }> = [
   { key: 'investmentCapacity', label: '投資余力（累積余剰）', color: '#5ac8fa' },
 ];
 
+const STACKED_SERIES: SeriesKey[] = ['coreStocks', 'dividendStocks', 'cash', 'investmentCapacity'];
+
 const formatAmount = (value: number, masked: boolean) => masked ? '***' : `${Math.round(value).toLocaleString()}万円`;
 
 interface MonthlyAssetLineChartProps {
@@ -37,6 +39,17 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
     [visibleKeys],
   );
 
+  // 総資産推計以外は、資産を下から順に積み上げた累積値として描画する。
+  const chartData = useMemo(() => data.map((point) => {
+    let cumulative = 0;
+    const stackedPoint = { ...point };
+    STACKED_SERIES.forEach((key) => {
+      cumulative += point[key];
+      stackedPoint[key] = cumulative;
+    });
+    return stackedPoint;
+  }), [data]);
+
   if (data.length === 0) return null;
 
   const width = 900;
@@ -44,15 +57,15 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
   const padding = { top: 30, right: 28, bottom: 58, left: 74 };
   const graphWidth = width - padding.left - padding.right;
   const graphHeight = height - padding.top - padding.bottom;
-  const visibleValues = data.flatMap((point) => visibleSeries.map((series) => point[series.key]));
+  const visibleValues = chartData.flatMap((point) => visibleSeries.map((series) => point[series.key]));
   const visibleMinimum = Math.min(...visibleValues);
   const visibleMaximum = Math.max(...visibleValues);
   const visibleRange = Math.max(visibleMaximum - visibleMinimum, Math.abs(visibleMaximum) * 0.08, 1);
-  const minY = visibleMinimum - visibleRange * 0.16;
-  const maxY = visibleMaximum + visibleRange * 0.16;
+  const minY = Math.max(0, visibleMinimum - visibleRange * 0.16);
+  const maxY = Math.max(minY + 1, visibleMaximum + visibleRange * 0.16);
   const getX = (index: number) => padding.left + (index / Math.max(data.length - 1, 1)) * graphWidth;
   const getY = (value: number) => padding.top + graphHeight - ((value - minY) / Math.max(maxY - minY, 1)) * graphHeight;
-  const createPath = (key: SeriesKey) => data
+  const createPath = (key: SeriesKey) => chartData
     .map((point, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(point[key])}`)
     .join(' ');
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
@@ -60,7 +73,7 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
     return { value, y: getY(value) };
   });
   const currentIndex = hoverIndex ?? data.length - 1;
-  const currentPoint = data[currentIndex];
+  const currentPoint = chartData[currentIndex];
   const labelStep = Math.max(1, Math.ceil(data.length / 8));
 
   const toggleSeries = (key: SeriesKey) => {
@@ -131,14 +144,14 @@ export const MonthlyAssetLineChart: React.FC<MonthlyAssetLineChartProps> = ({ da
             {visibleSeries.map((series) => (
               <path key={series.key} d={createPath(series.key)} fill="none" stroke={series.color} strokeWidth={activeKey === series.key ? 3.5 : 2.25} strokeLinecap="round" strokeLinejoin="round" opacity={activeKey === series.key ? 1 : 0.72} />
             ))}
-            {visibleSeries.flatMap((series) => data.map((point, index) => (
+            {visibleSeries.flatMap((series) => chartData.map((point, index) => (
               <circle key={`${series.key}-${index}`} cx={getX(index)} cy={getY(point[series.key])} r={hoverIndex === index ? 5 : 3} fill={series.color} stroke="#ffffff" strokeWidth="1.5" className="cursor-pointer" onMouseEnter={() => setHoverIndex(index)} onFocus={() => setHoverIndex(index)} tabIndex={0}>
                 <title>{`${point.label} ${series.label}: ${formatAmount(point[series.key], masked)}`}</title>
               </circle>
             )))}
           </g>
-          {data.map((point, index) => {
-            if (index % labelStep !== 0 && index !== data.length - 1) return null;
+          {chartData.map((point, index) => {
+            if (index % labelStep !== 0 && index !== chartData.length - 1) return null;
             return <text key={point.label} x={getX(index)} y={height - 25} textAnchor="middle" className="fill-[#1d1d1f]/55 dark:fill-[#f5f5f7]/60 font-mono text-[10px]">{point.label}</text>;
           })}
         </svg>

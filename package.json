@@ -10,6 +10,8 @@
     "dev": "tsx server.ts",
     "build:web": "vite build",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild server/discordAutomationWorker.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/discord-automation-worker.cjs",
+    "verify:finance-navigation": "node scripts/verify-finance-navigation.mjs",
+    "verify:production-bundle": "node scripts/verify-finance-navigation.mjs --bundle",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit"
   },

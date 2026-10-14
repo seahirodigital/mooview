@@ -1,0 +1,39 @@
+name: 本番品質検査
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production-artifact:
+    name: 財務導線と本番バンドル
+    runs-on: ubuntu-latest
+    steps:
+      - name: ソースを取得
+        uses: actions/checkout@v4
+
+      - name: Node.jsを設定
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係を固定版で復元
+        run: npm ci
+
+      - name: 財務導線を検査
+        run: npm run verify:finance-navigation
+
+      - name: 型検査
+        run: npm run lint
+
+      - name: 本番ビルド
+        run: npm run build
+
+      - name: 生成済み本番バンドルを検査
+        run: npm run verify:production-bundle

@@ -890,7 +890,7 @@ export const AssetManagementTab: React.FC = () => {
 
                 {/* Timeline columns: 1月のみ年を記載、横幅スリム化 */}
                 {timelineColumns.map((col) => {
-                  const isCurrent = col.isCurrent || col.id === '2026-09';
+                  const isCurrent = Boolean(col.isCurrent);
                   const colCustomStyle = getResolvedStyle('header_month', col.id);
 
                   return (

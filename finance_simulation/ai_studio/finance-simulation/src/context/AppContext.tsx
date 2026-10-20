@@ -40,9 +40,11 @@ const normalizeCurrentTimeline = (columns: TimelineColumn[]): TimelineColumn[] =
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
-  const currentIndex = columns.findIndex((column) => column.year === currentYear && column.month === currentMonth);
-  if (currentIndex < 0) return columns;
-  return columns.map((column, index) => ({ ...column, isCurrent: index === currentIndex }));
+  return columns.map((column) => ({
+    ...column,
+    // 保存済みの古いフラグは使わず、実際の年月と一致する列だけを現在扱いにする。
+    isCurrent: column.year === currentYear && column.month === currentMonth,
+  }));
 };
 
 export interface CalculatedDividend {

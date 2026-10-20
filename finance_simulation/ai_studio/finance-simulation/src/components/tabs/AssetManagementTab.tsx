@@ -528,6 +528,12 @@ export const AssetManagementTab: React.FC = () => {
   // Find current month index (2026年9月)
   const currentMonthIdx = timelineColumns.findIndex(c => c.isCurrent);
   const safeCurrentIdx = currentMonthIdx !== -1 ? currentMonthIdx : 0;
+  const currentMonthKey = new Date().getFullYear() * 12 + new Date().getMonth();
+  const isPastMonth = (column: TimelineColumn) => (
+    Number.isInteger(column.year)
+    && Number.isInteger(column.month)
+    && column.year * 12 + column.month - 1 < currentMonthKey
+  );
 
   // Compute accumulated surplus for each column
   // Future months accumulate surplus from now; past months show current snapshot or past progress
@@ -572,6 +578,11 @@ export const AssetManagementTab: React.FC = () => {
   });
   let accumulatedCashflow = 0;
   timelineColumns.forEach((col, idx) => {
+    // 過去月は締め済みの元帳値だけを使う。現時点の現金残高では補完しない。
+    if (isPastMonth(col)) {
+      cashPoolByCol[col.id] = Number(monthlyOverrides.prog_cash_pool?.[col.id] ?? 0) || 0;
+      return;
+    }
     if (idx > safeCurrentIdx) accumulatedCashflow += columnTotals[idx - 1]?.surplus || 0;
     // 家賃口座は当月家賃を先に引き、翌月以降は差引余剰の累積も反映する。
     const rentDeduction = hasRentAccount && rentInCash ? (rentCumulativeByCol[col.id] || 0) : 0;
@@ -583,7 +594,10 @@ export const AssetManagementTab: React.FC = () => {
       const current = previous.prog_cash_pool || {};
       const nextRow = { ...current };
       let changed = false;
-      Object.entries(cashPoolByCol).forEach(([colId, amount]) => {
+      timelineColumns.forEach((column) => {
+        if (isPastMonth(column)) return;
+        const colId = column.id;
+        const amount = cashPoolByCol[colId];
         if (nextRow[colId] !== amount) {
           nextRow[colId] = amount;
           changed = true;

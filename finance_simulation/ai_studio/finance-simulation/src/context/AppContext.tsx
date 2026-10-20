@@ -36,6 +36,12 @@ const normalizeSimulationYears = (value: unknown): number => {
   const years = Number(value);
   return Number.isFinite(years) && years >= 0 && years <= 10 ? years : 2;
 };
+const isPastTimelineColumn = (column: TimelineColumn, now = new Date()): boolean => {
+  if (!Number.isInteger(column.year) || !Number.isInteger(column.month)) return false;
+  const currentMonthKey = now.getFullYear() * 12 + now.getMonth();
+  const columnMonthKey = column.year * 12 + column.month - 1;
+  return columnMonthKey < currentMonthKey;
+};
 const normalizeCurrentTimeline = (columns: TimelineColumn[]): TimelineColumn[] => {
   const now = new Date();
   const currentYear = now.getFullYear();
@@ -1291,8 +1297,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   }, [timelineColumns, monthlyOverrides]);
 
-  // 保有資産と月次の資産行は同じ元帳として扱う。どちらで直しても、全月の表示値を
-  // 同じ区分合計へ即時反映し、古いスプシ値やローカル上書きで元に戻るのを防ぐ。
+  // 保有資産は現在月以降だけへ連動する。過去月は月末に保存された元帳値を保持する。
   useEffect(() => {
     const hasRentAccount = assets.some((asset) => {
       const name = String(asset.name || '').replace(/[\s　]/g, '');
@@ -1302,15 +1307,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const monthlyRentFor = (column: TimelineColumn) => expenses
       .filter((item) => String(item.name || '').replace(/[\s　]/g, '').includes('家賃'))
       .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-    const currentIndex = timelineColumns.findIndex((column) => column && column.isCurrent);
     const rentInCash = assets.some((asset) => {
       const name = String(asset.name || '').replace(/[\s　]/g, '');
       return asset.category === 'cash' && name.includes('家賃口座');
     });
     let accumulatedRent = 0;
     const rentCumulativeByCol: Record<string, number> = {};
-    timelineColumns.forEach((column, index) => {
-      if (index > (currentIndex >= 0 ? currentIndex : 0)) accumulatedRent += monthlyRentFor(column);
+    timelineColumns.forEach((column) => {
+      const isCurrent = !isPastTimelineColumn(column)
+        && column.year === new Date().getFullYear()
+        && column.month === new Date().getMonth() + 1;
+      if (!isPastTimelineColumn(column) && !isCurrent) accumulatedRent += monthlyRentFor(column);
       rentCumulativeByCol[column.id] = Math.round(accumulatedRent * 10) / 10;
     });
     const categoryTotals: Record<string, number> = {
@@ -1334,6 +1341,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       Object.entries(categoryTotals).forEach(([rowId, baseAmount]) => {
         const row = { ...(next[rowId] || {}) };
         timelineColumns.forEach((column) => {
+          // 締め済み月は月末スナップショットであり、現在の資産編集では更新しない。
+          if (isPastTimelineColumn(column)) return;
           let amount = baseAmount;
           if (rowId === 'prog_cash_pool' && hasRentAccount && rentInCash) amount -= rentCumulativeByCol[column.id] || 0;
           if (rowId.startsWith('prog_category_')) {
@@ -1434,9 +1443,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     propagateToFuture: boolean = true
   ) => {
     pushHistory();
+    const targetColumn = timelineColumns.find((column) => column.id === colId);
+    const isPastColumn = Boolean(targetColumn && isPastTimelineColumn(targetColumn));
     setMonthlyOverrides(prev => {
       const itemMap = { ...(prev[itemId] || {}) };
-      if (!propagateToFuture) {
+      // 過去月の訂正は当該月だけに留め、現在値・将来予測へ波及させない。
+      if (!propagateToFuture || isPastColumn) {
         itemMap[colId] = amount;
       } else {
         const startIdx = timelineColumns.findIndex(c => c.id === colId);
@@ -1455,7 +1467,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return next;
     });
 
-    // 月次表の資産区分を編集した時点で、月を問わず保有資産へ反映する。
+    // 過去月の訂正は現在の保有資産へ逆流させない。
     const categoryByRow: Record<string, AssetItem['category']> = {
       prog_core_stocks: 'core_stocks',
       prog_dividend_stocks: 'dividend_stocks',
@@ -1464,7 +1476,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     const category = categoryByRow[itemId]
       || customAssetCategories.find((item) => monthlyCategoryRowId(item.id) === itemId)?.id;
-    if (category) {
+    if (category && !isPastColumn) {
       setCategoryTotal(category, amount);
     }
   };

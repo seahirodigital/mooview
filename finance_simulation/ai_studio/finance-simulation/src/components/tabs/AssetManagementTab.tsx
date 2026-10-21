@@ -126,8 +126,6 @@ export const AssetManagementTab: React.FC = () => {
     dividendStocksTotal,
     totalInvestedDividends,
     calculatedDividends,
-    totalMonthlyDividend,
-    totalAnnualDividend,
     overallNetYield,
     illiquidTotal,
     netWorthTotal,
@@ -210,6 +208,21 @@ export const AssetManagementTab: React.FC = () => {
       localStorage.setItem('finance_simulation_mask_asset_amounts', String(maskAssetAmounts));
     } catch {}
   }, [maskAssetAmounts]);
+
+  // 2563の表示状態は資産管理の配当円グラフだけに保存する。
+  const [include2563Dividend, setInclude2563Dividend] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('finance_simulation_include_2563_dividend') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('finance_simulation_include_2563_dividend', String(include2563Dividend));
+    } catch {}
+  }, [include2563Dividend]);
 
   const [isCashflowTableExpanded, setIsCashflowTableExpanded] = useState(true);
   const [isPortfolioTableExpanded, setIsPortfolioTableExpanded] = useState(true);
@@ -739,7 +752,12 @@ export const AssetManagementTab: React.FC = () => {
       value: Number(item.stock.investedAmount) || 0,
       color: ['#0071e3', '#34c759', '#ff9500', '#af52de', '#ff2d55', '#5856d6', '#00c7be'][index % 7],
     }));
-  const monthlyDividendChartItems = calculatedDividends
+  const displayedDividendItems = calculatedDividends
+    .filter((item) => include2563Dividend || String(item.stock.ticker).trim() !== '2563');
+  const displayedAnnualDividend = Math.round(
+    displayedDividendItems.reduce((sum, item) => sum + (Number(item.annualNet) || 0), 0) * 10,
+  ) / 10;
+  const monthlyDividendChartItems = displayedDividendItems
     .filter((item) => Number(item.monthlyNet) > 0)
     .map((item, index) => ({
       id: item.stock.id,
@@ -774,8 +792,8 @@ export const AssetManagementTab: React.FC = () => {
   return (
     <div className="space-y-6 pb-16">
       {/* 資産内訳: 表と同じ月次元帳を参照するモバイル優先サマリー */}
-      <section className="grid grid-cols-1 gap-5 lg:grid-cols-3 lg:items-start">
-          <div className="flex min-h-[420px] flex-col items-center justify-start bg-transparent">
+      <section className="flex snap-x snap-mandatory gap-5 overflow-x-auto pb-2 lg:grid lg:grid-cols-3 lg:items-start lg:overflow-visible lg:pb-0">
+          <div className="flex min-h-[420px] w-[88vw] shrink-0 snap-center flex-col items-center justify-start bg-transparent lg:w-auto lg:shrink">
             <div className="mb-1 flex min-h-[54px] w-full items-center justify-end gap-1">
               <button
                 type="button"
@@ -831,16 +849,31 @@ export const AssetManagementTab: React.FC = () => {
             {chartSlices.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-xs text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">表示できる資産がありません。</p>}
           </div>
           </div>
-          <div className="flex min-h-[420px] flex-col items-center bg-transparent">
+          <div className="flex min-h-[420px] w-[88vw] shrink-0 snap-center flex-col items-center bg-transparent lg:w-auto lg:shrink">
             <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
-              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">年間受取配当 (手取り・2563込)</div>
-              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{totalAnnualDividend.toFixed(1)} 万円</div>
+              <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">年間受取配当 {include2563Dividend ? '(手取り・2563込)' : '(手取り・2563除外)'}</div>
+              <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{displayedAnnualDividend.toFixed(1)} 万円</div>
             </div>
             <div className="min-h-0 w-full flex-1">
-              <PortfolioDonutChart items={monthlyDividendChartItems} totalLabel="月額配当 (2563込)" />
+              <PortfolioDonutChart
+                items={monthlyDividendChartItems}
+                totalLabel={include2563Dividend ? '月額配当 (2563込)' : '月額配当 (2563除外)'}
+                centerAccessory={
+                  <label className="inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded border border-black/15 bg-white/90 px-1 py-0.5 text-[8px] font-semibold text-[#1d1d1f] shadow-sm dark:border-white/20 dark:bg-[#1d1d1f]/90 dark:text-[#f5f5f7]" title="2563の配当を表示・非表示に切り替えます">
+                    <input
+                      type="checkbox"
+                      checked={include2563Dividend}
+                      onChange={(event) => setInclude2563Dividend(event.target.checked)}
+                      className="h-2.5 w-2.5 accent-[#0071e3]"
+                      aria-label="2563の配当を円グラフと配当集計に含める"
+                    />
+                    <span>2563 {include2563Dividend ? 'ON' : 'OFF'}</span>
+                  </label>
+                }
+              />
             </div>
           </div>
-          <div className="flex min-h-[420px] flex-col items-center bg-transparent">
+          <div className="flex min-h-[420px] w-[88vw] shrink-0 snap-center flex-col items-center bg-transparent lg:w-auto lg:shrink">
             <div className="mb-1 flex min-h-[54px] w-full flex-col items-center justify-center text-center">
               <div className="text-[10px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60">税引後 加重平均利回り</div>
               <div className="font-mono text-lg font-bold text-[#0071e3] dark:text-[#2997ff]">{overallNetYield.toFixed(2)} %</div>

@@ -39,6 +39,8 @@ export interface DividendStock {
   averageCost?: number; // 平均取得単価 (円またはドル)
   currentPrice?: number; // MooViewチャートビューで取得した現在値
   estimatedYield: number; // Annual yield % (e.g. 13.0 for 13%)
+  /** 配当タブで手入力した利回り。資産一覧との同期時も自動取得値で上書きしない。 */
+  estimatedYieldIsManual?: boolean;
   usTaxRate: number; // e.g. 10 (%)
   jpTaxRate: number; // e.g. 20 (%)
   frequency?: DividendFrequency; // 毎月型('monthly') | 年2回型('semi_annual') | 年4回型('quarterly') | 年1回型('annual') | カスタム('custom')
@@ -73,6 +75,8 @@ export interface AssetItem {
   averageCost?: number; // 平均取得単価 (円またはドル)
   currentPrice?: number; // MooViewチャートビューで取得した現在値
   estimatedYield?: number; // 配当利回り (%)
+  /** 配当タブまたは資産一覧で手入力した利回り。 */
+  estimatedYieldIsManual?: boolean;
   payoutDay?: number; // 支払日
   payoutMonths?: number[]; // 支払月
   institution?: string; // e.g. 住信SBI, MUFJ, 新生, JRE, 楽天, Webull

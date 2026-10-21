@@ -8,10 +8,10 @@ import { Plus, Calendar, Sparkles, X } from 'lucide-react';
 export const DividendTab: React.FC = () => {
   const {
     calculatedDividends,
+    totalInvestedDividends,
     totalMonthlyDividend,
     totalAnnualDividend,
     overallNetYield,
-    dividendCoverageRate,
     addDividendStock,
     updateDividendStock,
     deleteDividendStock,
@@ -197,19 +197,19 @@ export const DividendTab: React.FC = () => {
       {/* KPI Minimal Ribbon (Flat Spreadsheet Style - No rounded cards) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-2">
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">合計投資額（円グラフ対象）</span>
+          <div className="text-xl sm:text-2xl font-bold font-mono text-[#1d1d1f] dark:text-[#f5f5f7] tabular-nums mt-1">
+            {totalInvestedDividends.toFixed(1)} 万円
+          </div>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">除外設定を反映</span>
+        </div>
+
+        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
           <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">月額受取配当 (手取り・2563込)</span>
           <div className="text-xl sm:text-2xl font-bold font-mono text-[#34c759] tabular-nums mt-1">
             {totalMonthlyDividend.toFixed(1)} 万円
           </div>
           <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50 font-mono">配当入金合計</span>
-        </div>
-
-        <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">税引後 加重平均利回り</span>
-          <div className="text-xl sm:text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
-            {overallNetYield.toFixed(2)} %
-          </div>
-          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">手取りベース実質利回り</span>
         </div>
 
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
@@ -221,10 +221,11 @@ export const DividendTab: React.FC = () => {
         </div>
 
         <div className="p-3.5 border border-black/10 dark:border-white/10 bg-[#f5f5f7]/80 dark:bg-white/5 transition-colors">
-          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">カバー率</span>
+          <span className="text-[11px] text-[#1d1d1f]/60 dark:text-[#f5f5f7]/60 block font-medium">税引後 加重平均利回り</span>
           <div className="text-xl sm:text-2xl font-bold font-mono text-[#0071e3] dark:text-[#2997ff] tabular-nums mt-1">
-            {dividendCoverageRate.toFixed(1)}%
+            {overallNetYield.toFixed(2)} %
           </div>
+          <span className="text-[10px] text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">手取りベース実質利回り</span>
         </div>
 
       </div>

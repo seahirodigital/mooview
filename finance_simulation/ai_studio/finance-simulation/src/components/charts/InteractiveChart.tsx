@@ -393,18 +393,11 @@ export interface DonutItem {
 export interface PortfolioDonutChartProps {
   items: DonutItem[];
   totalLabel?: string;
+  centerAccessory?: React.ReactNode;
 }
 
-export const PortfolioDonutChart: React.FC<PortfolioDonutChartProps> = ({ items, totalLabel = '合計' }) => {
+export const PortfolioDonutChart: React.FC<PortfolioDonutChartProps> = ({ items, totalLabel = '合計', centerAccessory }) => {
   const totalValue = items.reduce((sum, item) => sum + item.value, 0);
-
-  if (totalValue === 0) {
-    return (
-      <div className="p-8 text-center text-xs bg-[#f5f5f7]/80 dark:bg-white/5 rounded-3xl text-[#1d1d1f]/50 dark:text-[#f5f5f7]/50">
-        データがありません
-      </div>
-    );
-  }
 
   let accumulatedPercent = 0;
   const piePoint = (radius: number, angle: number) => ({
@@ -439,6 +432,7 @@ export const PortfolioDonutChart: React.FC<PortfolioDonutChartProps> = ({ items,
         {/* Donut graphic with Central Total Assets */}
         <div className="relative flex w-full max-w-[320px] items-center justify-center">
           <svg viewBox="0 0 240 240" className="h-auto w-full" role="img">
+            {totalValue === 0 && <circle cx="120" cy="120" r="106" className="fill-[#f5f5f7] dark:fill-white/10" />}
             {slices.map((slice) => {
               const title = `${slice.label}: ${slice.value.toLocaleString()}万円 (${slice.percentage.toFixed(1)}%)`;
               if (slice.percentage >= 99.99) {
@@ -464,6 +458,11 @@ export const PortfolioDonutChart: React.FC<PortfolioDonutChartProps> = ({ items,
             <text x="120" y="131" textAnchor="middle" className="fill-[#0071e3] dark:fill-[#2997ff]" fontSize="15" fontWeight="700">{totalValue.toLocaleString()}</text>
             <text x="120" y="143" textAnchor="middle" className="fill-[#1d1d1f]/60 dark:fill-[#f5f5f7]/60" fontSize="8">万円</text>
           </svg>
+          {centerAccessory && (
+            <div className="absolute left-1/2 top-[61%] z-10 -translate-x-1/2">
+              {centerAccessory}
+            </div>
+          )}
         </div>
 
       </div>

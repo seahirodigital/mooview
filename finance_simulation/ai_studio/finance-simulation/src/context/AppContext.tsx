@@ -242,13 +242,21 @@ function reconcileLinkedPortfolio(
     const shares = assetWins ? (asset.shares ?? stock.shares) : (stock.shares ?? asset.shares);
     const averageCost = assetWins ? (asset.averageCost ?? stock.averageCost) : (stock.averageCost ?? asset.averageCost);
     const currentPrice = assetWins ? (asset.currentPrice ?? stock.currentPrice) : (stock.currentPrice ?? asset.currentPrice);
-    const estimatedYield = assetWins ? (asset.estimatedYield ?? stock.estimatedYield) : (stock.estimatedYield ?? asset.estimatedYield ?? 0);
+    // 利回りを手入力した側を、画面遷移・自動同期・銘柄情報の再照合より常に優先する。
+    const estimatedYieldIsManual = Boolean(asset.estimatedYieldIsManual || stock.estimatedYieldIsManual);
+    const estimatedYield = stock.estimatedYieldIsManual && !asset.estimatedYieldIsManual
+      ? stock.estimatedYield
+      : asset.estimatedYieldIsManual && !stock.estimatedYieldIsManual
+        ? asset.estimatedYield
+        : assetWins
+          ? (asset.estimatedYield ?? stock.estimatedYield)
+          : (stock.estimatedYield ?? asset.estimatedYield ?? 0);
     const payoutDay = assetWins ? (asset.payoutDay ?? stock.payoutDay) : (stock.payoutDay ?? asset.payoutDay);
     const payoutMonths = assetWins ? (asset.payoutMonths ?? stock.payoutMonths) : (stock.payoutMonths ?? asset.payoutMonths);
     const note = assetWins ? (asset.note ?? stock.note) : (stock.note ?? asset.note);
     return {
-      asset: { ...asset, linkedDividendId: stock.id, category: 'dividend_stocks', name, ticker, amount, shares, averageCost, currentPrice, estimatedYield, payoutDay, payoutMonths, note },
-      stock: { ...stock, linkedAssetId: asset.id, ticker, name, investedAmount: amount, shares, averageCost, currentPrice, estimatedYield: estimatedYield ?? 0, payoutDay, payoutMonths, note },
+      asset: { ...asset, linkedDividendId: stock.id, category: 'dividend_stocks', name, ticker, amount, shares, averageCost, currentPrice, estimatedYield, estimatedYieldIsManual, payoutDay, payoutMonths, note },
+      stock: { ...stock, linkedAssetId: asset.id, ticker, name, investedAmount: amount, shares, averageCost, currentPrice, estimatedYield: estimatedYield ?? 0, estimatedYieldIsManual, payoutDay, payoutMonths, note },
     };
   };
 
@@ -263,6 +271,7 @@ function reconcileLinkedPortfolio(
     averageCost: asset.averageCost,
     currentPrice: asset.currentPrice,
     estimatedYield: asset.estimatedYield ?? 0,
+    estimatedYieldIsManual: asset.estimatedYieldIsManual,
     usTaxRate: 0,
     jpTaxRate: 20,
     payoutDay: asset.payoutDay,
@@ -283,6 +292,7 @@ function reconcileLinkedPortfolio(
     averageCost: stock.averageCost,
     currentPrice: stock.currentPrice,
     estimatedYield: stock.estimatedYield,
+    estimatedYieldIsManual: stock.estimatedYieldIsManual,
     payoutDay: stock.payoutDay,
     payoutMonths: stock.payoutMonths,
     institution: stock.market === 'US' ? '証券口座' : '金融機関',
@@ -873,11 +883,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateDividendStock = (id: string, updates: Partial<DividendStock>) => {
     portfolioPreferenceRef.current = 'dividend';
     let finalUpdates = { ...updates };
+    if (updates.estimatedYield !== undefined) {
+      finalUpdates.estimatedYieldIsManual = true;
+    }
     if (updates.ticker) {
       const lookup = lookupYahooFinanceTicker(updates.ticker);
       if (lookup) {
         if (!finalUpdates.name) finalUpdates.name = lookup.name;
-        if (finalUpdates.estimatedYield === undefined) finalUpdates.estimatedYield = lookup.dividendYield;
+        if (finalUpdates.estimatedYield === undefined) {
+          finalUpdates.estimatedYield = lookup.dividendYield;
+          finalUpdates.estimatedYieldIsManual = false;
+        }
         if (finalUpdates.payoutDay === undefined) finalUpdates.payoutDay = lookup.payoutDay;
         finalUpdates.market = lookup.market;
       }
@@ -924,6 +940,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 averageCost: updatedItem.averageCost !== undefined ? updatedItem.averageCost : asset.averageCost,
                 currentPrice: updatedItem.currentPrice !== undefined ? updatedItem.currentPrice : asset.currentPrice,
                 estimatedYield: updatedItem.estimatedYield !== undefined ? updatedItem.estimatedYield : asset.estimatedYield,
+                estimatedYieldIsManual: updatedItem.estimatedYieldIsManual !== undefined ? updatedItem.estimatedYieldIsManual : asset.estimatedYieldIsManual,
                 payoutDay: updatedItem.payoutDay !== undefined ? updatedItem.payoutDay : asset.payoutDay,
                 payoutMonths: updatedItem.payoutMonths !== undefined ? updatedItem.payoutMonths : asset.payoutMonths,
                 note: updatedItem.note !== undefined ? updatedItem.note : asset.note,
@@ -943,6 +960,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               averageCost: updatedItem.averageCost,
               currentPrice: updatedItem.currentPrice,
               estimatedYield: updatedItem.estimatedYield,
+              estimatedYieldIsManual: updatedItem.estimatedYieldIsManual,
               payoutDay: updatedItem.payoutDay,
               payoutMonths: updatedItem.payoutMonths,
               institution: updatedItem.market === 'US' ? 'Webull証券' : 'SBI証券',
@@ -1024,6 +1042,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateAsset = (id: string, updates: Partial<AssetItem>) => {
     portfolioPreferenceRef.current = 'asset';
     let finalUpdates = { ...updates };
+    if (updates.estimatedYield !== undefined) {
+      finalUpdates.estimatedYieldIsManual = true;
+    }
     if (updates.ticker) {
       const lookup = lookupYahooFinanceTicker(updates.ticker);
       if (lookup && !finalUpdates.name) {
@@ -1072,6 +1093,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 averageCost: updatedAsset.averageCost !== undefined ? updatedAsset.averageCost : copy[index].averageCost,
                 currentPrice: updatedAsset.currentPrice !== undefined ? updatedAsset.currentPrice : copy[index].currentPrice,
                 estimatedYield: updatedAsset.estimatedYield !== undefined ? updatedAsset.estimatedYield : copy[index].estimatedYield,
+                estimatedYieldIsManual: updatedAsset.estimatedYieldIsManual !== undefined ? updatedAsset.estimatedYieldIsManual : copy[index].estimatedYieldIsManual,
                 payoutDay: updatedAsset.payoutDay !== undefined ? updatedAsset.payoutDay : copy[index].payoutDay,
                 payoutMonths: updatedAsset.payoutMonths !== undefined ? updatedAsset.payoutMonths : copy[index].payoutMonths,
                 note: updatedAsset.note !== undefined ? updatedAsset.note : copy[index].note,
@@ -1093,6 +1115,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 averageCost: updatedAsset.averageCost || 0,
                 currentPrice: updatedAsset.currentPrice,
                 estimatedYield: updatedAsset.estimatedYield || 10.0,
+                estimatedYieldIsManual: updatedAsset.estimatedYieldIsManual,
                 usTaxRate: 10,
                 jpTaxRate: 20,
                 payoutDay: updatedAsset.payoutDay || 15,

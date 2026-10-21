@@ -648,7 +648,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const effectiveStock: DividendStock = {
       ...stock,
       investedAmount: aggregatedAmount,
-      estimatedYield: Number(stock.estimatedYield) > 0 ? stock.estimatedYield : (assetYield || 0),
+      // 0%も有効な手入力値として扱い、資産一覧側の旧値へ戻さない。
+      estimatedYield: stock.estimatedYieldIsManual
+        ? stock.estimatedYield
+        : Number(stock.estimatedYield) > 0 ? stock.estimatedYield : (assetYield || 0),
     };
     let netYield = 0;
     let annualNet = 0;
